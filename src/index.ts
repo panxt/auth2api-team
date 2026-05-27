@@ -12,6 +12,7 @@ import { notifyServerReload } from "./utils/notify-reload";
 import { StatsRecorder } from "./stats/recorder";
 import { QuotaTracker } from "./usage/quota";
 import { computeCost } from "./usage/pricing";
+import { ManagedKeyStore } from "./keys/store";
 
 function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
@@ -151,6 +152,11 @@ async function startServer(): Promise<void> {
   const config = loadConfig(configPath);
   const authDir = resolveAuthDir(config["auth-dir"]);
 
+  // Merge UI-managed keys into the live api-keys map before anything reads it
+  // (quota detection, auth), so managed keys behave exactly like config keys.
+  const keyStore = new ManagedKeyStore(authDir, config["api-keys"]);
+  keyStore.load();
+
   const registry = buildRegistry(authDir);
   for (const p of registry.all()) p.manager.load();
 
@@ -207,7 +213,13 @@ async function startServer(): Promise<void> {
     quotaTracker.start(authDir);
   }
 
-  const app = createServer(config, registry, statsRecorder, quotaTracker);
+  const app = createServer(
+    config,
+    registry,
+    statsRecorder,
+    quotaTracker,
+    keyStore,
+  );
   const host = config.host || "127.0.0.1";
   const port = config.port;
 

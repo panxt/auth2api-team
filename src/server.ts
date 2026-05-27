@@ -17,6 +17,7 @@ import {
   acquireConcurrency,
   releaseConcurrency,
 } from "./ratelimit/per-key";
+import { ManagedKeyStore, ManagedKeyError } from "./keys/store";
 
 // Simple in-memory rate limiter per IP
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -62,6 +63,7 @@ export function createServer(
   registry: ProviderRegistry,
   statsRecorder?: StatsRecorder,
   quotaTracker?: QuotaTracker,
+  keyStore?: ManagedKeyStore,
 ): express.Application {
   const app = express();
   // Stats slots are seeded whenever either subsystem needs them: the recorder
@@ -293,6 +295,18 @@ export function createServer(
   app.use("/admin", requireApiKey);
   app.use("/admin", statsFinishMiddleware);
 
+  // Key management is admin-only: creating/editing keys (incl. minting new
+  // admin keys) is a privileged operation. Read-only stats keep the existing
+  // any-valid-key behavior.
+  const requireAdmin: express.RequestHandler = (_req, res, next) => {
+    const entry = res.locals.apiKey as ApiKeyEntry | undefined;
+    if (!entry?.admin) {
+      res.status(403).json({ error: { message: "Admin API key required" } });
+      return;
+    }
+    next();
+  };
+
   // GET /admin/stats — three-axis aggregated call statistics.
   //   byClient — keyed by sha256(api-key); show short hex prefix to operator
   //   byAccount — keyed by `${provider}:${email}` (upstream OAuth account)
@@ -348,6 +362,63 @@ export function createServer(
       generated_at: new Date().toISOString(),
     });
   });
+
+  // ── Key management (admin-only) ──
+  // Operates on managed-keys.json; config.yaml keys show up as read-only.
+  if (keyStore) {
+    const store = keyStore;
+
+    const handleKeyError = (err: unknown, res: express.Response): void => {
+      if (err instanceof ManagedKeyError) {
+        const status =
+          err.code === "not_found" ? 404 : err.code === "read_only" ? 409 : 400;
+        res.status(status).json({ error: { message: err.message, type: err.code } });
+        return;
+      }
+      console.error("[keys] unexpected error:", err);
+      res.status(500).json({ error: { message: "Internal server error" } });
+    };
+
+    app.get("/admin/keys", requireAdmin, (_req, res) => {
+      res.json({ keys: store.list(), generated_at: new Date().toISOString() });
+    });
+
+    // Returns the raw key ONCE so the operator can copy it; never again.
+    app.post("/admin/keys", requireAdmin, (req, res) => {
+      try {
+        const entry = store.create(req.body || {});
+        res.status(201).json({
+          key: entry.key,
+          id: hashApiKey(entry.key).slice(0, 12),
+          label: entry.label ?? null,
+          owner: entry.owner ?? null,
+          enabled: entry.enabled,
+          admin: entry.admin,
+          quota: entry.quota ?? null,
+          "rate-limit": entry["rate-limit"] ?? null,
+        });
+      } catch (err) {
+        handleKeyError(err, res);
+      }
+    });
+
+    app.patch("/admin/keys/:id", requireAdmin, (req, res) => {
+      try {
+        res.json(store.update(req.params.id, req.body || {}));
+      } catch (err) {
+        handleKeyError(err, res);
+      }
+    });
+
+    app.delete("/admin/keys/:id", requireAdmin, (req, res) => {
+      try {
+        store.delete(req.params.id);
+        res.status(204).end();
+      } catch (err) {
+        handleKeyError(err, res);
+      }
+    });
+  }
 
   app.get("/admin/accounts", (_req, res) => {
     const providers: Record<
