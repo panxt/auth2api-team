@@ -4,9 +4,25 @@ port: 8317
 # Directory to store OAuth tokens
 auth-dir: "~/.auth2api"
 
-# API keys for client authentication (clients use these to access this proxy)
+# API keys for client authentication (clients use these to access this proxy).
+# Two interchangeable forms — mix freely:
+#   1. Bare string: a plain key with no policy (enabled, non-admin, no quota).
+#   2. Object: a key with identity (label/owner), an admin flag, a monthly
+#      quota, and a per-key rate limit. Any field is optional.
+# Quota and rate-limit apply to the inference endpoints only (chat/completions,
+# responses, messages, count_tokens); /v1/models stays unmetered.
 api-keys:
-  - "your-api-key-here"
+  - "your-api-key-here"            # simple key, no limits
+  # - key: "sk-alice"
+  #   label: "alice / dev"
+  #   owner: "alice@example.com"
+  #   admin: true                  # admin keys see ALL keys in /admin/usage/keys
+  #   quota:
+  #     monthly-tokens: 50000000   # reject after 50M tokens this UTC month
+  #     monthly-cost-usd: 200      # and/or after $200 accrued cost
+  #   rate-limit:
+  #     rpm: 120                   # max requests per minute for this key
+  #     concurrency: 8             # max concurrent in-flight requests
 
 # Maximum JSON request body size
 body-limit: "200mb"
@@ -22,9 +38,22 @@ timeouts:
 #   - upstream account (provider + email)
 #   - api endpoint x model x provider
 # Events are appended to <auth-dir>/stats.jsonl and replayed on startup.
-# Query the live snapshot via GET /admin/stats (requires API key).
+# Query the live snapshot via GET /admin/stats (requires API key); each bucket
+# includes totalCostUsd computed from the pricing table below.
 stats:
   enabled: true
+
+# Per-model prices for cost accounting (USD per 1,000,000 tokens). Optional —
+# omit to use built-in defaults. Anthropic defaults track published rates;
+# codex (gpt-*) defaults are ESTIMATES, so override them here for accurate
+# cost reports. Overrides are matched by resolved model id and applied
+# retroactively (stats.jsonl is re-priced on the next replay).
+# pricing:
+#   gpt-5.5:
+#     inputPerMTok: 1.25
+#     outputPerMTok: 10
+#     cacheWritePerMTok: 0
+#     cacheReadPerMTok: 0.125
 
 # Debug logging level:
 # off = no extra logs
