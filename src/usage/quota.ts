@@ -14,6 +14,12 @@ function monthKeyOf(date: Date): string {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
+/** Seconds until the next UTC month boundary — used for the quota Retry-After. */
+export function secondsUntilMonthResetUTC(now = new Date()): number {
+  const next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0);
+  return Math.max(1, Math.ceil((next - now.getTime()) / 1000));
+}
+
 /**
  * Month-to-date token + cost consumption per API key, used to enforce monthly
  * quotas. Mirrors StatsRecorder: it replays the same `stats.jsonl` on startup

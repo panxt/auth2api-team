@@ -148,13 +148,13 @@ export class StatsRecorder {
    * (synchronous, cheap), then enqueue an append on the write stream so
    * the request response isn't blocked on fsync.
    */
-  record(input: Omit<StatsEvent, "v" | "ts">): void {
-    if (!this.enabled) return;
+  record(input: Omit<StatsEvent, "v" | "ts">): StatsEvent {
     const event: StatsEvent = {
       v: 1,
       ts: new Date().toISOString(),
       ...input,
     };
+    if (!this.enabled) return event;
     this.applyEvent(event);
     if (this.appender) {
       try {
@@ -163,6 +163,7 @@ export class StatsRecorder {
         console.error("[stats] append failed:", err?.message);
       }
     }
+    return event;
   }
 
   getSnapshot(): StatsSnapshot {

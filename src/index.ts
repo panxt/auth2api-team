@@ -10,6 +10,7 @@ import { buildRegistry, ProviderRegistry } from "./providers/registry";
 import { createServer } from "./server";
 import { notifyServerReload } from "./utils/notify-reload";
 import { StatsRecorder } from "./stats/recorder";
+import { QuotaTracker } from "./usage/quota";
 
 function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
@@ -175,7 +176,19 @@ async function startServer(): Promise<void> {
     statsRecorder.start(authDir);
   }
 
-  const app = createServer(config, registry, statsRecorder);
+  // Only run quota accounting if at least one key has a quota configured.
+  // It replays stats.jsonl for month-to-date consumption, so it works even
+  // when the recorder is disabled (the finish middleware still feeds it).
+  let quotaTracker: QuotaTracker | undefined;
+  const anyQuota = Array.from(config["api-keys"].values()).some(
+    (e) => e.quota,
+  );
+  if (anyQuota) {
+    quotaTracker = new QuotaTracker(config.pricing);
+    quotaTracker.start(authDir);
+  }
+
+  const app = createServer(config, registry, statsRecorder, quotaTracker);
   const host = config.host || "127.0.0.1";
   const port = config.port;
 

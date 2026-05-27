@@ -1,5 +1,5 @@
 import express from "express";
-import { Config, isDebugLevel } from "./config";
+import { Config, isDebugLevel, ApiKeyEntry } from "./config";
 import { ProviderRegistry } from "./providers/registry";
 import { extractApiKey, hashApiKey } from "./utils/common";
 import {
@@ -11,6 +11,12 @@ import {
   createCountTokensHandler,
 } from "./handlers/anthropic";
 import { StatsRecorder } from "./stats/recorder";
+import { QuotaTracker, secondsUntilMonthResetUTC } from "./usage/quota";
+import {
+  checkKeyRpm,
+  acquireConcurrency,
+  releaseConcurrency,
+} from "./ratelimit/per-key";
 
 // Simple in-memory rate limiter per IP
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -44,8 +50,12 @@ export function createServer(
   config: Config,
   registry: ProviderRegistry,
   statsRecorder?: StatsRecorder,
+  quotaTracker?: QuotaTracker,
 ): express.Application {
   const app = express();
+  // Stats slots are seeded whenever either subsystem needs them: the recorder
+  // for reporting, the quota tracker for live consumption feed.
+  const wantStatsSlot = !!statsRecorder || !!quotaTracker;
 
   app.use(express.json({ limit: config["body-limit"] }));
 
@@ -110,7 +120,7 @@ export function createServer(
     // Seed res.locals.stats so the stats-finish middleware can record this
     // request even if the downstream handler aborts before filling in the
     // upstream account / model / usage fields.
-    if (statsRecorder) {
+    if (wantStatsSlot) {
       const ip = req.ip || req.socket.remoteAddress || "unknown";
       const ua = (req.headers["user-agent"] as string) || "";
       res.locals.stats = {
@@ -134,7 +144,7 @@ export function createServer(
   // response completed. A guard prevents the normal finish->close sequence
   // from double-counting.
   const statsFinishMiddleware: express.RequestHandler = (req, res, next) => {
-    if (!statsRecorder) return next();
+    if (!wantStatsSlot) return next();
     let recorded = false;
     const recordStats = (override?: {
       status: "success" | "failure";
@@ -161,7 +171,7 @@ export function createServer(
       const status: "success" | "failure" =
         override?.status ??
         (res.statusCode >= 200 && res.statusCode < 300 ? "success" : "failure");
-      statsRecorder.record({
+      const input = {
         apiKeyHash: ctx.apiKeyHash,
         ip: ctx.ip,
         ua: ctx.ua,
@@ -174,7 +184,13 @@ export function createServer(
         statusCode: override?.statusCode ?? res.statusCode,
         latencyMs: Date.now() - ctx.startedAt,
         usage: ctx.usage,
-      });
+      };
+      // Record to the persistent stats log (if enabled) and feed the same
+      // event to the quota tracker (if enabled) so both stay in lockstep.
+      const event = statsRecorder
+        ? statsRecorder.record(input)
+        : { v: 1 as const, ts: new Date().toISOString(), ...input };
+      quotaTracker?.record(event);
     };
     res.on("finish", () => recordStats());
     res.on("close", () => {
@@ -186,6 +202,75 @@ export function createServer(
         });
       }
     });
+    next();
+  };
+
+  // Reject requests once the key's month-to-date consumption reaches its quota.
+  // No quota configured, or no tracker, → pass through. 429 + Retry-After
+  // (until the UTC month boundary) signals a temporary, time-bounded block.
+  const requireQuota: express.RequestHandler = (req, res, next) => {
+    const entry = res.locals.apiKey as ApiKeyEntry | undefined;
+    if (!entry?.quota || !quotaTracker) return next();
+    const consumed = quotaTracker.consumed(hashApiKey(entry.key));
+    const q = entry.quota;
+    const tokenCap = q["monthly-tokens"];
+    const costCap = q["monthly-cost-usd"];
+    if (tokenCap != null && consumed.tokens >= tokenCap) {
+      res.setHeader("Retry-After", String(secondsUntilMonthResetUTC()));
+      res
+        .status(429)
+        .json({
+          error: { message: "Monthly token quota exceeded", type: "quota_exceeded" },
+        });
+      return;
+    }
+    if (costCap != null && consumed.costUsd >= costCap) {
+      res.setHeader("Retry-After", String(secondsUntilMonthResetUTC()));
+      res
+        .status(429)
+        .json({
+          error: { message: "Monthly cost budget exceeded", type: "quota_exceeded" },
+        });
+      return;
+    }
+    next();
+  };
+
+  // Per-key RPM + concurrency, on top of the global per-IP limiter. Concurrency
+  // slots are released on both finish and close (streaming clients disconnect
+  // via close, not finish) with a once-guard so a slot is freed exactly once.
+  const enforceKeyRateLimit: express.RequestHandler = (req, res, next) => {
+    const entry = res.locals.apiKey as ApiKeyEntry | undefined;
+    const rl = entry?.["rate-limit"];
+    if (!rl) return next();
+    const keyId = hashApiKey(entry!.key);
+    if (rl.rpm != null && !checkKeyRpm(keyId, rl.rpm)) {
+      res.setHeader("Retry-After", "60");
+      res
+        .status(429)
+        .json({
+          error: { message: "Per-key request rate limit exceeded", type: "rate_limit" },
+        });
+      return;
+    }
+    if (rl.concurrency != null) {
+      if (!acquireConcurrency(keyId, rl.concurrency)) {
+        res
+          .status(429)
+          .json({
+            error: { message: "Per-key concurrency limit exceeded", type: "rate_limit" },
+          });
+        return;
+      }
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        releaseConcurrency(keyId);
+      };
+      res.on("finish", release);
+      res.on("close", release);
+    }
     next();
   };
 
@@ -266,17 +351,33 @@ export function createServer(
     res.json({ object: "list", data });
   });
 
+  // Inference routes carry quota + per-key rate limiting; /v1/models above
+  // stays cheap and unmetered.
   // Routes — OpenAI compatible
   app.post(
     "/v1/chat/completions",
+    requireQuota,
+    enforceKeyRateLimit,
     createChatCompletionsHandler(config, registry),
   );
-  app.post("/v1/responses", createResponsesHandler(config, registry));
+  app.post(
+    "/v1/responses",
+    requireQuota,
+    enforceKeyRateLimit,
+    createResponsesHandler(config, registry),
+  );
 
   // Routes — Anthropic native passthrough
-  app.post("/v1/messages", createMessagesHandler(config, registry));
+  app.post(
+    "/v1/messages",
+    requireQuota,
+    enforceKeyRateLimit,
+    createMessagesHandler(config, registry),
+  );
   app.post(
     "/v1/messages/count_tokens",
+    requireQuota,
+    enforceKeyRateLimit,
     createCountTokensHandler(config, registry),
   );
 
