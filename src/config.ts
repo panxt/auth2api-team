@@ -144,6 +144,12 @@ export function normalizeApiKeys(
         quota: item.quota,
         "rate-limit": item["rate-limit"],
       });
+    } else {
+      // Don't silently lose a misconfigured entry — a dropped key would just
+      // fail auth later with a confusing 403.
+      console.warn(
+        `[config] ignoring malformed api-keys entry (missing string "key"): ${JSON.stringify(item)}`,
+      );
     }
   }
   return map;

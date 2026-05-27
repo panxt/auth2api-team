@@ -27,6 +27,12 @@ test("checkKeyRpm allows up to the limit then blocks within the window", () => {
   assert.equal(checkKeyRpm("other", 2), true);
 });
 
+test("checkKeyRpm with rpm=0 blocks every request including the first", () => {
+  _resetForTest();
+  assert.equal(checkKeyRpm("k", 0), false);
+  assert.equal(checkKeyRpm("k", 0), false);
+});
+
 test("concurrency: acquire up to max, block beyond, release frees a slot", () => {
   _resetForTest();
   assert.equal(acquireConcurrency("k", 2), true);

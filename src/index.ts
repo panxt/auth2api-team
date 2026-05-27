@@ -171,8 +171,22 @@ async function startServer(): Promise<void> {
     }
   }
 
+  const anyQuota = Array.from(config["api-keys"].values()).some(
+    (e) => e.quota,
+  );
+
+  // The stats JSONL is also the quota tracker's durability: QuotaTracker
+  // replays it on restart to recover month-to-date consumption. So the
+  // recorder must run whenever stats are enabled OR any key has a quota —
+  // otherwise quota would silently reset to zero on every restart and be
+  // bypassable by restarting the process.
   let statsRecorder: StatsRecorder | undefined;
-  if (config.stats.enabled) {
+  if (config.stats.enabled || anyQuota) {
+    if (!config.stats.enabled) {
+      console.log(
+        "[quota] stats.jsonl logging enabled because a key has a quota (required for quota persistence across restarts)",
+      );
+    }
     // Inject per-event cost so byClient/byAccount/byApi all carry accurate
     // cost (each event priced by its own model), retroactive on replay.
     statsRecorder = new StatsRecorder((ev) =>
@@ -186,11 +200,8 @@ async function startServer(): Promise<void> {
   // Run quota accounting when any key has a quota, or whenever stats are on
   // (so /admin/usage/keys can show month-to-date consumption either way). It
   // replays stats.jsonl for the current month and is fed live by the finish
-  // middleware, so it survives restarts without a second log.
+  // middleware.
   let quotaTracker: QuotaTracker | undefined;
-  const anyQuota = Array.from(config["api-keys"].values()).some(
-    (e) => e.quota,
-  );
   if (anyQuota || config.stats.enabled) {
     quotaTracker = new QuotaTracker(config.pricing);
     quotaTracker.start(authDir);

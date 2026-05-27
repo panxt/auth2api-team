@@ -25,7 +25,9 @@ export function checkKeyRpm(keyId: string, rpm: number): boolean {
   const entry = rpmMap.get(keyId);
   if (!entry || now > entry.resetAt) {
     rpmMap.set(keyId, { count: 1, resetAt: now + WINDOW_MS });
-    return true;
+    // Honor rpm:0 as "block everything" — the first request of a fresh window
+    // must still respect the cap.
+    return rpm >= 1;
   }
   entry.count++;
   return entry.count <= rpm;
