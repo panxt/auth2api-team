@@ -50,7 +50,9 @@ function makeConfig(): Config {
     host: "127.0.0.1",
     port: 0,
     "auth-dir": "/tmp/auth2api-test",
-    "api-keys": new Set(["test-key"]),
+    "api-keys": new Map([
+      ["test-key", { key: "test-key", enabled: true, admin: false }],
+    ]),
     "body-limit": "200mb",
     cloaking: {
       "cli-version": "2.1.88",

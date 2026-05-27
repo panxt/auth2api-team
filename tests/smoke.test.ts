@@ -8,7 +8,7 @@ import { AddressInfo } from "node:net";
 import { createServer as createHttpServer } from "node:http";
 
 import { AccountManager } from "../src/accounts/manager";
-import { Config, loadConfig } from "../src/config";
+import { Config, loadConfig, normalizeApiKeys } from "../src/config";
 import { createServer } from "../src/server";
 import { saveToken } from "../src/auth/token-storage";
 import { TokenData } from "../src/auth/types";
@@ -22,7 +22,7 @@ function makeConfig(authDir: string): Config {
     host: "127.0.0.1",
     port: 0,
     "auth-dir": authDir,
-    "api-keys": new Set(["test-key"]),
+    "api-keys": normalizeApiKeys(["test-key"]),
     "body-limit": "200mb",
     cloaking: {
       "cli-version": "2.1.88",
@@ -919,9 +919,9 @@ test("multi-account falls back to next account on rate limit", async (t) => {
   assert.ok(usedTokens.includes("token-b"));
 });
 
-// ── loadConfig: YAML api-keys array → Set ──
+// ── loadConfig: YAML api-keys array → Map ──
 
-test("loadConfig converts YAML api-keys array to Set", () => {
+test("loadConfig converts YAML api-keys array to Map", () => {
   const configPath = path.join(os.tmpdir(), `auth2api-test-${Date.now()}.yaml`);
   fs.writeFileSync(
     configPath,
@@ -940,12 +940,15 @@ test("loadConfig converts YAML api-keys array to Set", () => {
 
   try {
     const config = loadConfig(configPath);
-    assert.ok(config["api-keys"] instanceof Set);
+    assert.ok(config["api-keys"] instanceof Map);
     assert.equal(config["api-keys"].size, 3);
     assert.ok(config["api-keys"].has("sk-key-one"));
     assert.ok(config["api-keys"].has("sk-key-two"));
     assert.ok(config["api-keys"].has("sk-key-three"));
     assert.ok(!config["api-keys"].has("sk-missing"));
+    // bare-string keys normalize to enabled, non-admin entries
+    assert.equal(config["api-keys"].get("sk-key-one")?.enabled, true);
+    assert.equal(config["api-keys"].get("sk-key-one")?.admin, false);
   } finally {
     fs.unlinkSync(configPath);
   }

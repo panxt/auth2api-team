@@ -49,13 +49,59 @@ export interface StatsConfig {
   enabled: boolean;
 }
 
+/** Monthly budget for a single API key. Either limit (or both) may be set. */
+export interface ApiKeyQuota {
+  /** Reject once this many total tokens (input+output+cache) are used this calendar month. */
+  "monthly-tokens"?: number;
+  /** Reject once this much accrued cost (USD) is reached this calendar month. */
+  "monthly-cost-usd"?: number;
+}
+
+/** Per-key rate limiting, layered on top of the global per-IP limiter. */
+export interface ApiKeyRateLimit {
+  /** Max requests per minute for this key. */
+  rpm?: number;
+  /** Max concurrent in-flight requests for this key. */
+  concurrency?: number;
+}
+
+/**
+ * An API key with identity and policy. The bare-string YAML form (a plain
+ * key with no metadata) normalizes to `{ key, enabled: true, admin: false }`,
+ * so old configs keep working unchanged.
+ */
+export interface ApiKeyEntry {
+  key: string;
+  /** Human label, e.g. "zhangsan / dev". Shown in admin reports. */
+  label?: string;
+  /** Owner identifier (email). */
+  owner?: string;
+  /** Disabled keys are rejected with 403. Default true. */
+  enabled: boolean;
+  /** Admin keys see all clients in usage reports; non-admin see only themselves. Default false. */
+  admin: boolean;
+  quota?: ApiKeyQuota;
+  "rate-limit"?: ApiKeyRateLimit;
+}
+
+/** Raw object form of an api-key entry as parsed from YAML (before defaults). */
+interface RawApiKeyEntry {
+  key: string;
+  label?: string;
+  owner?: string;
+  enabled?: boolean;
+  admin?: boolean;
+  quota?: ApiKeyQuota;
+  "rate-limit"?: ApiKeyRateLimit;
+}
+
 export type DebugMode = "off" | "errors" | "verbose";
 
 export interface Config {
   host: string;
   port: number;
   "auth-dir": string;
-  "api-keys": Set<string>;
+  "api-keys": Map<string, ApiKeyEntry>;
   "body-limit": string;
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
@@ -63,9 +109,38 @@ export interface Config {
   debug: DebugMode;
 }
 
-// Raw config shape from YAML (api-keys is an array, not a Set)
+// Raw config shape from YAML: api-keys is an array of bare strings and/or
+// objects; the rest matches Config.
 interface RawConfig extends Omit<Config, "api-keys"> {
-  "api-keys": string[];
+  "api-keys": (string | RawApiKeyEntry)[];
+}
+
+/**
+ * Normalize the YAML `api-keys` array (mixed bare strings and objects) into a
+ * `key -> ApiKeyEntry` map. Bare strings become enabled, non-admin entries
+ * with no quota or rate limit. Malformed entries (object without a string
+ * `key`) are skipped.
+ */
+export function normalizeApiKeys(
+  raw: (string | RawApiKeyEntry)[],
+): Map<string, ApiKeyEntry> {
+  const map = new Map<string, ApiKeyEntry>();
+  for (const item of raw || []) {
+    if (typeof item === "string") {
+      map.set(item, { key: item, enabled: true, admin: false });
+    } else if (item && typeof item.key === "string") {
+      map.set(item.key, {
+        key: item.key,
+        label: item.label,
+        owner: item.owner,
+        enabled: item.enabled ?? true,
+        admin: item.admin ?? false,
+        quota: item.quota,
+        "rate-limit": item["rate-limit"],
+      });
+    }
+  }
+  return map;
 }
 
 const DEFAULT_RAW: RawConfig = {
@@ -147,5 +222,5 @@ export function loadConfig(configPath?: string): Config {
     console.log(`\nGenerated API key (saved to ${filePath}):\n\n  ${key}\n`);
   }
 
-  return { ...raw, "api-keys": new Set(raw["api-keys"]) };
+  return { ...raw, "api-keys": normalizeApiKeys(raw["api-keys"]) };
 }

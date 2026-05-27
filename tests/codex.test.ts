@@ -701,7 +701,7 @@ function makeCodexConfig(
     host: "127.0.0.1",
     port: 0,
     "auth-dir": "/tmp",
-    "api-keys": new Set(["k"]),
+    "api-keys": new Map([["k", { key: "k", enabled: true, admin: false }]]),
     "body-limit": "1mb",
     cloaking: {
       "cli-version": "2.1.88",
@@ -1013,7 +1013,9 @@ function makeNotifyConfig(): Config2 {
     host: "127.0.0.1",
     port: 18399,
     "auth-dir": "/tmp",
-    "api-keys": new Set(["sk-test"]),
+    "api-keys": new Map([
+      ["sk-test", { key: "sk-test", enabled: true, admin: false }],
+    ]),
     "body-limit": "1mb",
     cloaking: { "cli-version": "2.1.88", entrypoint: "cli" },
     timeouts: {

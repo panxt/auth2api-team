@@ -20,7 +20,12 @@ import {
   makeResponsesState,
   anthropicSSEToResponses,
 } from "../src/upstream/translator";
-import { loadConfig, isDebugLevel, resolveAuthDir } from "../src/config";
+import {
+  loadConfig,
+  isDebugLevel,
+  resolveAuthDir,
+  normalizeApiKeys,
+} from "../src/config";
 import { UsageData } from "../src/accounts/manager";
 
 // ══════════════════════════════════════════════════
@@ -387,8 +392,89 @@ test("loadConfig uses defaults when file missing", () => {
   assert.equal(config.port, 8317);
   assert.equal(config["body-limit"], "200mb");
   assert.equal(config.debug, "off");
-  assert.ok(config["api-keys"] instanceof Set);
+  assert.ok(config["api-keys"] instanceof Map);
   assert.ok(config["api-keys"].size > 0); // auto-generated
+});
+
+// ══════════════════════════════════════════════════
+// config.ts — normalizeApiKeys (api-key identity)
+// ══════════════════════════════════════════════════
+
+test("normalizeApiKeys: bare strings become enabled non-admin entries", () => {
+  const map = normalizeApiKeys(["sk-a", "sk-b"]);
+  assert.equal(map.size, 2);
+  assert.deepEqual(map.get("sk-a"), {
+    key: "sk-a",
+    enabled: true,
+    admin: false,
+  });
+});
+
+test("normalizeApiKeys: object entries carry label/owner/quota/rate-limit", () => {
+  const map = normalizeApiKeys([
+    {
+      key: "sk-team",
+      label: "zhangsan / dev",
+      owner: "z@example.com",
+      admin: true,
+      quota: { "monthly-tokens": 1000, "monthly-cost-usd": 5 },
+      "rate-limit": { rpm: 60, concurrency: 4 },
+    },
+  ]);
+  const e = map.get("sk-team")!;
+  assert.equal(e.label, "zhangsan / dev");
+  assert.equal(e.owner, "z@example.com");
+  assert.equal(e.enabled, true); // defaults to true when omitted
+  assert.equal(e.admin, true);
+  assert.equal(e.quota?.["monthly-tokens"], 1000);
+  assert.equal(e["rate-limit"]?.rpm, 60);
+});
+
+test("normalizeApiKeys: explicit enabled:false is preserved", () => {
+  const map = normalizeApiKeys([{ key: "sk-off", enabled: false }]);
+  assert.equal(map.get("sk-off")?.enabled, false);
+});
+
+test("normalizeApiKeys: mixes bare strings and objects; skips malformed", () => {
+  const map = normalizeApiKeys([
+    "sk-plain",
+    { key: "sk-obj" },
+    { label: "no-key" } as any, // malformed: skipped
+  ]);
+  assert.equal(map.size, 2);
+  assert.ok(map.has("sk-plain"));
+  assert.ok(map.has("sk-obj"));
+});
+
+test("loadConfig parses object-form api-keys from YAML", () => {
+  const configPath = path.join(
+    os.tmpdir(),
+    `auth2api-apikeys-obj-${Date.now()}.yaml`,
+  );
+  fs.writeFileSync(
+    configPath,
+    [
+      "api-keys:",
+      '  - key: "sk-admin"',
+      '    label: "ops"',
+      "    admin: true",
+      "    quota:",
+      "      monthly-tokens: 5000000",
+      '  - "sk-plain"',
+    ].join("\n"),
+  );
+  try {
+    const config = loadConfig(configPath);
+    assert.equal(config["api-keys"].size, 2);
+    assert.equal(config["api-keys"].get("sk-admin")?.admin, true);
+    assert.equal(
+      config["api-keys"].get("sk-admin")?.quota?.["monthly-tokens"],
+      5000000,
+    );
+    assert.equal(config["api-keys"].get("sk-plain")?.admin, false);
+  } finally {
+    fs.unlinkSync(configPath);
+  }
 });
 
 test("loadConfig normalizes debug mode", () => {
@@ -1095,7 +1181,7 @@ test("createServer stats endpoint records mounted route prefix", async () => {
       host: "",
       port: 0,
       "auth-dir": tmp,
-      "api-keys": new Set(["sk-test"]),
+      "api-keys": normalizeApiKeys(["sk-test"]),
       "body-limit": "1mb",
       cloaking: {},
       timeouts: {
@@ -1135,7 +1221,7 @@ test("createServer stats records client disconnects on close", async () => {
       host: "",
       port: 0,
       "auth-dir": tmp,
-      "api-keys": new Set(["sk-test"]),
+      "api-keys": normalizeApiKeys(["sk-test"]),
       "body-limit": "1mb",
       cloaking: {},
       timeouts: {

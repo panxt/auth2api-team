@@ -99,11 +99,14 @@ export function createServer(
       res.status(401).json({ error: { message: "Missing API key" } });
       return;
     }
-    const valid = config["api-keys"].has(key);
-    if (!valid) {
-      res.status(403).json({ error: { message: "Invalid API key" } });
+    const entry = config["api-keys"].get(key);
+    if (!entry || !entry.enabled) {
+      res.status(403).json({ error: { message: "Invalid or disabled API key" } });
       return;
     }
+    // Make the key's identity/policy available to downstream middleware
+    // (quota, per-key rate limit) and handlers.
+    res.locals.apiKey = entry;
     // Seed res.locals.stats so the stats-finish middleware can record this
     // request even if the downstream handler aborts before filling in the
     // upstream account / model / usage fields.
