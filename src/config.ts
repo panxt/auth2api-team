@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import yaml from "js-yaml";
+import type { ModelPrice } from "./usage/pricing";
 
 /**
  * Cloaking configuration for request fingerprinting.
@@ -106,6 +107,11 @@ export interface Config {
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
   stats: StatsConfig;
+  /**
+   * Per-model price overrides (USD per 1M tokens), keyed by resolved model id.
+   * Merged over DEFAULT_PRICING at cost time. Optional — omit to use defaults.
+   */
+  pricing?: Record<string, ModelPrice>;
   debug: DebugMode;
 }
 
