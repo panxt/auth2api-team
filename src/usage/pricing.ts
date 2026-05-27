@@ -112,6 +112,24 @@ export function resolvePrice(
 }
 
 /**
+ * Total billable tokens for one request, for token-budget quotas. Mirrors the
+ * provider divergence in computeCost: Anthropic's buckets are distinct so they
+ * sum; codex's cached input ⊂ input_tokens and reasoning ⊂ output_tokens, so
+ * only input+output count (adding the subsets would double-count).
+ */
+export function billableTokens(usage: UsageData, provider?: ProviderId): number {
+  if (provider === "codex") {
+    return usage.inputTokens + usage.outputTokens;
+  }
+  return (
+    usage.inputTokens +
+    usage.outputTokens +
+    usage.cacheCreationInputTokens +
+    usage.cacheReadInputTokens
+  );
+}
+
+/**
  * Cost in USD for one request's token usage. The formula differs by provider
  * because the upstreams report tokens differently:
  *
