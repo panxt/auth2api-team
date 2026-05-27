@@ -11,6 +11,7 @@ import { createServer } from "./server";
 import { notifyServerReload } from "./utils/notify-reload";
 import { StatsRecorder } from "./stats/recorder";
 import { QuotaTracker } from "./usage/quota";
+import { computeCost } from "./usage/pricing";
 
 function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
@@ -172,18 +173,25 @@ async function startServer(): Promise<void> {
 
   let statsRecorder: StatsRecorder | undefined;
   if (config.stats.enabled) {
-    statsRecorder = new StatsRecorder();
+    // Inject per-event cost so byClient/byAccount/byApi all carry accurate
+    // cost (each event priced by its own model), retroactive on replay.
+    statsRecorder = new StatsRecorder((ev) =>
+      ev.model && ev.usage
+        ? computeCost(ev.model, ev.usage, ev.provider ?? undefined, config.pricing)
+        : 0,
+    );
     statsRecorder.start(authDir);
   }
 
-  // Only run quota accounting if at least one key has a quota configured.
-  // It replays stats.jsonl for month-to-date consumption, so it works even
-  // when the recorder is disabled (the finish middleware still feeds it).
+  // Run quota accounting when any key has a quota, or whenever stats are on
+  // (so /admin/usage/keys can show month-to-date consumption either way). It
+  // replays stats.jsonl for the current month and is fed live by the finish
+  // middleware, so it survives restarts without a second log.
   let quotaTracker: QuotaTracker | undefined;
   const anyQuota = Array.from(config["api-keys"].values()).some(
     (e) => e.quota,
   );
-  if (anyQuota) {
+  if (anyQuota || config.stats.enabled) {
     quotaTracker = new QuotaTracker(config.pricing);
     quotaTracker.start(authDir);
   }

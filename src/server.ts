@@ -46,6 +46,17 @@ const cleanupTimer = setInterval(
 );
 cleanupTimer.unref();
 
+/** Used/cap/remaining/percent for one quota dimension; nulls when no cap set. */
+function pctRemaining(used: number, cap?: number) {
+  if (cap == null) return { used, cap: null, remaining: null, percent: null };
+  return {
+    used,
+    cap,
+    remaining: Math.max(0, cap - used),
+    percent: cap > 0 ? Math.min(1, used / cap) : null,
+  };
+}
+
 export function createServer(
   config: Config,
   registry: ProviderRegistry,
@@ -293,6 +304,47 @@ export function createServer(
     }
     res.json({
       ...statsRecorder.getSnapshot(),
+      generated_at: new Date().toISOString(),
+    });
+  });
+
+  // GET /admin/usage/keys — month-to-date consumption per API key vs its
+  // quota. An admin key sees every key; a non-admin key sees only itself.
+  // Raw keys are never returned — only the sha256 short prefix, plus the
+  // operator-set label/owner. Consumption comes from the quota tracker (same
+  // numbers that drive enforcement), so reports and limits never disagree.
+  app.get("/admin/usage/keys", (_req, res) => {
+    const requester = res.locals.apiKey as ApiKeyEntry | undefined;
+    const isAdmin = !!requester?.admin;
+    const keys = [];
+    for (const entry of config["api-keys"].values()) {
+      if (!isAdmin && entry.key !== requester?.key) continue;
+      const consumed = quotaTracker
+        ? quotaTracker.consumed(hashApiKey(entry.key))
+        : null;
+      const q = entry.quota;
+      const usage =
+        consumed && q
+          ? {
+              tokens: pctRemaining(consumed.tokens, q["monthly-tokens"]),
+              cost: pctRemaining(consumed.costUsd, q["monthly-cost-usd"]),
+            }
+          : null;
+      keys.push({
+        apiKeyShort: hashApiKey(entry.key).slice(0, 12),
+        label: entry.label ?? null,
+        owner: entry.owner ?? null,
+        admin: entry.admin,
+        enabled: entry.enabled,
+        quota: q ?? null,
+        consumed,
+        usage,
+      });
+    }
+    res.json({
+      keys,
+      window: "month-to-date (UTC)",
+      tracking: !!quotaTracker,
       generated_at: new Date().toISOString(),
     });
   });

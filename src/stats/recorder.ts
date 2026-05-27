@@ -34,6 +34,8 @@ interface BaseBucket {
   totalCacheCreationInputTokens: number;
   totalCacheReadInputTokens: number;
   totalReasoningOutputTokens: number;
+  /** Accrued cost in USD, computed per-event via the injected cost function. */
+  totalCostUsd: number;
   totalLatencyMs: number;
   firstSeenAt: string;
   lastSeenAt: string;
@@ -73,13 +75,14 @@ function emptyBucket(now: string): BaseBucket {
     totalCacheCreationInputTokens: 0,
     totalCacheReadInputTokens: 0,
     totalReasoningOutputTokens: 0,
+    totalCostUsd: 0,
     totalLatencyMs: 0,
     firstSeenAt: now,
     lastSeenAt: now,
   };
 }
 
-function applyBaseDelta(b: BaseBucket, ev: StatsEvent): void {
+function applyBaseDelta(b: BaseBucket, ev: StatsEvent, costUsd: number): void {
   if (b.requests === 0) {
     b.firstSeenAt = ev.ts;
   }
@@ -87,6 +90,7 @@ function applyBaseDelta(b: BaseBucket, ev: StatsEvent): void {
   if (ev.status === "success") b.successes++;
   else b.failures++;
   b.totalLatencyMs += ev.latencyMs;
+  b.totalCostUsd += costUsd;
   if (ev.usage) {
     b.totalInputTokens += ev.usage.inputTokens;
     b.totalOutputTokens += ev.usage.outputTokens;
@@ -112,6 +116,17 @@ export class StatsRecorder {
 
   private appender: StatsAppender | null = null;
   private enabled = false;
+  private costFn: (ev: StatsEvent) => number;
+
+  /**
+   * @param costFn optional per-event cost (USD). Injected so the recorder
+   * stays independent of pricing/config; defaults to 0 (cost columns will be
+   * zero). Applied on both live records and replay, so a price change is
+   * reflected retroactively the next time history is replayed.
+   */
+  constructor(costFn?: (ev: StatsEvent) => number) {
+    this.costFn = costFn ?? (() => 0);
+  }
 
   /**
    * Replay JSONL into the in-memory aggregate, then open the append
@@ -185,7 +200,8 @@ export class StatsRecorder {
 
   /** Test/replay-only entry point — does NOT touch the disk. */
   applyEvent(ev: StatsEvent): void {
-    applyBaseDelta(this.totals, ev);
+    const cost = this.costFn(ev);
+    applyBaseDelta(this.totals, ev, cost);
 
     const clientKey = ev.apiKeyHash;
     let cb = this.byClient.get(clientKey);
@@ -200,7 +216,7 @@ export class StatsRecorder {
     }
     cb.lastIp = ev.ip || cb.lastIp;
     cb.lastUa = ev.ua || cb.lastUa;
-    applyBaseDelta(cb, ev);
+    applyBaseDelta(cb, ev, cost);
 
     if (ev.provider && ev.accountEmail) {
       const accKey = `${ev.provider}:${ev.accountEmail}`;
@@ -213,7 +229,7 @@ export class StatsRecorder {
         };
         this.byAccount.set(accKey, ab);
       }
-      applyBaseDelta(ab, ev);
+      applyBaseDelta(ab, ev, cost);
     }
 
     const apiModel = ev.model || "unknown";
@@ -229,7 +245,7 @@ export class StatsRecorder {
       };
       this.byApi.set(apiKey, pb);
     }
-    applyBaseDelta(pb, ev);
+    applyBaseDelta(pb, ev, cost);
   }
 }
 
