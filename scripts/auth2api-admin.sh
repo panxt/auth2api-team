@@ -19,14 +19,19 @@
 set -euo pipefail
 
 # ─── 常量 ────────────────────────────────────────────────────────────────
-REPO_DIR="/Users/admin04/work/github/auth2api"
+# 仓库根路径自动推导(无论脚本被装在哪)
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG="$REPO_DIR/config.yaml"
-PLIST="$HOME/Library/LaunchAgents/com.admin04.auth2api.plist"
 OUT_DIR="$REPO_DIR/out/onboarding"
 ADMIN_ENV="$REPO_DIR/.auth2api-admin.env"
 YAML_UTIL="$REPO_DIR/scripts/_yaml_util.py"
-LAN_URL="http://172.16.13.205:8317"
-VPN_URL="http://172.16.2.31:8317"
+# launchd plist 路径(macOS 部署用);非 macOS / 非 launchd 部署忽略此项
+# 可通过 AUTH2API_PLIST 环境变量覆盖
+PLIST="${AUTH2API_PLIST:-$HOME/Library/LaunchAgents/com.${USER}.auth2api.plist}"
+# 给生成的 onboarding 手册用的对外地址;可在 .auth2api-admin.env 里设置
+# 留空则手册里不展示对应行
+LAN_URL="${AUTH2API_LAN_URL:-}"
+VPN_URL="${AUTH2API_VPN_URL:-}"
 LOCAL_BASE="http://127.0.0.1:8317"
 
 # ─── 颜色(终端有 tty 时才用)─────────────────────────────────────────────
@@ -70,6 +75,9 @@ EOF
   if [[ ! "$ADMIN_API_KEY" =~ ^sk- ]]; then
     die "ADMIN_API_KEY 格式不对(应以 sk- 开头),from $ADMIN_ENV"
   fi
+  # 可选:从 .env 拉对外地址覆盖 onboarding 文档里的 base URL
+  if [[ -n "${AUTH2API_LAN_URL:-}" ]]; then LAN_URL="$AUTH2API_LAN_URL"; fi
+  if [[ -n "${AUTH2API_VPN_URL:-}" ]]; then VPN_URL="$AUTH2API_VPN_URL"; fi
 }
 
 # ─── 解析 user 简写为完整 label ──────────────────────────────────────────
@@ -508,14 +516,27 @@ generate_doc() {
   mkdir -p "$OUT_DIR"
   local out_file="$OUT_DIR/$username.md"
 
-  local chosen_url base_url_table
-  if [[ "$include_vpn" == "true" ]]; then
-    base_url_table="| 公司内网(优先)| \`$LAN_URL\` |
-| 蒲公英组网(出差/居家)| \`$VPN_URL\` |"
+  # base URL 表格按 LAN/VPN 是否设置(.auth2api-admin.env 中)动态展示
+  # 选择 chosen_url 作为文档示例中 curl / env var 的具体地址:
+  #   include_vpn=true 且有 VPN_URL → 用 LAN(优先内网,VPN 备选)
+  #   只有 VPN_URL  → 用 VPN
+  #   只有 LAN_URL  → 用 LAN
+  #   都没设       → fallback 到 http://localhost:8317 + 一个 callout
+  local chosen_url base_url_table=""
+  if [[ -n "$LAN_URL" && "$include_vpn" == "true" && -n "$VPN_URL" ]]; then
+    base_url_table="| 内网(优先)| \`$LAN_URL\` |
+| VPN(远程)| \`$VPN_URL\` |"
+    chosen_url="$LAN_URL"
+  elif [[ -n "$LAN_URL" ]]; then
+    base_url_table="| Base URL | \`$LAN_URL\` |"
+    chosen_url="$LAN_URL"
+  elif [[ -n "$VPN_URL" ]]; then
+    base_url_table="| Base URL | \`$VPN_URL\` |"
+    chosen_url="$VPN_URL"
   else
-    base_url_table="| Base URL(公司内网)| \`$LAN_URL\` |"
+    base_url_table="| Base URL | \`http://localhost:8317\`(请改成实际部署地址)|"
+    chosen_url="http://localhost:8317"
   fi
-  chosen_url="$LAN_URL"
 
   local role_desc
   if [[ "$admin_flag" == "true" ]]; then

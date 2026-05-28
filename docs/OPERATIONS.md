@@ -2,7 +2,9 @@
 
 本手册面向团队**运维人员与使用者**,覆盖从部署到日常运维、客户端使用、观测与管理的完整流程。代码本身的功能介绍见 [`README_CN.md`](../README_CN.md);改动历史见 [`CHANGELOG.md`](../CHANGELOG.md)。
 
-> 当前线上实例:`172.16.2.31:8317`,以 launchd 用户代理常驻运行。
+> **Heads-up**:本文档示例使用占位符(`<HOST>`、`<user>`、`<your-user>` 等),请按你自己的部署环境替换。launchd 例子仅适用于 macOS;Linux / Docker 用户参考 `Dockerfile` 与 `docker-compose.yml`。
+
+> 当前线上实例:`<HOST>:8317`,以 launchd 用户代理常驻运行。
 
 ## 目录
 
@@ -39,7 +41,7 @@ auth2api-team 是基于上游开源 `AmazingAng/auth2api` 的私有团队版,定
 ```bash
 # 1. 取代码
 cd ~/work/github
-git clone git@github.com-panxt:panxt/auth2api-team.git auth2api
+git clone git@github.com:<your-user>/auth2api-team.git auth2api
 cd auth2api
 
 # 2. 装依赖 + 编译
@@ -63,28 +65,28 @@ npm run start    # 前台跑,前台跑 OK 后 Ctrl-C 改用 launchd 后台
 
 ### 2.3 macOS launchd 后台守护
 
-复用 `~/Library/LaunchAgents/com.admin04.auth2api.plist`(已就位):
+复用 `~/Library/LaunchAgents/com.<user>.auth2api.plist`(已就位):
 
 ```xml
 <key>ProgramArguments</key>
 <array>
-  <string>/Users/admin04/.local/share/mise/installs/node/24.14.1/bin/node</string>
-  <string>/Users/admin04/work/github/auth2api/dist/index.js</string>
+  <string>~/.local/share/mise/installs/node/24.14.1/bin/node</string>
+  <string>~/path/to/auth2api/dist/index.js</string>
 </array>
 <key>WorkingDirectory</key>
-<string>/Users/admin04/work/github/auth2api</string>
+<string>~/path/to/auth2api</string>
 <key>KeepAlive</key><true/>
 <key>RunAtLoad</key><true/>
 <key>ThrottleInterval</key><integer>10</integer>
-<key>StandardOutPath</key><string>/Users/admin04/.claude-token-owner/auth2api.launchd.out.log</string>
-<key>StandardErrorPath</key><string>/Users/admin04/.claude-token-owner/auth2api.launchd.err.log</string>
+<key>StandardOutPath</key><string>~/.claude-token-owner/auth2api.launchd.out.log</string>
+<key>StandardErrorPath</key><string>~/.claude-token-owner/auth2api.launchd.err.log</string>
 ```
 
 加载/启停:
 
 ```bash
-launchctl load   ~/Library/LaunchAgents/com.admin04.auth2api.plist   # 启动
-launchctl unload ~/Library/LaunchAgents/com.admin04.auth2api.plist   # 停止
+launchctl load   ~/Library/LaunchAgents/com.<user>.auth2api.plist   # 启动
+launchctl unload ~/Library/LaunchAgents/com.<user>.auth2api.plist   # 停止
 ```
 
 `KeepAlive: true` 会在进程崩溃时自动拉起;`RunAtLoad: true` 会在登录时自启。
@@ -97,9 +99,9 @@ git pull                                                          # 拉新代码
 npm install                                                       # 若依赖有变
 npm run build                                                     # 重新编译 dist/
 npm test                                                          # 可选,跑一下回归
-launchctl unload ~/Library/LaunchAgents/com.admin04.auth2api.plist
-launchctl load   ~/Library/LaunchAgents/com.admin04.auth2api.plist
-sleep 2 && curl -s http://172.16.2.31:8317/health                 # 验证
+launchctl unload ~/Library/LaunchAgents/com.<user>.auth2api.plist
+launchctl load   ~/Library/LaunchAgents/com.<user>.auth2api.plist
+sleep 2 && curl -s http://<HOST>:8317/health                 # 验证
 ```
 
 重载会产生**几秒停机**,旧 PID 被 kill、新 PID 从新 dist/index.js 启动。
@@ -110,8 +112,8 @@ sleep 2 && curl -s http://172.16.2.31:8317/health                 # 验证
 git log --oneline -10                # 找上个稳定 commit / tag
 git checkout v1.0.0                  # 或具体 commit
 npm run build
-launchctl unload ~/Library/LaunchAgents/com.admin04.auth2api.plist
-launchctl load   ~/Library/LaunchAgents/com.admin04.auth2api.plist
+launchctl unload ~/Library/LaunchAgents/com.<user>.auth2api.plist
+launchctl load   ~/Library/LaunchAgents/com.<user>.auth2api.plist
 ```
 
 > `dist/` 不在 git 里,所以回滚到老 commit 后必须 rebuild。建议给每次部署的 commit 打 tag(`git tag deploy-YYYYMMDD`)便于回退。
@@ -183,7 +185,7 @@ launchctl load   ~/Library/LaunchAgents/com.admin04.auth2api.plist
 OpenAI Chat 风格(最常用):
 
 ```bash
-curl -sS http://172.16.2.31:8317/v1/chat/completions \
+curl -sS http://<HOST>:8317/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
   -d '{
     "model": "sonnet",
@@ -199,7 +201,7 @@ curl -sS http://172.16.2.31:8317/v1/chat/completions \
 Anthropic 原生:
 
 ```bash
-curl -sS http://172.16.2.31:8317/v1/messages \
+curl -sS http://<HOST>:8317/v1/messages \
   -H "x-api-key: $API_KEY" -H "Content-Type: application/json" \
   -d '{
     "model": "opus",
@@ -212,7 +214,7 @@ curl -sS http://172.16.2.31:8317/v1/messages \
 Codex(gpt-5 系列,需 ChatGPT Plus/Pro 账号):
 
 ```bash
-curl -sS http://172.16.2.31:8317/v1/responses \
+curl -sS http://<HOST>:8317/v1/responses \
   -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-5.5",
@@ -221,7 +223,7 @@ curl -sS http://172.16.2.31:8317/v1/responses \
   }'
 ```
 
-Claude Code / Codex CLI / Cursor 都可以把 base URL 指到 `http://172.16.2.31:8317`,然后用你的 api-key 当 token,即可"借"团队的订阅账号用。
+Claude Code / Codex CLI / Cursor 都可以把 base URL 指到 `http://<HOST>:8317`,然后用你的 api-key 当 token,即可"借"团队的订阅账号用。
 
 ---
 
@@ -231,10 +233,10 @@ Claude Code / Codex CLI / Cursor 都可以把 base URL 指到 `http://172.16.2.3
 
 ```bash
 # 健康(无鉴权)
-curl -s http://172.16.2.31:8317/health
+curl -s http://<HOST>:8317/health
 
 # 每个 provider 的账号健康(token 过期、最近成功/失败、当下是否冷却)
-curl -s http://172.16.2.31:8317/admin/accounts -H "Authorization: Bearer $API_KEY"
+curl -s http://<HOST>:8317/admin/accounts -H "Authorization: Bearer $API_KEY"
 ```
 
 `accounts.<provider>.accounts[*]` 包含:`email`、`available`、`cooldownUntil`、`failureCount`、`lastError`、`lastSuccessAt`、`lastRefreshAt`、`expiresAt`、累计 token 用量等。
@@ -242,7 +244,7 @@ curl -s http://172.16.2.31:8317/admin/accounts -H "Authorization: Bearer $API_KE
 ### 4.2 调用统计(含成本)
 
 ```bash
-curl -s http://172.16.2.31:8317/admin/stats -H "Authorization: Bearer $API_KEY"
+curl -s http://<HOST>:8317/admin/stats -H "Authorization: Bearer $API_KEY"
 ```
 
 返回三个聚合视图,**每个桶都带 `totalCostUsd`**(按事件自己的 model 精确计价,改单价对历史立即生效):
@@ -255,7 +257,7 @@ curl -s http://172.16.2.31:8317/admin/stats -H "Authorization: Bearer $API_KEY"
 ### 4.3 各 key 当月用量 vs 配额
 
 ```bash
-curl -s http://172.16.2.31:8317/admin/usage/keys -H "Authorization: Bearer $API_KEY"
+curl -s http://<HOST>:8317/admin/usage/keys -H "Authorization: Bearer $API_KEY"
 ```
 
 admin key 看全部、非 admin 只看自己。每条返回:
@@ -354,10 +356,10 @@ api-keys:
 ADMIN=sk-your-admin-key
 
 # 列出所有 key(只回 id + 策略,不回明文)
-curl -s http://172.16.2.31:8317/admin/keys -H "Authorization: Bearer $ADMIN" | jq
+curl -s http://<HOST>:8317/admin/keys -H "Authorization: Bearer $ADMIN" | jq
 
 # 新建一个带配额和限流的 key —— 响应里 .key 是一次性明文,务必复制保存
-curl -sS http://172.16.2.31:8317/admin/keys \
+curl -sS http://<HOST>:8317/admin/keys \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{
     "label": "alice / dev",
@@ -367,14 +369,14 @@ curl -sS http://172.16.2.31:8317/admin/keys \
   }' | jq
 
 # 改某 key(用返回的 id,前 12 位 hex)—— null 可清除字段
-curl -sS -X PATCH http://172.16.2.31:8317/admin/keys/<id> \
+curl -sS -X PATCH http://<HOST>:8317/admin/keys/<id> \
   -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{ "enabled": false }'           # 临时禁用
 # -d '{ "quota": { "monthly-tokens": 100000000 } }'   # 提高额度
 # -d '{ "quota": null }'                              # 清掉配额
 
 # 吊销
-curl -sS -X DELETE http://172.16.2.31:8317/admin/keys/<id> \
+curl -sS -X DELETE http://<HOST>:8317/admin/keys/<id> \
   -H "Authorization: Bearer $ADMIN"
 ```
 
@@ -410,10 +412,10 @@ npm run login -- --provider=codex      # codex
 npm run login -- --manual
 
 # 查看账号状态
-curl -s http://172.16.2.31:8317/admin/accounts -H "Authorization: Bearer $API_KEY"
+curl -s http://<HOST>:8317/admin/accounts -H "Authorization: Bearer $API_KEY"
 
 # 重新从磁盘加载 token(`--login` 完成后会自动调,手动改 token 文件后用)
-curl -sS -X POST http://172.16.2.31:8317/admin/reload -H "Authorization: Bearer $API_KEY"
+curl -sS -X POST http://<HOST>:8317/admin/reload -H "Authorization: Bearer $API_KEY"
 ```
 
 多账号自动**粘性轮换 + 故障转移**:同一个客户端会粘在同一上游账号一段时间(默认 20–60 分钟),账号被限流/出错时自动切到下一个;**403/额度耗尽现在也会同请求内 failover 到其他账号**(需要 ≥2 个账号且其中至少一个有额度才有效)。
@@ -484,7 +486,7 @@ WAL 模式下若进程异常退出可能留下 `-wal` 文件。正常下次启�
 
 ```bash
 # 停服务
-launchctl unload ~/Library/LaunchAgents/com.admin04.auth2api.plist
+launchctl unload ~/Library/LaunchAgents/com.<user>.auth2api.plist
 # 检查
 sqlite3 ~/.auth2api/auth2api.db "PRAGMA integrity_check;"
 # 极端情况备份后删 WAL
@@ -492,7 +494,7 @@ mv ~/.auth2api/auth2api.db{,.bak}
 mv ~/.auth2api/auth2api.db-wal ~/.auth2api/auth2api.db-wal.bak 2>/dev/null
 mv ~/.auth2api/auth2api.db-shm ~/.auth2api/auth2api.db-shm.bak 2>/dev/null
 # 启动会自建新库
-launchctl load ~/.../com.admin04.auth2api.plist
+launchctl load ~/.../com.<user>.auth2api.plist
 ```
 
 ### 6.5 用量统计与上游账单不符
@@ -507,8 +509,8 @@ launchctl load ~/.../com.admin04.auth2api.plist
 
 | 场景 | 命令 |
 |---|---|
-| 启动 | `launchctl load ~/Library/LaunchAgents/com.admin04.auth2api.plist` |
-| 停止 | `launchctl unload ~/Library/LaunchAgents/com.admin04.auth2api.plist` |
+| 启动 | `launchctl load ~/Library/LaunchAgents/com.<user>.auth2api.plist` |
+| 停止 | `launchctl unload ~/Library/LaunchAgents/com.<user>.auth2api.plist` |
 | 重启(部署新版/重载配置) | `launchctl unload ... && launchctl load ...` |
 | 看实时日志 | `tail -f ~/.claude-token-owner/auth2api.launchd.{out,err}.log` |
 | 看是否在跑 | `lsof -nP -iTCP:8317 -sTCP:LISTEN` |
@@ -517,7 +519,7 @@ launchctl load ~/.../com.admin04.auth2api.plist
 | 新增 claude 账号 | `npm run login` |
 | 新增 codex 账号 | `npm run login -- --provider=codex` |
 | 重新加载 token(无需重启) | `curl -X POST -H "Authorization: Bearer $K" .../admin/reload` |
-| 健康检查 | `curl http://172.16.2.31:8317/health` |
+| 健康检查 | `curl http://<HOST>:8317/health` |
 | 看账号状态 | `curl -H "Authorization: Bearer $K" .../admin/accounts` |
 | 看用量+成本 | `curl -H "Authorization: Bearer $K" .../admin/stats` |
 | 看各 key 额度 | `curl -H "Authorization: Bearer $K" .../admin/usage/keys` |

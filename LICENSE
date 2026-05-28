@@ -1,0 +1,51 @@
+MIT License
+
+Copyright (c) 2026 auth2api-team fork contributors
+
+────────────────────────────────────────────────────────────────────────────
+Scope of this license:
+
+This license applies ONLY to the team-fork additions in this repository,
+notably:
+
+  • scripts/                              (auth2api-admin.sh, _yaml_util.py,
+                                           onboard-user.sh)
+  • docs/CLIENT_SETUP.md
+  • docs/ARCHITECTURE.md
+  • docs/OPERATIONS.md
+  • CHANGELOG.md
+  • .auth2api-admin.env.example
+  • config.example.yaml (modifications by this fork)
+  • NOTICE.md
+  • any per-file modifications made on top of the upstream codebase by
+    this fork's contributors
+
+The upstream codebase originated at
+  https://github.com/AmazingAng/auth2api
+and is published WITHOUT an explicit LICENSE file. Under default copyright
+law its code is considered "All Rights Reserved" by its original authors.
+This fork does not, and cannot, unilaterally re-license the upstream
+portions. Users who wish to redistribute or reuse the upstream code must
+clarify rights with the upstream maintainers directly.
+
+See NOTICE.md for a per-area breakdown of what this fork added vs. what
+remains under upstream copyright.
+────────────────────────────────────────────────────────────────────────────
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of the team-fork additions described above (the "Fork Software"), to deal
+in the Fork Software without restriction, including without limitation the
+rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+sell copies of the Fork Software, and to permit persons to whom the Fork
+Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Fork Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.

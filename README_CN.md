@@ -414,9 +414,15 @@ npm run test:smoke
 
 ## 致谢
 
+本仓库 fork 自 [`AmazingAng/auth2api`](https://github.com/AmazingAng/auth2api),原作者持有上游代码版权;本 fork 在其基础上增加了用户管理脚本、专属手册生成、团队运维与架构文档(详见 [`CHANGELOG.md`](CHANGELOG.md))。
+
+参考的相关项目:
+
 - [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
 - [sub2api](https://github.com/Wei-Shaw/sub2api)
 
 ## License
 
-MIT
+本 fork 新增的内容(`scripts/`、`docs/{CLIENT_SETUP,ARCHITECTURE,OPERATIONS}.md`、`CHANGELOG.md`、`.auth2api-admin.env.example` 等)按 [MIT License](LICENSE) 发布。
+
+上游 `AmazingAng/auth2api` 自身**没有 LICENSE 文件**,默认 "All Rights Reserved";想要再发布 / 商用上游代码部分,请先与上游协商。详见 [`NOTICE.md`](NOTICE.md)。

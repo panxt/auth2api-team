@@ -1,6 +1,6 @@
 # Changelog
 
-本文档记录 `panxt/auth2api-team`(团队私有版)在上游 `AmazingAng/auth2api` 基础上的改动。
+本文档记录 `<your-user>/auth2api-team`(fork)在上游 `AmazingAng/auth2api` 基础上的改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
 ## [1.0.0] — 2026-05-28

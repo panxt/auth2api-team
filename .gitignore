@@ -6,6 +6,7 @@ config.yaml
 
 # Internal-only docs (contain API keys / internal network info)
 docs/INTERNAL_SETUP.md
+docs/PUBLISH_CHECKLIST.md
 
 # Per-user onboarding manuals (each contains a unique API key) + config backups
 out/
