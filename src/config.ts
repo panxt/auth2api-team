@@ -50,6 +50,18 @@ export interface StatsConfig {
   enabled: boolean;
 }
 
+/**
+ * Where usage events and UI-managed keys are persisted. "sqlite" (default)
+ * keeps everything in a single DB file via better-sqlite3; "file" keeps the
+ * legacy stats.jsonl + managed-keys.json. OAuth tokens are always plain files
+ * regardless (they're the upstream login contract).
+ */
+export interface StorageConfig {
+  backend: "sqlite" | "file";
+  /** SQLite DB path; defaults to <auth-dir>/auth2api.db when omitted. */
+  "sqlite-path"?: string;
+}
+
 /** Monthly budget for a single API key. Either limit (or both) may be set. */
 export interface ApiKeyQuota {
   /** Reject once this many total tokens (input+output+cache) are used this calendar month. */
@@ -107,6 +119,7 @@ export interface Config {
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
   stats: StatsConfig;
+  storage: StorageConfig;
   /**
    * Per-model price overrides (USD per 1M tokens), keyed by resolved model id.
    * Merged over DEFAULT_PRICING at cost time. Optional — omit to use defaults.
@@ -173,6 +186,9 @@ const DEFAULT_RAW: RawConfig = {
   stats: {
     enabled: true,
   },
+  storage: {
+    backend: "sqlite",
+  },
   debug: "off",
 };
 
@@ -219,6 +235,7 @@ export function loadConfig(configPath?: string): Config {
       cloaking: { ...DEFAULT_RAW.cloaking, ...(parsed.cloaking || {}) },
       timeouts: { ...DEFAULT_RAW.timeouts, ...(parsed.timeouts || {}) },
       stats: { ...DEFAULT_RAW.stats, ...(parsed.stats || {}) },
+      storage: { ...DEFAULT_RAW.storage, ...(parsed.storage || {}) },
     };
   }
 
