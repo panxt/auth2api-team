@@ -128,6 +128,10 @@ export async function proxyWithRetry(
   let lastStatus = 500;
   let lastErrBody = "";
   let lastRetryAfter: string | null = null;
+  // True once any account returned a real (non-ok) upstream HTTP response —
+  // lets us forward that error instead of a generic "no account" message when
+  // a later failover attempt finds every account cooled down.
+  let sawUpstreamError = false;
   const refreshedAccounts = new Set<string>();
 
   const requestController = new AbortController();
@@ -142,6 +146,12 @@ export async function proxyWithRetry(
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       const result = manager.getNextAccount();
       if (!result.account) {
+        // If a prior attempt already produced a real upstream error (e.g. we
+        // failed over across accounts and they all 403'd / rate-limited),
+        // forwarding that error downstream is more informative than the
+        // generic "no account available" message. Otherwise no account was
+        // ever reachable — return the structured unavailable response.
+        if (sawUpstreamError) break;
         return accountUnavailable(resp, result, manager.provider);
       }
       const account = result.account;
@@ -203,6 +213,7 @@ export async function proxyWithRetry(
       }
 
       lastStatus = upstream.status;
+      sawUpstreamError = true;
       tagStatsFailure(
         resp,
         lastStatus >= 400 && lastStatus < 500
@@ -251,13 +262,26 @@ export async function proxyWithRetry(
       // healthy, the request body is bad. Do NOT cool down the account, and do
       // NOT retry; surface the upstream error to the client immediately.
 
-      if (!RETRYABLE_STATUSES.has(lastStatus)) break;
+      // 403 is account-level (forbidden / upstream extra-usage quota exhausted):
+      // the offending account is now cooled down, so the next getNextAccount()
+      // picks a DIFFERENT account. Failing over lets a healthy account serve the
+      // request instead of failing it outright when the sticky account is out of
+      // quota. Bounded by maxRetries; if every account 403s we fall through and
+      // forward the real upstream error.
+      const canFailover =
+        lastStatus === 403 || RETRYABLE_STATUSES.has(lastStatus);
+      if (!canFailover) break;
       if (attempt < maxRetries - 1) {
-        const shouldContinue = await waitForRetry(
-          (attempt + 1) * 1000,
-          requestController.signal,
-        );
-        if (!shouldContinue) return;
+        // A cooled-down account is never re-picked, so a 403 should fail over to
+        // the next account immediately. Only 429/5xx — which may be transient on
+        // the same account — warrant the incremental backoff wait.
+        if (lastStatus !== 403) {
+          const shouldContinue = await waitForRetry(
+            (attempt + 1) * 1000,
+            requestController.signal,
+          );
+          if (!shouldContinue) return;
+        }
       }
     }
   } finally {

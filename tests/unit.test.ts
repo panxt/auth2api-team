@@ -253,6 +253,91 @@ test("handleStreamingResponse extracts usage from final un-terminated event in p
   assert.equal(result.usage.outputTokens, 5);
 });
 
+test("proxyWithRetry fails over to another account on a 403 (upstream quota exhausted)", async () => {
+  const resp = makeMockResponse();
+  resp.locals.stats = {};
+  const accounts = [
+    { token: { email: "exhausted@x.com" } },
+    { token: { email: "healthy@x.com" } },
+  ];
+  let idx = 0;
+  const cooled = new Set<string>();
+  const tried: string[] = [];
+  const manager: any = {
+    provider: "anthropic",
+    getNextAccount: () => {
+      // skip cooled-down accounts, mimicking the real manager
+      while (idx < accounts.length && cooled.has(accounts[idx].token.email)) {
+        idx++;
+      }
+      if (idx >= accounts.length) {
+        return { account: null, failureKind: "forbidden", retryAfterMs: 1000 };
+      }
+      return { account: accounts[idx] };
+    },
+    recordAttempt: (email: string) => tried.push(email),
+    recordFailure: (email: string) => cooled.add(email),
+    refreshAccount: async () => false,
+  };
+
+  let calls = 0;
+  await proxyWithRetry("T", resp, { debug: "off" } as any, {
+    manager,
+    maxRetries: 3,
+    upstream: async (account: any) => {
+      calls++;
+      if (account.token.email === "exhausted@x.com") {
+        return new Response("no extra usage quota", { status: 403 });
+      }
+      return new Response("ok", { status: 200 });
+    },
+    success: async (upstream: any) => {
+      resp.statusCode = 200;
+      resp.body = await upstream.text();
+    },
+  });
+
+  // First account 403'd and was cooled; request succeeded on the second.
+  assert.deepEqual(tried, ["exhausted@x.com", "healthy@x.com"]);
+  assert.equal(calls, 2);
+  assert.equal(resp.body, "ok");
+});
+
+test("proxyWithRetry forwards the real upstream 403 when every account is exhausted", async () => {
+  const resp = makeMockResponse();
+  resp.locals.stats = {};
+  const accounts = [{ token: { email: "a@x.com" } }, { token: { email: "b@x.com" } }];
+  let idx = 0;
+  const cooled = new Set<string>();
+  const manager: any = {
+    provider: "anthropic",
+    getNextAccount: () => {
+      while (idx < accounts.length && cooled.has(accounts[idx].token.email)) idx++;
+      if (idx >= accounts.length) {
+        return { account: null, failureKind: "forbidden", retryAfterMs: 1000 };
+      }
+      return { account: accounts[idx] };
+    },
+    recordAttempt: () => {},
+    recordFailure: (email: string) => cooled.add(email),
+    refreshAccount: async () => false,
+  };
+
+  await proxyWithRetry("T", resp, { debug: "off" } as any, {
+    manager,
+    maxRetries: 5,
+    upstream: async () =>
+      new Response(JSON.stringify({ error: { message: "extra usage not enabled" } }), {
+        status: 403,
+      }),
+    success: async () => {},
+  });
+
+  // All accounts 403'd → forward the real upstream error, not a generic 503.
+  assert.equal(resp.statusCode, 403);
+  assert.equal(resp.body.error.message, "extra usage not enabled");
+});
+
 test("proxyWithRetry stops retry backoff when client disconnects", async () => {
   const resp = makeMockResponse();
   const account: any = {
