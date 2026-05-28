@@ -1164,6 +1164,7 @@ test("anthropicSSEToResponses returns empty for unknown events", () => {
 
 import { StatsRecorder, StatsEvent } from "../src/stats/recorder";
 import { replayStatsEvents, statsFilePath } from "../src/stats/storage";
+import { FileEventLog } from "../src/storage/file";
 import { createServer } from "../src/server";
 
 function makeStatsEvent(over: Partial<StatsEvent> = {}): StatsEvent {
@@ -1260,7 +1261,7 @@ test("StatsRecorder skips byAccount when provider/email missing", () => {
 test("createServer stats endpoint records mounted route prefix", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
   const recorder = new StatsRecorder();
-  recorder.start(tmp);
+  recorder.start(new FileEventLog(tmp));
   const app = createServer(
     {
       host: "",
@@ -1300,7 +1301,7 @@ test("createServer stats endpoint records mounted route prefix", async () => {
 test("createServer stats records client disconnects on close", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
   const recorder = new StatsRecorder();
-  recorder.start(tmp);
+  recorder.start(new FileEventLog(tmp));
   const app = createServer(
     {
       host: "",
@@ -1364,8 +1365,9 @@ test("createServer stats records client disconnects on close", async () => {
 test("StatsRecorder persists to JSONL and replays on restart", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
   try {
+    const log = new FileEventLog(tmp);
     const recorder = new StatsRecorder();
-    recorder.start(tmp);
+    recorder.start(log);
     recorder.record({
       apiKeyHash: "a".repeat(64),
       ip: "127.0.0.1",
@@ -1387,6 +1389,7 @@ test("StatsRecorder persists to JSONL and replays on restart", async () => {
       },
     });
     await recorder.stop();
+    await log.close(); // flush the append stream before reading the file
 
     // Verify the JSONL was written.
     const content = fs.readFileSync(statsFilePath(tmp), "utf-8").trim();
@@ -1396,12 +1399,14 @@ test("StatsRecorder persists to JSONL and replays on restart", async () => {
     assert.equal(parsed.usage.inputTokens, 7);
 
     // Replay into a fresh recorder.
+    const recoveredLog = new FileEventLog(tmp);
     const recovered = new StatsRecorder();
-    recovered.start(tmp);
+    recovered.start(recoveredLog);
     const snap = recovered.getSnapshot();
     assert.equal(snap.totals.requests, 1);
     assert.equal(snap.totals.totalInputTokens, 7);
     await recovered.stop();
+    await recoveredLog.close();
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -1433,7 +1438,7 @@ test("StatsRecorder replay ignores partial schema rows without polluting aggrega
   try {
     fs.writeFileSync(statsFilePath(tmp), '{"endpoint":"x"}\n');
     const recorder = new StatsRecorder();
-    recorder.start(tmp);
+    recorder.start(new FileEventLog(tmp));
     const snap = recorder.getSnapshot();
     assert.equal(snap.totals.requests, 0);
     assert.deepEqual(snap.byClient, {});

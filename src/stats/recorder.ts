@@ -1,6 +1,6 @@
 import { ProviderId } from "../auth/types";
 import { UsageData } from "../accounts/manager";
-import { StatsAppender, replayStatsEvents, statsFilePath } from "./storage";
+import type { EventLog } from "../storage/types";
 
 /**
  * One row in the JSONL stats log. Keep field names short — the file grows
@@ -114,7 +114,7 @@ export class StatsRecorder {
   private byApi = new Map<string, ApiBucket>();
   private totals: BaseBucket = emptyBucket(new Date().toISOString());
 
-  private appender: StatsAppender | null = null;
+  private log: EventLog | null = null;
   private enabled = false;
   private costFn: (ev: StatsEvent) => number;
 
@@ -129,33 +129,30 @@ export class StatsRecorder {
   }
 
   /**
-   * Replay JSONL into the in-memory aggregate, then open the append
-   * stream. Replay errors are non-fatal — operators can always delete
-   * the file to reset, and we'd rather start fresh than fail to boot.
+   * Replay persisted events into the in-memory aggregate, then keep the log
+   * for live appends. Replay errors are non-fatal — we'd rather start fresh
+   * than fail to boot. The log's lifecycle (flush/close) is owned by the
+   * caller's Storage, not by the recorder.
    */
-  start(authDir: string): void {
-    const filePath = statsFilePath(authDir);
+  start(log: EventLog): void {
+    this.log = log;
     try {
-      const result = replayStatsEvents(filePath, (ev) => this.applyEvent(ev));
-      if (result.lines > 0) {
+      const result = log.replay((ev) => this.applyEvent(ev));
+      if (result.events > 0) {
         console.log(
-          `[stats] replayed ${result.lines} event(s) (${result.skipped} skipped) from ${filePath}`,
+          `[stats] replayed ${result.events} event(s) (${result.skipped} skipped)`,
         );
       }
     } catch (err: any) {
       console.error("[stats] replay failed:", err?.message);
     }
-    this.appender = new StatsAppender(filePath);
-    this.appender.open();
     this.enabled = true;
   }
 
+  /** Stop recording. Does not close the log — Storage owns that. */
   async stop(): Promise<void> {
     this.enabled = false;
-    if (this.appender) {
-      await this.appender.close();
-      this.appender = null;
-    }
+    this.log = null;
   }
 
   /**
@@ -171,9 +168,9 @@ export class StatsRecorder {
     };
     if (!this.enabled) return event;
     this.applyEvent(event);
-    if (this.appender) {
+    if (this.log) {
       try {
-        this.appender.append(event);
+        this.log.append(event);
       } catch (err: any) {
         console.error("[stats] append failed:", err?.message);
       }

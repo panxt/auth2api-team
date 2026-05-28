@@ -13,6 +13,7 @@ import { StatsRecorder } from "./stats/recorder";
 import { QuotaTracker } from "./usage/quota";
 import { computeCost } from "./usage/pricing";
 import { ManagedKeyStore } from "./keys/store";
+import { openStorage } from "./storage";
 
 function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
@@ -152,9 +153,13 @@ async function startServer(): Promise<void> {
   const config = loadConfig(configPath);
   const authDir = resolveAuthDir(config["auth-dir"]);
 
+  // Open the configured storage backend (sqlite by default, or file). It
+  // provides the usage event log and the managed-key repository.
+  const storage = openStorage(config, authDir);
+
   // Merge UI-managed keys into the live api-keys map before anything reads it
   // (quota detection, auth), so managed keys behave exactly like config keys.
-  const keyStore = new ManagedKeyStore(authDir, config["api-keys"]);
+  const keyStore = new ManagedKeyStore(storage.keyRepo, config["api-keys"]);
   keyStore.load();
 
   const registry = buildRegistry(authDir);
@@ -200,7 +205,7 @@ async function startServer(): Promise<void> {
         ? computeCost(ev.model, ev.usage, ev.provider ?? undefined, config.pricing)
         : 0,
     );
-    statsRecorder.start(authDir);
+    statsRecorder.start(storage.eventLog);
   }
 
   // Run quota accounting when any key has a quota, or whenever stats are on
@@ -210,7 +215,7 @@ async function startServer(): Promise<void> {
   let quotaTracker: QuotaTracker | undefined;
   if (anyQuota || config.stats.enabled) {
     quotaTracker = new QuotaTracker(config.pricing);
-    quotaTracker.start(authDir);
+    quotaTracker.start(storage.eventLog);
   }
 
   const app = createServer(
@@ -241,13 +246,12 @@ async function startServer(): Promise<void> {
       p.manager.stopAutoRefresh();
       p.manager.stopStatsLogger();
     }
-    if (statsRecorder) {
-      // Best-effort flush — exit even if close hangs so SIGINT stays responsive.
-      statsRecorder.stop().finally(() => process.exit(0));
-      setTimeout(() => process.exit(0), 1000).unref();
-      return;
-    }
-    process.exit(0);
+    // Flush/close the storage backend (file stream or sqlite db) before exit,
+    // but never let a hung close keep SIGINT from being responsive.
+    Promise.resolve(statsRecorder?.stop())
+      .then(() => storage.close())
+      .finally(() => process.exit(0));
+    setTimeout(() => process.exit(0), 1000).unref();
   });
 }
 

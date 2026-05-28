@@ -6,6 +6,7 @@ import path from "node:path";
 import { createServer } from "../src/server";
 import { normalizeApiKeys, ApiKeyEntry } from "../src/config";
 import { ManagedKeyStore } from "../src/keys/store";
+import { FileKeyRepository } from "../src/storage/file";
 
 function makeConfig(authDir: string, keys: (string | ApiKeyEntry)[]): any {
   return {
@@ -27,7 +28,7 @@ async function withServer(
 ) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-adm-"));
   const config = makeConfig(dir, keys);
-  const store = new ManagedKeyStore(dir, config["api-keys"]);
+  const store = new ManagedKeyStore(new FileKeyRepository(dir), config["api-keys"]);
   store.load();
   const app = createServer(config, {} as any, undefined, undefined, store);
   const server = app.listen(0);

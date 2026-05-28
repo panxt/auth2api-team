@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { QuotaTracker } from "../src/usage/quota";
+import { FileEventLog } from "../src/storage/file";
 import { StatsEvent } from "../src/stats/recorder";
 import { computeCost } from "../src/usage/pricing";
 
@@ -100,7 +101,7 @@ test("QuotaTracker: start() replays current-month events from stats.jsonl", () =
   fs.writeFileSync(file, lines.join("\n") + "\n");
   try {
     const q = new QuotaTracker();
-    q.start(dir);
+    q.start(new FileEventLog(dir));
     assert.equal(q.consumed("k1").tokens, 1000); // old-month line excluded
     assert.equal(q.consumed("k2").tokens, 200);
   } finally {

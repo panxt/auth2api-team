@@ -1,22 +1,16 @@
-import fs from "fs";
-import path from "path";
 import { ApiKeyEntry, generateApiKey } from "../config";
 import { hashApiKey } from "../utils/common";
+import type { KeyRepository } from "../storage/types";
 
 /**
- * Runtime-managed API keys. Keys created/edited through the admin UI live in
- * `<auth-dir>/managed-keys.json` — kept separate from config.yaml so the
- * hand-written YAML (and its comments) is never rewritten. At startup the
- * managed keys are merged into the live config map (managed wins on conflict);
- * config.yaml keys remain read-only from the UI's perspective so a delete
- * can't be silently resurrected by the next restart.
+ * Runtime-managed API keys. Keys created/edited through the admin UI are
+ * persisted via the configured KeyRepository (SQLite table or
+ * managed-keys.json) — kept separate from config.yaml so the hand-written
+ * YAML (and its comments) is never rewritten. At startup the managed keys are
+ * merged into the live config map (managed wins on conflict); config.yaml keys
+ * remain read-only from the UI's perspective so a delete can't be silently
+ * resurrected by the next restart.
  */
-
-export const MANAGED_KEYS_FILENAME = "managed-keys.json";
-
-export function managedKeysPath(authDir: string): string {
-  return path.join(authDir, MANAGED_KEYS_FILENAME);
-}
 
 /** Fields the UI may set when creating or editing a key. */
 export interface KeyInput {
@@ -83,30 +77,20 @@ export class ManagedKeyError extends Error {
 }
 
 export class ManagedKeyStore {
-  private authDir: string;
+  private repo: KeyRepository;
   /** The live map shared with the running server (config["api-keys"]). */
   private live: Map<string, ApiKeyEntry>;
   /** Keys owned by this store (subset of `live`), keyed by raw key. */
   private managed = new Map<string, ApiKeyEntry>();
 
-  constructor(authDir: string, live: Map<string, ApiKeyEntry>) {
-    this.authDir = authDir;
+  constructor(repo: KeyRepository, live: Map<string, ApiKeyEntry>) {
+    this.repo = repo;
     this.live = live;
   }
 
-  /** Load managed-keys.json and merge into the live map (managed overrides). */
+  /** Load managed keys and merge into the live map (managed overrides). */
   load(): void {
-    const file = managedKeysPath(this.authDir);
-    if (!fs.existsSync(file)) return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
-    } catch (err: any) {
-      console.error(`[keys] failed to read ${file}: ${err?.message}`);
-      return;
-    }
-    if (!Array.isArray(parsed)) return;
-    for (const raw of parsed) {
+    for (const raw of this.repo.loadAll()) {
       if (!isValidEntry(raw)) continue;
       const entry = normalizeEntry(raw);
       this.managed.set(entry.key, entry);
@@ -183,11 +167,6 @@ export class ManagedKeyStore {
   }
 
   private persist(): void {
-    fs.mkdirSync(this.authDir, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(
-      managedKeysPath(this.authDir),
-      JSON.stringify([...this.managed.values()], null, 2),
-      { mode: 0o600 },
-    );
+    this.repo.replaceAll([...this.managed.values()]);
   }
 }

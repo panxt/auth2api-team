@@ -2,7 +2,7 @@ import { ProviderId } from "../auth/types";
 import type { ModelPrice } from "./pricing";
 import { billableTokens, computeCost } from "./pricing";
 import { StatsEvent } from "../stats/recorder";
-import { replayStatsEvents, statsFilePath } from "../stats/storage";
+import type { EventLog } from "../storage/types";
 
 export interface Consumption {
   tokens: number;
@@ -39,11 +39,10 @@ export class QuotaTracker {
   }
 
   /** Replay persisted events into the current-month aggregate. Non-fatal on error. */
-  start(authDir: string): void {
+  start(log: EventLog): void {
     this.monthKey = monthKeyOf(new Date());
-    const filePath = statsFilePath(authDir);
     try {
-      replayStatsEvents(filePath, (ev) => this.applyEvent(ev));
+      log.replay((ev) => this.applyEvent(ev));
     } catch (err: any) {
       console.error("[quota] replay failed:", err?.message);
     }

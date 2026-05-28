@@ -3,13 +3,14 @@ import assert from "node:assert";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import {
-  ManagedKeyStore,
-  ManagedKeyError,
-  managedKeysPath,
-} from "../src/keys/store";
+import { ManagedKeyStore, ManagedKeyError } from "../src/keys/store";
+import { FileKeyRepository } from "../src/storage/file";
 import { ApiKeyEntry } from "../src/config";
 import { hashApiKey } from "../src/utils/common";
+
+const managedKeysPath = (dir: string) => path.join(dir, "managed-keys.json");
+const newStore = (dir: string, live: Map<string, ApiKeyEntry>) =>
+  new ManagedKeyStore(new FileKeyRepository(dir), live);
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-keys-"));
@@ -23,7 +24,7 @@ test("create: adds a managed key to the live map and persists it", () => {
   const dir = tmpDir();
   try {
     const live = configMap([{ key: "sk-static", enabled: true, admin: false }]);
-    const store = new ManagedKeyStore(dir, live);
+    const store = newStore(dir, live);
     store.load();
     const created = store.create({ label: "dev", quota: { "monthly-tokens": 100 } });
 
@@ -48,7 +49,7 @@ test("load: merges managed-keys.json into live map, managed overrides config", (
       ]),
     );
     const live = configMap([{ key: "sk-shared", enabled: true, admin: false }]);
-    const store = new ManagedKeyStore(dir, live);
+    const store = newStore(dir, live);
     store.load();
     assert.equal(live.get("sk-shared")?.enabled, false); // managed won
     assert.equal(live.get("sk-shared")?.admin, true);
@@ -63,7 +64,7 @@ test("list: tags config vs managed and never leaks raw keys", () => {
   const dir = tmpDir();
   try {
     const live = configMap([{ key: "sk-static", enabled: true, admin: false }]);
-    const store = new ManagedKeyStore(dir, live);
+    const store = newStore(dir, live);
     store.load();
     store.create({ label: "m" });
     const views = store.list();
@@ -79,7 +80,7 @@ test("list: tags config vs managed and never leaks raw keys", () => {
 test("update: patches a managed key", () => {
   const dir = tmpDir();
   try {
-    const store = new ManagedKeyStore(dir, configMap([]));
+    const store = newStore(dir, configMap([]));
     const created = store.create({ enabled: true });
     const id = hashApiKey(created.key).slice(0, 12);
     const updated = store.update(id, { enabled: false, owner: "z@x.com" });
@@ -94,7 +95,7 @@ test("delete: removes a managed key from live map and disk", () => {
   const dir = tmpDir();
   try {
     const live = configMap([]);
-    const store = new ManagedKeyStore(dir, live);
+    const store = newStore(dir, live);
     const created = store.create({});
     const id = hashApiKey(created.key).slice(0, 12);
     store.delete(id);
@@ -109,7 +110,7 @@ test("update/delete on a config-sourced key is rejected as read_only", () => {
   const dir = tmpDir();
   try {
     const live = configMap([{ key: "sk-static", enabled: true, admin: false }]);
-    const store = new ManagedKeyStore(dir, live);
+    const store = newStore(dir, live);
     store.load();
     const id = hashApiKey("sk-static").slice(0, 12);
     assert.throws(() => store.update(id, { enabled: false }), (e) => e instanceof ManagedKeyError && (e as ManagedKeyError).code === "read_only");
@@ -122,7 +123,7 @@ test("update/delete on a config-sourced key is rejected as read_only", () => {
 test("update on unknown id throws not_found", () => {
   const dir = tmpDir();
   try {
-    const store = new ManagedKeyStore(dir, configMap([]));
+    const store = newStore(dir, configMap([]));
     assert.throws(() => store.update("deadbeef0000", {}), (e) => (e as ManagedKeyError).code === "not_found");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

@@ -43,6 +43,16 @@ timeouts:
 stats:
   enabled: true
 
+# Where usage events and UI-managed API keys are persisted.
+#   sqlite (default) — a single DB file (<auth-dir>/auth2api.db) via
+#     better-sqlite3; durable, queryable, survives restarts without a replay
+#     of a growing text log.
+#   file — legacy <auth-dir>/stats.jsonl + managed-keys.json.
+# OAuth tokens are always plain files regardless of this setting.
+storage:
+  backend: sqlite
+  # sqlite-path: "~/.auth2api/auth2api.db"   # defaults to <auth-dir>/auth2api.db
+
 # Per-model prices for cost accounting (USD per 1,000,000 tokens). Optional —
 # omit to use built-in defaults. Anthropic defaults track published rates;
 # codex (gpt-*) defaults are ESTIMATES, so override them here for accurate
