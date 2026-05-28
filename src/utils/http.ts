@@ -18,6 +18,11 @@ export function classifyFailure(status: number): AccountFailureKind {
   return "server";
 }
 
+function isAnthropicExtraUsageError(status: number, body: string): boolean {
+  if (status !== 400) return false;
+  return /third-party apps now draw from extra usage/i.test(body);
+}
+
 const FAILURE_RESPONSES: Record<
   AccountFailureKind,
   { status: number; message: string }
@@ -214,15 +219,6 @@ export async function proxyWithRetry(
 
       lastStatus = upstream.status;
       sawUpstreamError = true;
-      tagStatsFailure(
-        resp,
-        lastStatus >= 400 && lastStatus < 500
-          ? lastStatus === 401 || lastStatus === 403 || lastStatus === 429
-            ? classifyFailure(lastStatus)
-            : "client_error"
-          : classifyFailure(lastStatus),
-        manager.provider,
-      );
       lastRetryAfter = upstream.headers.get("retry-after");
       try {
         lastErrBody = await upstream.text();
@@ -234,6 +230,22 @@ export async function proxyWithRetry(
       } catch {
         /* ignore */
       }
+      const isExtraUsageFailure = isAnthropicExtraUsageError(
+        lastStatus,
+        lastErrBody,
+      );
+      const statsFailureKind = isExtraUsageFailure
+        ? "forbidden"
+        : lastStatus >= 400 && lastStatus < 500
+          ? lastStatus === 401 || lastStatus === 403 || lastStatus === 429
+            ? classifyFailure(lastStatus)
+            : "client_error"
+          : classifyFailure(lastStatus);
+      tagStatsFailure(
+        resp,
+        statsFailureKind,
+        manager.provider,
+      );
 
       if (lastStatus === 401) {
         // Only refresh once per account per proxy attempt. A second 401 after a
@@ -251,31 +263,38 @@ export async function proxyWithRetry(
           }
         }
       } else if (
+        isExtraUsageFailure ||
         lastStatus === 403 ||
         lastStatus === 429 ||
         lastStatus >= 500
       ) {
         // Account-level failures: cooldown, may retry on another account.
-        manager.recordFailure(account.token.email, classifyFailure(lastStatus));
+        manager.recordFailure(
+          account.token.email,
+          isExtraUsageFailure ? "forbidden" : classifyFailure(lastStatus),
+          lastErrBody,
+        );
       }
       // Other 4xx (400, 404, 422, …) are client request errors — the account is
       // healthy, the request body is bad. Do NOT cool down the account, and do
       // NOT retry; surface the upstream error to the client immediately.
 
-      // 403 is account-level (forbidden / upstream extra-usage quota exhausted):
+      // 403 and Anthropic's extra-usage 400 are account-level quota failures:
       // the offending account is now cooled down, so the next getNextAccount()
       // picks a DIFFERENT account. Failing over lets a healthy account serve the
       // request instead of failing it outright when the sticky account is out of
-      // quota. Bounded by maxRetries; if every account 403s we fall through and
-      // forward the real upstream error.
+      // quota. Bounded by maxRetries; if every account is exhausted we fall
+      // through and forward the real upstream error.
       const canFailover =
-        lastStatus === 403 || RETRYABLE_STATUSES.has(lastStatus);
+        isExtraUsageFailure ||
+        lastStatus === 403 ||
+        RETRYABLE_STATUSES.has(lastStatus);
       if (!canFailover) break;
       if (attempt < maxRetries - 1) {
         // A cooled-down account is never re-picked, so a 403 should fail over to
         // the next account immediately. Only 429/5xx — which may be transient on
         // the same account — warrant the incremental backoff wait.
-        if (lastStatus !== 403) {
+        if (!isExtraUsageFailure && lastStatus !== 403) {
           const shouldContinue = await waitForRetry(
             (attempt + 1) * 1000,
             requestController.signal,

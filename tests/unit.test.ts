@@ -303,6 +303,103 @@ test("proxyWithRetry fails over to another account on a 403 (upstream quota exha
   assert.equal(resp.body, "ok");
 });
 
+test("proxyWithRetry treats Anthropic extra-usage 400 as an account failure", async () => {
+  const resp = makeMockResponse();
+  resp.locals.stats = {};
+  const accounts = [
+    { token: { email: "exhausted@x.com" } },
+    { token: { email: "healthy@x.com" } },
+  ];
+  let idx = 0;
+  const cooled = new Set<string>();
+  const failures: Array<{ email: string; kind: string }> = [];
+  const manager: any = {
+    provider: "anthropic",
+    getNextAccount: () => {
+      while (idx < accounts.length && cooled.has(accounts[idx].token.email)) idx++;
+      if (idx >= accounts.length) {
+        return { account: null, failureKind: "forbidden", retryAfterMs: 1000 };
+      }
+      return { account: accounts[idx] };
+    },
+    recordAttempt: () => {},
+    recordFailure: (email: string, kind: string) => {
+      failures.push({ email, kind });
+      cooled.add(email);
+    },
+    refreshAccount: async () => false,
+  };
+
+  await proxyWithRetry("T", resp, { debug: "off" } as any, {
+    manager,
+    maxRetries: 3,
+    upstream: async (account: any) => {
+      if (account.token.email === "exhausted@x.com") {
+        return new Response(
+          JSON.stringify({
+            error: {
+              message:
+                "Third-party apps now draw from extra usage, not plan limits. Ask your workspace admin to add more and keep going.",
+            },
+          }),
+          { status: 400 },
+        );
+      }
+      return new Response("ok", { status: 200 });
+    },
+    success: async (upstream: any) => {
+      resp.statusCode = 200;
+      resp.body = await upstream.text();
+    },
+  });
+
+  assert.deepEqual(failures, [
+    { email: "exhausted@x.com", kind: "forbidden" },
+  ]);
+  assert.equal(resp.body, "ok");
+  assert.equal(resp.locals.stats.failureKind, null);
+});
+
+test("proxyWithRetry forwards Anthropic extra-usage 400 after all accounts fail", async () => {
+  const resp = makeMockResponse();
+  resp.locals.stats = {};
+  const accounts = [{ token: { email: "a@x.com" } }, { token: { email: "b@x.com" } }];
+  let idx = 0;
+  const cooled = new Set<string>();
+  const manager: any = {
+    provider: "anthropic",
+    getNextAccount: () => {
+      while (idx < accounts.length && cooled.has(accounts[idx].token.email)) idx++;
+      if (idx >= accounts.length) {
+        return { account: null, failureKind: "forbidden", retryAfterMs: 1000 };
+      }
+      return { account: accounts[idx] };
+    },
+    recordAttempt: () => {},
+    recordFailure: (email: string) => cooled.add(email),
+    refreshAccount: async () => false,
+  };
+
+  await proxyWithRetry("T", resp, { debug: "off" } as any, {
+    manager,
+    maxRetries: 5,
+    upstream: async () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            message:
+              "Third-party apps now draw from extra usage, not plan limits. Ask your workspace admin to add more and keep going.",
+          },
+        }),
+        { status: 400 },
+      ),
+    success: async () => {},
+  });
+
+  assert.equal(resp.statusCode, 400);
+  assert.match(resp.body.error.message, /extra usage/);
+});
+
 test("proxyWithRetry forwards the real upstream 403 when every account is exhausted", async () => {
   const resp = makeMockResponse();
   resp.locals.stats = {};
