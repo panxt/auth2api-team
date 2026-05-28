@@ -28,7 +28,10 @@ auth2api 的定位很克制：
 - **运行时 key 管理**：通过 admin API（`/admin/keys`）在线增删改 key，独立于 config.yaml 存储，不改写手写 YAML
 - **可插拔存储**：用量事件与托管 key 默认存 SQLite（单 DB 文件），也可用旧的 JSONL/JSON 文件；OAuth token 始终为文件
 
-> 团队部署 / 使用 / 观测 / 管理 / 排障详细手册见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)；版本改动历史见 [`CHANGELOG.md`](CHANGELOG.md)。
+> 团队部署 / 使用 / 观测 / 管理 / 排障详细手册见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md);
+> 同事接入手册(Claude Code / Codex CLI / IDE 插件配置)见 [`docs/CLIENT_SETUP.md`](docs/CLIENT_SETUP.md);
+> 路由算法 / 账号选择 / 协议翻译等架构细节见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md);
+> 版本改动历史见 [`CHANGELOG.md`](CHANGELOG.md)。
 - **默认安全设置**：timing-safe API key 校验、每 IP 限流、仅允许 localhost 浏览器 CORS
 
 ## 运行要求
@@ -186,6 +189,8 @@ auth2api 额外支持以下便捷别名：
 
 路由规则：根据模型名自动选择账号池。`claude-*` 与裸别名 `opus`/`sonnet`/`haiku` 走 Claude 账号；`gpt-5*`、`o\d`(`o3`、`o4-mini` 等)、`codex-*` 走 Codex 账号；`cursor-*` 和 `cr/*` 走 Cursor 账号。其它型号(`gpt-3.5-*`、`gpt-4*` 等)两个后端都不支持，默认 fallback 到 anthropic。如果对应 provider 未登录，请求会返回 `503 no_account_for_provider`，错误信息中带有需要执行的 `--login` 命令。
 
+> **路由完全只看 model 字段、不看请求端点** —— 这意味着 OpenAI 客户端(Codex CLI、Cherry Studio 等)只要 model 写 `claude-opus-4-7`,auth2api 会路由到 anthropic 上游并自动做 OpenAI ↔ Anthropic 协议翻译,反过来也成立。完整路由矩阵、粘性账号选择算法(20–60 min 粘性窗口、cooldown 优先级)、跨协议翻译细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
 #### "Cursor 独占" 模式（让 Claude Code / OpenAI SDK 零配置可用）
 
 当 **只有 Cursor 一个 provider 登录了账号**（anthropic、codex 都为空）时，所有模型名自动走 Cursor，`cursor-` 前缀变成可选。这意味着 Cursor 单 provider 的 auth2api 可以直接当 Anthropic API 或 OpenAI API 用：
@@ -290,10 +295,13 @@ Claude Code 使用的是原生 `/v1/messages` 接口，auth2api 会直接透传�
 auth2api 支持多个 Claude OAuth 账号，每个账号的 token 作为独立文件存储在 auth 目录中。
 
 - 每执行一次 `--login` 可以添加一个账号的 token
-- 请求使用粘性选择策略 — 同一个账号会被持续使用，直到触发 cooldown
-- 当遇到限流或故障时，auth2api 会自动切换到下一个可用账号
+- 请求使用**粘性选择策略**(20–60 分钟随机粘性窗口)— 同一个账号会被持续使用,直到窗口到期或触发 cooldown
+- 当遇到限流或故障时，auth2api 会自动切换到下一个可用账号;**403 / 额度耗尽现在也会同请求内 failover 到其他账号**
+- 全部账号冷却时挑"最容易恢复"的(`rate_limit` < `server` < `network` < terminal)
 - 逐账号追踪 token 用量（输入、输出、缓存），并定期输出日志
 - 通过 `/admin/accounts` 可查看所有账号的状态
+
+> 完整算法实现 `src/accounts/manager.ts:333-410`,详细说明见 [docs/ARCHITECTURE.md §3](docs/ARCHITECTURE.md#3-账号选择算法)。
 
 ## 管理状态
 
