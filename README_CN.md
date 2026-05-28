@@ -27,6 +27,8 @@ auth2api 的定位很克制：
 - **per-key 限流**：可为每个 key 单独设置每分钟请求数和并发上限，叠加在全局每 IP 限流之上
 - **运行时 key 管理**：通过 admin API（`/admin/keys`）在线增删改 key，独立于 config.yaml 存储，不改写手写 YAML
 - **可插拔存储**：用量事件与托管 key 默认存 SQLite（单 DB 文件），也可用旧的 JSONL/JSON 文件；OAuth token 始终为文件
+
+> 团队部署 / 使用 / 观测 / 管理 / 排障详细手册见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)；版本改动历史见 [`CHANGELOG.md`](CHANGELOG.md)。
 - **默认安全设置**：timing-safe API key 校验、每 IP 限流、仅允许 localhost 浏览器 CORS
 
 ## 运行要求
