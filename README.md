@@ -25,6 +25,8 @@ It is not trying to be a large multi-provider gateway. If you want a compact, un
 - **Per-account health handling** — cooldown, retry, token refresh (with concurrency lock), and `/admin/accounts` snapshot
 - **API-key identity, quota & cost accounting** — name keys with a label/owner, give each a monthly token/cost budget (enforced with `429` + `Retry-After`), and read month-to-date usage vs quota at `/admin/usage/keys`; per-model cost shows up across `/admin/stats`
 - **Per-key rate limiting** — optional per-key requests-per-minute and concurrency caps, layered over the global per-IP limiter
+- **Runtime key management** — create/update/revoke API keys at runtime via the admin API (`/admin/keys`), persisted separately from config.yaml so hand-written YAML is never rewritten
+- **Pluggable storage** — usage events and managed keys persist to SQLite (default, single DB file) or legacy JSONL/JSON files; OAuth tokens stay plain files
 - **Basic safety defaults** — timing-safe API key validation, per-IP rate limiting, localhost-only browser CORS
 
 ## Requirements
@@ -242,6 +244,10 @@ The decoder routes Cursor's chain-of-thought (`reasoning`) bytes to `response.re
 | `GET /admin/accounts`            | Account health/status (API key required)                              |
 | `GET /admin/stats`               | Per-client / per-account / per-API call statistics incl. cost (API key required) |
 | `GET /admin/usage/keys`          | Month-to-date tokens + cost vs quota per key (admin key sees all, others self) |
+| `GET /admin/keys`                | List API keys, redacted to id + policy (admin key required)           |
+| `POST /admin/keys`               | Create a managed key; returns the raw secret once (admin key required) |
+| `PATCH /admin/keys/:id`          | Update a managed key's label/owner/quota/rate-limit/enabled (admin)   |
+| `DELETE /admin/keys/:id`         | Revoke a managed key (admin key required)                             |
 | `POST /admin/reload`             | Reload tokens from disk (API key required)                            |
 | `GET /health`                    | Health check                                                          |
 

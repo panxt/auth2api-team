@@ -16,6 +16,7 @@ import {
   checkKeyRpm,
   acquireConcurrency,
   releaseConcurrency,
+  cleanupRpm,
 } from "./ratelimit/per-key";
 import { ManagedKeyStore, ManagedKeyError } from "./keys/store";
 
@@ -35,13 +36,16 @@ function rateLimit(ip: string): boolean {
   return entry.count <= RATE_LIMIT_MAX;
 }
 
-// Cleanup stale entries every 5 minutes
+// Cleanup stale entries every 5 minutes — both the per-IP window map here and
+// the per-key window map in ratelimit/per-key (otherwise stale entries for
+// deleted/idle keys accumulate over a long-running process).
 const cleanupTimer = setInterval(
   () => {
     const now = Date.now();
     for (const [ip, entry] of rateLimitMap) {
       if (now > entry.resetAt) rateLimitMap.delete(ip);
     }
+    cleanupRpm(now);
   },
   5 * 60 * 1000,
 );

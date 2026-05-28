@@ -155,7 +155,7 @@ async function startServer(): Promise<void> {
 
   // Open the configured storage backend (sqlite by default, or file). It
   // provides the usage event log and the managed-key repository.
-  const storage = openStorage(config, authDir);
+  const storage = await openStorage(config, authDir);
 
   // Merge UI-managed keys into the live api-keys map before anything reads it
   // (quota detection, auth), so managed keys behave exactly like config keys.

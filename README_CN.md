@@ -25,6 +25,8 @@ auth2api 的定位很克制：
 - **账号健康管理**：内置 cooldown、重试、带并发锁的 token 刷新、`/admin/accounts` 快照
 - **API key 身份、额度与成本核算**：给 key 命名（label/owner），为每个 key 设置月度 token/成本预算（超额返回 `429` + `Retry-After`），通过 `/admin/usage/keys` 查看当月用量 vs 配额；`/admin/stats` 各维度均带按模型计算的成本
 - **per-key 限流**：可为每个 key 单独设置每分钟请求数和并发上限，叠加在全局每 IP 限流之上
+- **运行时 key 管理**：通过 admin API（`/admin/keys`）在线增删改 key，独立于 config.yaml 存储，不改写手写 YAML
+- **可插拔存储**：用量事件与托管 key 默认存 SQLite（单 DB 文件），也可用旧的 JSONL/JSON 文件；OAuth token 始终为文件
 - **默认安全设置**：timing-safe API key 校验、每 IP 限流、仅允许 localhost 浏览器 CORS
 
 ## 运行要求
@@ -242,6 +244,10 @@ Decoder 会把 Cursor 上游的 chain-of-thought（reasoning）字节路由到 `
 | `GET /admin/accounts`            | 查看账号健康状态（需要 API key）                     |
 | `GET /admin/stats`               | 按客户端/账号/接口三维聚合的调用统计（含成本，需要 API key） |
 | `GET /admin/usage/keys`          | 每个 key 当月 token+成本 vs 配额（admin key 看全部，普通 key 看自己） |
+| `GET /admin/keys`                | 列出 API key（仅 id + 策略，需 admin key）           |
+| `POST /admin/keys`               | 创建托管 key，一次性返回明文（需 admin key）         |
+| `PATCH /admin/keys/:id`          | 改 key 的 label/owner/额度/限流/启禁（需 admin key） |
+| `DELETE /admin/keys/:id`         | 吊销托管 key（需 admin key）                         |
 | `POST /admin/reload`             | 从磁盘重新加载 token（需要 API key）                 |
 | `GET /health`                    | 健康检查                                             |
 
