@@ -4,6 +4,16 @@ config.yaml
 *.log
 .env
 
+# Internal-only docs (contain API keys / internal network info)
+docs/INTERNAL_SETUP.md
+
+# Per-user onboarding manuals (each contains a unique API key) + config backups
+out/
+config.yaml.bak.*
+
+# Admin script private config (contains admin API key)
+.auth2api-admin.env
+
 # Editor / IDE local state
 .cursor/
 .idea/
