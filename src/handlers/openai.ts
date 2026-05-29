@@ -497,6 +497,10 @@ export function createChatCompletionsHandler(
 
       const stream = !!body.stream;
       const model = resolveModel(body.model || "claude-sonnet-4-6");
+      // Mirror handlers/anthropic.ts: write the resolved model back so any
+      // downstream code that reads body.model (cloaking, cursor/codex paths,
+      // stats) sees the canonical id rather than a possibly-aliased one.
+      body.model = model;
       const provider = registry.forModel(model);
       tagStatsModel(resp, model, provider.id);
 
@@ -616,6 +620,9 @@ export function createResponsesHandler(
       }
 
       const model = resolveModel(body.model || "claude-sonnet-4-6");
+      // Ensure the resolved model id propagates into the body for downstream
+      // codex/cursor passthrough and stats. See note in handlers/anthropic.ts.
+      body.model = model;
       const provider = registry.forModel(model);
       tagStatsModel(resp, model, provider.id);
 

@@ -30,6 +30,12 @@ const M = 1_000_000;
  * Cursor is intentionally absent (experimental, unpriced → cost 0).
  */
 export const DEFAULT_PRICING: Record<string, ModelPrice> = {
+  "claude-opus-4-8": {
+    inputPerMTok: 15,
+    outputPerMTok: 75,
+    cacheWritePerMTok: 18.75,
+    cacheReadPerMTok: 1.5,
+  },
   "claude-opus-4-7": {
     inputPerMTok: 15,
     outputPerMTok: 75,

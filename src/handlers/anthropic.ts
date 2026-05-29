@@ -181,6 +181,10 @@ export function createMessagesHandler(
       }
 
       const model = resolveModel(body.model || "claude-sonnet-4-6");
+      // Persist the resolved name into the body so the upstream call sees the
+      // canonical Anthropic model id (e.g. "opus" → "claude-opus-4-8")
+      // rather than the alias the client sent.
+      body.model = model;
       const provider = registry.forModel(model);
       tagStatsModel(resp, model, provider.id);
 
@@ -272,6 +276,9 @@ export function createCountTokensHandler(
     try {
       const body = req.body;
       const model = resolveModel(body?.model || "claude-sonnet-4-6");
+      // Resolved model name (e.g. alias expanded) needs to be in the body
+      // so the upstream count-tokens call uses the canonical id.
+      if (body) body.model = model;
       const provider = registry.forModel(model);
       tagStatsModel(resp, model, provider.id);
 
