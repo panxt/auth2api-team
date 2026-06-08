@@ -69,8 +69,10 @@ export interface StreamFailoverOptions {
    *  this for endpoints where the inbound and upstream wire formats differ
    *  (e.g. OpenAI Chat client over Anthropic upstream). Return null to
    *  drop the event entirely. State (if any) is managed by the caller via
-   *  closure. */
-  transformEvent?: (event: SseEvent) => Uint8Array | string | null;
+   *  closure. The running `usage` object is the same one passed to
+   *  `onEvent` so translators (e.g. anthropicSSEToChat) can include final
+   *  usage in the terminal client-facing event. */
+  transformEvent?: (event: SseEvent, usage: UsageData) => Uint8Array | string | null;
   /** Bound on how many bytes we'll buffer before forced commit (safety). */
   bufferLimit?: number;
 }
@@ -159,7 +161,7 @@ export async function streamUntilCommitOrFailover(
     if (!useTransform || !options.transformEvent) return;
     let out: Uint8Array | string | null;
     try {
-      out = options.transformEvent(ev);
+      out = options.transformEvent(ev, usage);
     } catch (err) {
       // Don't crash the stream on a translator throw; just drop this event.
       return;
@@ -181,27 +183,32 @@ export async function streamUntilCommitOrFailover(
     // Always let caller extract usage(both pre and post commit).
     options.onEvent?.(ev, usage);
 
-    // In transform mode, we always re-emit (pre-commit buffer, post-commit write).
-    // Pre-commit emits will be flushed on commit, or discarded on failover.
-    if (useTransform) {
-      // Only emit if this event passes the failover gate — translator decides shape.
-      // We DEFER emission for "error" events until we know failoverability.
-      if (ev.event !== "error") {
-        emitTransformed(ev);
-      }
+    // Ask the provider-specific classifier if THIS event indicates a
+    // failover-worthy upstream condition. The classifier itself decides
+    // which event NAMES it cares about (Anthropic uses `error`, OpenAI
+    // Responses uses `error` AND `response.failed`, etc.) — gating to
+    // `ev.event === "error"` here would lose `response.failed` failovers.
+    // (Fix C1 from codex review.)
+    const classification = options.classifyError(ev);
+    const isErrorEvent = classification != null;
+
+    // In transform mode, re-emit non-error events immediately (pre-commit
+    // buffer, post-commit write). For error events we DEFER emission until
+    // we know failoverability — if failover triggers we drop the error.
+    if (useTransform && !isErrorEvent) {
+      emitTransformed(ev);
     }
 
     if (committed) return null;
 
-    if (ev.event === "error") {
-      const classification = options.classifyError(ev);
-      if (classification && classification.failover) {
+    if (isErrorEvent) {
+      if (classification!.failover) {
         // Failover — DON'T translate the error to the client; the caller
         // will retry with a new account and emit the next attempt's stream.
         return {
           kind: "failover",
-          errorKind: classification.errorKind,
-          detail: classification.detail,
+          errorKind: classification!.errorKind,
+          detail: classification!.detail,
         };
       }
       // Non-failoverable error: commit + forward.

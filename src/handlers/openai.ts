@@ -594,11 +594,13 @@ export function createChatCompletionsHandler(
             onEvent: (ev, usage) =>
               extractUsageFromSSE(ev.event, tryParseJson(ev.data), usage),
             // Per-attempt translator state (F1) — fresh on each retry.
+            // Pass running `usage` so the translator can include the
+            // OpenAI usage chunk in message_stop (Fix C2 from codex).
             makeTransformEvent: () => {
               const state = createStreamState(model, includeUsage);
-              return (ev: SseEvent) => {
+              return (ev: SseEvent, usage) => {
                 const parsed = tryParseJson(ev.data);
-                const out = anthropicSSEToChat(ev.event, parsed, state);
+                const out = anthropicSSEToChat(ev.event, parsed, state, usage);
                 return out.length > 0 ? out.join("") : null;
               };
             },
@@ -760,25 +762,18 @@ export function createResponsesHandler(
               extractUsageFromSSE(ev.event, tryParseJson(ev.data), usage),
             // Per-attempt translator state (F1) — failover resets respId /
             // sequence counters cleanly between accounts.
+            // Pass running `usage` so response.completed carries real
+            // usage numbers, not zeros (Fix C3 from codex).
             makeTransformEvent: () => {
               const state = makeResponsesState();
-              return (ev: SseEvent) => {
+              return (ev: SseEvent, usage) => {
                 const parsed = tryParseJson(ev.data);
-                // The translator needs a usage object; updates are picked up
-                // by onEvent above, so a throwaway here is fine.
-                const dummyUsage = {
-                  inputTokens: 0,
-                  outputTokens: 0,
-                  cacheCreationInputTokens: 0,
-                  cacheReadInputTokens: 0,
-                  reasoningOutputTokens: 0,
-                };
                 const out = anthropicSSEToResponses(
                   ev.event,
                   parsed,
                   state,
                   model,
-                  dummyUsage,
+                  usage,
                 );
                 return out.length > 0 ? out.join("") : null;
               };

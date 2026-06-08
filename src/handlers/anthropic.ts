@@ -100,9 +100,11 @@ async function proxyCodexMessages(args: {
           extractUsageFromSSE(ev.event, tryParseJson(ev.data), usage),
         // Per-attempt state factory — mid-stream failover must NOT reuse
         // dirty translator state from a failed earlier attempt (F1).
+        // (responsesSSEToAnthropic doesn't take usage; the `_usage` arg
+        // from the helper is intentionally unused here.)
         makeTransformEvent: () => {
           const state = makeResponsesToAnthropicState(model);
-          return (ev: SseEvent) => {
+          return (ev: SseEvent, _usage) => {
             const parsed = tryParseJson(ev.data);
             const out = responsesSSEToAnthropic(ev.event, parsed, state);
             return out.length > 0 ? out.join("") : null;
