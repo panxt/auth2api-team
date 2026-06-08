@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ═══════════════════════════════════════════════════════════════════
+   auth2api 5h-window prewarm cron — launchd plist template (macOS)
+  ═══════════════════════════════════════════════════════════════════
+
+  详情见 docs/OPERATIONS.md §5.8(数学原理 + 安装步骤)。
+
+  用法:
+    1. cp scripts/com.example.auth2api.prewarm.example.plist \
+         ~/Library/LaunchAgents/com.<your-user>.auth2api.prewarm.plist
+    2. 把下面 6 处 <user> 替换为实际 macOS 用户名(whoami 的输出)
+    3. 把 REPO_DIR(`/Users/<user>/work/github/auth2api`)改成你实际的克隆路径
+    4. 把 StandardOutPath / StandardErrorPath 改成你想要日志去的位置
+    5. launchctl load ~/Library/LaunchAgents/com.<your-user>.auth2api.prewarm.plist
+    6. launchctl start com.<your-user>.auth2api.prewarm   # 手动跑一次验证
+
+  调时刻(默认每天 8:00):改 StartCalendarInterval 里的 Hour/Minute。
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.&lt;user&gt;.auth2api.prewarm</string>
+
+  <!--
+    每天(含周末)08:00 触发一次 prewarm。
+    工作时段 8:30-17:30 时 ping 在 8:00 = 工作中点-5h,使两个 5h 窗口
+    都全部落在工作时段内(详见 docs/OPERATIONS.md §5.8.1)。
+  -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>8</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/&lt;user&gt;/work/github/auth2api/scripts/auth2api-admin.sh</string>
+    <string>prewarm</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/&lt;user&gt;/work/github/auth2api</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/&lt;user&gt;</string>
+    <key>USER</key>
+    <string>&lt;user&gt;</string>
+    <!-- PATH:让脚本里调用的 curl / python3 等命令能找到 -->
+    <key>PATH</key>
+    <string>/Users/&lt;user&gt;/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/&lt;user&gt;/.auth2api-logs/prewarm.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/&lt;user&gt;/.auth2api-logs/prewarm.err.log</string>
+
+  <!-- 不需要 KeepAlive — 这是 cron-like,跑完就退出 -->
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

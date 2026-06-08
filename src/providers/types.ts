@@ -23,6 +23,30 @@ export interface CloakingContext {
   config: Config;
 }
 
+/**
+ * One row in the prewarm report — one upstream account.
+ * `ok=true` means the ping reached the upstream and produced a normal
+ * response, which implies the 5h rate-limit window has been triggered
+ * (or refreshed) for this account.
+ */
+export interface PrewarmRecord {
+  email: string;
+  ok: boolean;
+  /** Non-empty when ok=false. */
+  error?: string;
+  /** Round-trip latency to upstream, ms. */
+  latencyMs?: number;
+  /** Upstream-reported token usage of the prewarm ping itself. */
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
+export interface PrewarmResult {
+  provider: ProviderId;
+  results: PrewarmRecord[];
+  generated_at: string;
+}
+
 export interface ProviderOAuthInfo {
   callbackPort: number;
   callbackPath: string;
@@ -55,4 +79,12 @@ export interface Provider {
    * Code CLI cloaking. Codex deliberately has no cloaking.
    */
   applyCloaking?(opts: CloakingContext): any;
+  /**
+   * Optional: send a minimal best-effort request to each account in the pool
+   * to (re)start their 5h rate-limit window. Only meaningful for providers
+   * with a "first-message triggered" tumbling window (Anthropic). Codex /
+   * Cursor providers should not implement this — their rate-limit semantics
+   * are different.
+   */
+  prewarm?(config: Config): Promise<PrewarmResult>;
 }

@@ -461,6 +461,33 @@ export function createServer(
     });
   });
 
+  // POST /admin/prewarm — sends one cheap ping to every loaded upstream
+  // account whose provider supports it (Anthropic only for now). Used to
+  // (re)start the 5h rate-limit window so it aligns with working hours
+  // instead of with whenever the first real user request lands.
+  // Admin-only because it issues real upstream calls that count against
+  // weekly caps.
+  app.post("/admin/prewarm", requireAdmin, async (_req, res) => {
+    const providers: unknown[] = [];
+    for (const p of registry.all()) {
+      if (!p.prewarm) continue;
+      try {
+        providers.push(await p.prewarm(config));
+      } catch (err: any) {
+        providers.push({
+          provider: p.id,
+          results: [],
+          error: err?.message || String(err),
+          generated_at: new Date().toISOString(),
+        });
+      }
+    }
+    res.json({
+      providers,
+      generated_at: new Date().toISOString(),
+    });
+  });
+
   app.use("/v1", requireApiKey);
   app.use("/v1", statsFinishMiddleware);
   app.get("/v1/models", async (_req, res) => {

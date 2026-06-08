@@ -447,6 +447,133 @@ storage:
 
 切换后重启即可。**数据不互通**(file → sqlite 不自动迁移);如需保留历史 stats,先备份 `~/.auth2api/` 再切。
 
+### 5.8 5h 窗口 Prewarm 自动调度
+
+Anthropic Pro/Max 订阅的 5h 速率限制窗口**不是定时滚动**,而是**"发出第一条消息那一刻"开始计时**。窗口结束后还要等下一条消息才会开新窗口。
+
+也就是说:**可以人为提前发 ping 把窗口重置点挪到工作时段中间**,让工作时段跨越 2 个完整窗口,理论上限 +80% 配额。
+
+#### 5.8.1 数学
+
+工作时段 `[start, end]`(长度 W 小时)、ping 时刻 P,Anthropic 窗口长度 5h:
+
+- 不优化 → 工作时段触及窗口数 = `ceil(W / 5)`(W ≤ 5h 时 = 1,5 < W ≤ 10 时 = 2)
+- ping 在工作开始前(P < start)→ 让重置点 `P + 5h` 落在 `[start, end]` 内 = 工作时段跨 2 个窗口
+
+**最优 ping 时刻 = 工作中点 - 5h**。对工作时段 8:30-17:30(W=9h):
+- 中点 13:00,P = 13:00 - 5h = **8:00 AM**
+- 窗口 1: 8:00-13:00,窗口 2: 13:00-18:00
+- 工作时段覆盖每窗口 4.5h(90%)→ 单账号有效配额 1.8X
+
+对 N 个账号:**总配额 ≈ N × 1.8X**(vs 不优化时 N × 1X)= **+80%**。
+
+#### 5.8.2 安装
+
+仓库下 `scripts/com.example.auth2api.prewarm.example.plist` 是默认 8:00 AM **每天**(含周末)触发的 plist 模板:
+
+```bash
+# 复制模板到 LaunchAgents,改路径/用户名(模板里所有 <user> 都要替换)
+cp scripts/com.example.auth2api.prewarm.example.plist \
+  ~/Library/LaunchAgents/com.<user>.auth2api.prewarm.plist
+
+# 编辑修改路径(REPO_DIR、HOME、StandardOutPath 等)
+# 然后 load
+launchctl load ~/Library/LaunchAgents/com.<user>.auth2api.prewarm.plist
+
+# 验证
+launchctl list | grep prewarm   # 应该出现一行,LastExitStatus=0
+launchctl start com.<user>.auth2api.prewarm   # 手动立即跑一次,验证
+
+# 日志
+tail -f ~/.<your-log-dir>/auth2api.prewarm.out.log
+```
+
+plist 关键字段:
+```xml
+<key>StartCalendarInterval</key>
+<dict>
+  <key>Hour</key><integer>8</integer>
+  <key>Minute</key><integer>0</integer>
+</dict>
+```
+
+**省略 `Weekday`** = 每天都跑(用户要求周末也激活,避免周一冷启动)。如果你只想工作日跑,把上面改成:
+```xml
+<key>StartCalendarInterval</key>
+<array>
+  <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
+  <!-- ... 2-5 同样 -->
+</array>
+```
+
+#### 5.8.3 手动触发
+
+```bash
+# 立即给所有上游账号发一条 ping
+./scripts/auth2api-admin.sh prewarm
+
+# 或直接打 HTTP(admin key)
+curl -X POST -H "Authorization: Bearer <ADMIN_KEY>" http://127.0.0.1:8317/admin/prewarm | jq
+
+# Dry-run:只列出会被 ping 的账号
+./scripts/auth2api-admin.sh prewarm --dry-run
+```
+
+成功输出形如:
+```
+═══ anthropic ═══
+  ✓ a@example.com    1101ms  (in=8, out=1)
+  ✓ b@example.com     980ms  (in=8, out=1)
+  ✓ c@example.com    1240ms  (in=8, out=1)
+Total: 3/3 accounts prewarmed
+```
+
+每次 ping 消耗 ≈ **9 token**(haiku),价格基本可忽略(0.0001 USD)。
+
+#### 5.8.4 调整 ping 时刻
+
+ping 时刻应**落在工作中点 - 5h**。常见工作时段对应:
+
+| 工作时段 | 工作中点 | ping 时刻 | 窗口覆盖 |
+|---|---|---|---|
+| 8:30 - 17:30 | 13:00 | **8:00** | 8:00-13:00, 13:00-18:00 |
+| 9:00 - 18:00 | 13:30 | **8:30** | 8:30-13:30, 13:30-18:30 |
+| 10:00 - 19:00 | 14:30 | **9:30** | 9:30-14:30, 14:30-19:30 |
+
+改 plist 里的 `Hour` / `Minute` 后 `launchctl unload + load` 生效。
+
+#### 5.8.5 工作时段 ≤ 5h 的情况
+
+如果你工作时段比一个窗口短(比如下午 2-6 PM 共 4h):
+
+- 不优化:1 个窗口(start 时触发,end 时还没满 5h)
+- ping 在工作前 1h(13:00 ping → 工作 14:00,窗口 1 用 14-18 = 4h)
+- ping 在工作前 3h(11:00 ping → 窗口 1: 11-16,窗口 2: 16-21;工作 14-18 跨 2 个窗口)→ **配额翻倍**
+
+短工作时段时,文章说的"工作前 3h"是对的。长工作时段(≥ 5h)按 §5.8.4 的"工作中点 - 5h"。
+
+#### 5.8.6 跨平台(给同事自己的本地代理)
+
+如果同事在自己机器上跑了本地代理,他们配自己的 prewarm:
+
+**Linux**(crontab):
+```bash
+# 每天 8:00 触发本地代理的 prewarm endpoint
+0 8 * * * curl -fsS -X POST -H "Authorization: Bearer $(cat ~/.auth2api-admin.key)" \
+  http://127.0.0.1:8317/admin/prewarm > /tmp/auth2api.prewarm.log 2>&1
+```
+
+**Windows**(任务计划程序):创建任务 → 触发器每天 8:00 → 操作:
+```
+powershell.exe -Command "Invoke-RestMethod -Method POST -Uri http://127.0.0.1:8317/admin/prewarm -Headers @{Authorization='Bearer YOUR_KEY'}"
+```
+
+#### 5.8.7 注意
+
+- ping 失败**不进 cooldown**(best-effort,失败只是当天少跨一个窗口)
+- **周配额**也是 Anthropic 的硬限,prewarm 不能突破。但每天 1 个 ping × 9 tokens × 7 天 ≈ 63 tokens / 周,几乎零成本
+- 服务必须在 8:00 时处于 healthy 状态;launchd 的 `KeepAlive=true` 已保证
+
 ---
 
 ## 6. 故障排查

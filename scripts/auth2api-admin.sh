@@ -483,6 +483,62 @@ cmd_delete() {
 }
 
 # ─── 子命令: doc ─────────────────────────────────────────────────────────
+# ─── 子命令: prewarm ─────────────────────────────────────────────────────
+cmd_prewarm() {
+  local dry_run="false"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry_run="true"; shift ;;
+      -*) die "Unknown flag: $1" ;;
+      *) die "Unexpected arg: $1" ;;
+    esac
+  done
+
+  if [[ "$dry_run" == "true" ]]; then
+    info "Dry run — would POST $LOCAL_BASE/admin/prewarm"
+    echo
+    echo "  Accounts that would receive a ping:"
+    curl -fs -H "Authorization: Bearer $ADMIN_API_KEY" "$LOCAL_BASE/admin/accounts" \
+      | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for p, info in d['providers'].items():
+    for a in info['accounts']:
+        marker = 'OK' if a['available'] else 'COOLDOWN(skipped)'
+        print(f'    {p}: {a[\"email\"]} [{marker}]')
+"
+    return
+  fi
+
+  info "Calling /admin/prewarm..."
+  local resp
+  resp=$(curl -fs -X POST -H "Authorization: Bearer $ADMIN_API_KEY" \
+    "$LOCAL_BASE/admin/prewarm" 2>&1) \
+    || die "prewarm 请求失败: $resp"
+
+  echo "$resp" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+total = 0
+ok = 0
+for p in d.get('providers', []):
+    print()
+    print(f'  ═══ {p[\"provider\"]} ═══')
+    for r in p['results']:
+        total += 1
+        if r['ok']:
+            ok += 1
+            lat = r.get('latencyMs', 0)
+            inp = r.get('inputTokens', 0)
+            out = r.get('outputTokens', 0)
+            print(f'    \033[32m✓\033[0m {r[\"email\"]:<40} {lat:>4}ms  (in={inp}, out={out})')
+        else:
+            print(f'    \033[31m✗\033[0m {r[\"email\"]:<40} {r.get(\"error\",\"unknown\")}')
+print()
+print(f'  Total: {ok}/{total} accounts prewarmed')
+"
+}
+
 cmd_doc() {
   local target="" include_vpn="false"
   while [[ $# -gt 0 ]]; do
@@ -697,6 +753,10 @@ ${C_BLD}子命令${C_RST}:
 
   ${C_GRN}doc${C_RST} <user>              重新生成某用户的专属手册
 
+  ${C_GRN}prewarm${C_RST}                  立即 prewarm 全部上游账号(把 5h 窗口
+                            提前到现在触发,让重置点落在工作时段中间)
+                            可选: --dry-run 只列出会被 ping 的账号
+
 ${C_BLD}<user> 简写${C_RST}:
   完整 label("zhangsan/dev")或唯一 username("zhangsan")
 
@@ -745,5 +805,6 @@ case "$1" in
   disable) shift; cmd_set_enabled false "$@" ;;
   delete)  shift; cmd_delete "$@" ;;
   doc)     shift; cmd_doc "$@" ;;
+  prewarm) shift; cmd_prewarm "$@" ;;
   *) die "unknown subcommand: $1\n\nRun '$0 help' for usage." ;;
 esac

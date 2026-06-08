@@ -477,6 +477,30 @@ export class AccountManager {
     return acct.refreshPromise;
   }
 
+  /**
+   * List all loaded account emails in insertion order. Read-only — does NOT
+   * affect sticky routing. Used by /admin/prewarm to iterate the pool.
+   */
+  listEmails(): string[] {
+    return [...this.accountOrder];
+  }
+
+  /**
+   * Build a usable AvailableAccount handle for a specific email, bypassing
+   * sticky / round-robin selection. Returns null if the email is unknown OR
+   * the account is currently in cooldown (caller should treat as skipped).
+   *
+   * Critical: this is the only sanctioned way to address a specific account
+   * for out-of-band calls (e.g. prewarm). Do NOT use it for client-facing
+   * traffic — that path must go through getNextAccount().
+   */
+  getAvailableAccount(email: string): AvailableAccount | null {
+    const acct = this.accounts.get(email);
+    if (!acct) return null;
+    if (acct.cooldownUntil > Date.now()) return null;
+    return buildAvailableAccount(this.authDir, email, acct.token, this.provider);
+  }
+
   getSnapshots(): AccountSnapshot[] {
     const now = Date.now();
     const snapshots: AccountSnapshot[] = [];
