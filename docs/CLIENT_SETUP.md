@@ -541,9 +541,40 @@ curl -s -H "Authorization: Bearer <API_KEY>" <BASE_URL>/v1/models
 
 ---
 
-## 4. 关于"桌面 App"
+## 3.5 Cowork / Claude 桌面 3P enterprise 模式
 
-需要先澄清:**Claude.ai 桌面 app、ChatGPT 桌面 app 不能改 Base URL**,它们直连厂商服务器,无法转到本代理。能转的"客户端"是:
+新版 Claude 桌面客户端(Cowork 3P,任务管理 + 项目工作流 + 多 Agent 协作)**支持自定义 baseUrl**,但有**强制 https 检查**:
+
+```
+message: Invalid custom3p enterprise config: baseUrl: must use https (or http on loopback)
+failingField: baseUrl
+```
+
+也就是说,Cowork **拒绝** `http://172.16.x.x:xxxx`(普通的 auth2api 默认 URL)。
+
+### 3.5.1 解决:用 https URL
+
+管理员需要在 auth2api host 上配 Caddy 反代终结 TLS(详见 [`docs/CADDY_TLS.md`](CADDY_TLS.md))。配完后**你这边**:
+
+| 步骤 | 操作 |
+|---|---|
+| ① 装管理员发的 root CA | macOS:`sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/Downloads/auth2api-caddy-root.crt`<br>Windows:`Import-Certificate -FilePath C:\path\to\auth2api-caddy-root.crt -CertStoreLocation Cert:\LocalMachine\Root` |
+| ② 加 hosts(如果管理员用 hostname 而非 IP)| `sudo bash -c 'echo "172.16.13.203 auth2api.team" >> /etc/hosts'` |
+| ③ Cowork app → Settings → Custom Provider → baseUrl 改 `https://...:8443`(端口看管理员实际配)| API Key 不变,继续填 `sk-...` |
+| ④ 浏览器开 `https://auth2api.team:8443/health` 验证锁头无红叉 | 看到 `{"status":"ok"}` 说明全链路 OK |
+
+### 3.5.2 排错
+
+| 现象 | 看哪 |
+|---|---|
+| 仍报 "must use https" | baseUrl 没改、或还是 http://;改完保存要点 Apply / Save |
+| 报 cert invalid / untrusted | root CA 没装,见 ① |
+| 报 hostname mismatch | 证书的 SAN 不覆盖你输的 host(找管理员确认 Caddyfile 里两个 host 都列了)|
+| 流式输出卡 / 看不到逐字 | 找管理员看 Caddyfile 有没有 `flush_interval -1`(必须)|
+
+---
+
+## 4. 关于"桌面 App"
 
 | 客户端 | 能转? |
 |---|---|
@@ -553,7 +584,8 @@ curl -s -H "Authorization: Bearer <API_KEY>" <BASE_URL>/v1/models
 | OpenAI Codex CLI(`codex`) | ✅ |
 | OpenAI Codex IDE 插件 | ✅ |
 | Cherry Studio / ChatBox 等第三方 GUI | ✅(选 OpenAI 兼容)|
-| Claude.ai 桌面 app | ❌(无 Base URL 设置项)|
+| **Cowork / Claude 桌面 3P enterprise** | ✅(**强制 https**,见 §3.5)|
+| Claude.ai 桌面聊天 app(无 3P 模式)| ❌(无 Base URL 设置项)|
 | ChatGPT 桌面 app | ❌(同上)|
 
 ---

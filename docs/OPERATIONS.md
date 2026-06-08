@@ -574,6 +574,20 @@ powershell.exe -Command "Invoke-RestMethod -Method POST -Uri http://127.0.0.1:83
 - **周配额**也是 Anthropic 的硬限,prewarm 不能突破。但每天 1 个 ping × 9 tokens × 7 天 ≈ 63 tokens / 周,几乎零成本
 - 服务必须在 8:00 时处于 healthy 状态;launchd 的 `KeepAlive=true` 已保证
 
+### 5.9 TLS 前置:给 Cowork / 桌面 enterprise 客户端用
+
+新版 Claude 桌面客户端(Cowork 3P)对自定义 baseUrl **强制要求 https 或 http://loopback**,直接拒绝 `http://172.16.x.x:xxxx` 形式的明文 URL。
+
+解决方案:在 auth2api 前面放一个 **Caddy** 反代,Caddy 终结 TLS,反代到本地的 auth2api。
+
+完整部署手册(数学原理、Caddyfile / plist 模板、客户端信任 CA、回滚)见 **[`docs/CADDY_TLS.md`](CADDY_TLS.md)**。
+
+仓库里提供的入库模板:
+- `scripts/Caddyfile.example` — Caddy 配置模板(`tls internal` + 反代 + 流式 `flush_interval -1`)
+- `scripts/com.example.caddy.example.plist` — launchd 守护模板
+
+工作量:host 侧 ~30 分钟,每个客户端 ~5 分钟(装 root CA + 改 baseUrl)。
+
 ---
 
 ## 6. 故障排查
