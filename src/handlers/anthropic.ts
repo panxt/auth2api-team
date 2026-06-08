@@ -1,10 +1,28 @@
 import { Request, Response as ExpressResponse } from "express";
 import { Config, isDebugLevel } from "../config";
-import { extractUsage } from "../accounts/manager";
+import { extractUsage, UsageData } from "../accounts/manager";
 import { ProviderRegistry } from "../providers/registry";
 import { proxyWithRetry } from "../utils/http";
 import { resolveModel } from "../upstream/translator";
 import { handleStreamingResponse } from "../upstream/streaming";
+import {
+  proxyStreamingWithFailover,
+  classifyAnthropicError,
+  classifyOpenAIResponsesError,
+  ANTHROPIC_CONTENT_EVENTS,
+  OPENAI_RESPONSES_CONTENT_EVENTS,
+  SseEvent,
+} from "../upstream/streaming-failover";
+import { extractUsageFromSSE } from "../upstream/streaming";
+
+function tryParseJson(s: string): any {
+  if (!s) return undefined;
+  try {
+    return JSON.parse(s);
+  } catch {
+    return undefined;
+  }
+}
 import { normalizeCodexResponsesBody } from "../upstream/codex-api";
 import { tagStatsModel, tagStatsUsage } from "../stats/recorder";
 import {
@@ -59,6 +77,41 @@ async function proxyCodexMessages(args: {
     console.log(JSON.stringify(responsesBody, null, 2));
   }
 
+  // Streaming: use failover-aware path. Mirrors the anthropic-native version
+  // but consumes upstream Responses SSE and emits Anthropic Messages SSE via
+  // the existing translator.
+  if (stream) {
+    const state = makeResponsesToAnthropicState(model);
+    try {
+      await proxyStreamingWithFailover(resp, {
+        tag: "Messages(codex)",
+        manager: provider.manager,
+        config,
+        upstream: (account, signal) =>
+          provider.callMessages({
+            body: responsesBody,
+            request: req,
+            account,
+            config,
+            signal,
+          }),
+        contentEvents: OPENAI_RESPONSES_CONTENT_EVENTS,
+        classifyError: classifyOpenAIResponsesError,
+        onEvent: (ev, usage) =>
+          extractUsageFromSSE(ev.event, tryParseJson(ev.data), usage),
+        transformEvent: (ev: SseEvent) => {
+          const parsed = tryParseJson(ev.data);
+          const out = responsesSSEToAnthropic(ev.event, parsed, state);
+          return out.length > 0 ? out.join("") : null;
+        },
+      });
+    } catch (err: any) {
+      console.error("Messages(codex) streaming-failover error:", err?.message);
+      internalError(resp);
+    }
+    return;
+  }
+
   await proxyWithRetry("Messages(codex)", resp, config, {
     manager: provider.manager,
     upstream: (account, signal) =>
@@ -71,6 +124,9 @@ async function proxyCodexMessages(args: {
       }),
     success: async (upstream, account) => {
       if (stream) {
+        // Wired via proxyStreamingWithFailover above (outside this proxyWithRetry).
+        // This branch is no longer reached for stream=true; keep as defensive
+        // fallback in case the dispatch above lets stream slip through.
         const state = makeResponsesToAnthropicState(model);
         const result = await handleStreamingResponse(upstream, resp, {
           onEvent: (event, data) => responsesSSEToAnthropic(event, data, state),
@@ -221,6 +277,53 @@ export function createMessagesHandler(
       // because converting Cursor's protobuf reply to Anthropic non-stream
       // JSON is a separate adapter we haven't written yet.
       const stream = provider.id === "cursor" ? true : !!body.stream;
+
+      // Streaming + anthropic upstream → use the failover-aware path that
+      // buffers the SSE preamble and rotates to a fresh account if upstream
+      // emits a rate-limit / overload error before any content is flushed.
+      // Cursor's stream re-encoding has different framing — keep its existing
+      // pre-stream-only path for now.
+      if (stream && provider.id === "anthropic") {
+        try {
+          await proxyStreamingWithFailover(resp, {
+            tag: "Messages",
+            manager: provider.manager,
+            config,
+            upstream: (account, signal) => {
+              const cloaked =
+                provider.applyCloaking?.({
+                  request: req,
+                  account,
+                  config,
+                }) ?? body;
+              return provider.callMessages({
+                body: cloaked,
+                request: req,
+                account,
+                config,
+                signal,
+              });
+            },
+            contentEvents: ANTHROPIC_CONTENT_EVENTS,
+            classifyError: classifyAnthropicError,
+            onEvent: (ev, usage) => {
+              let parsed: any = undefined;
+              if (ev.data) {
+                try {
+                  parsed = JSON.parse(ev.data);
+                } catch {
+                  /* not JSON, ignore */
+                }
+              }
+              extractUsageFromSSE(ev.event, parsed, usage);
+            },
+          });
+        } catch (err: any) {
+          console.error("Messages streaming-failover error:", err?.message);
+          internalError(resp);
+        }
+        return;
+      }
 
       await proxyWithRetry("Messages", resp, config, {
         manager: provider.manager,

@@ -678,7 +678,7 @@ test("loadConfig normalizes debug mode", () => {
 // ══════════════════════════════════════════════════
 
 test("resolveModel maps aliases", () => {
-  assert.equal(resolveModel("opus"), "claude-opus-4-7");
+  assert.equal(resolveModel("opus"), "claude-opus-4-8");
   assert.equal(resolveModel("sonnet"), "claude-sonnet-4-6");
   assert.equal(resolveModel("haiku"), "claude-haiku-4-5-20251001");
 });

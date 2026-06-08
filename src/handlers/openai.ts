@@ -15,7 +15,18 @@ import {
   makeResponsesState,
   anthropicSSEToResponses,
 } from "../upstream/translator";
-import { handleStreamingResponse, readSseEvents } from "../upstream/streaming";
+import { handleStreamingResponse, readSseEvents, extractUsageFromSSE } from "../upstream/streaming";
+import {
+  proxyStreamingWithFailover,
+  classifyAnthropicError,
+  ANTHROPIC_CONTENT_EVENTS,
+  SseEvent,
+} from "../upstream/streaming-failover";
+
+function tryParseJson(s: string): any {
+  if (!s) return undefined;
+  try { return JSON.parse(s); } catch { return undefined; }
+}
 import { normalizeCodexResponsesBody } from "../upstream/codex-api";
 import { normalizeCursorResponsesBody } from "../upstream/cursor-api";
 import {
@@ -553,6 +564,50 @@ export function createChatCompletionsHandler(
         console.log(JSON.stringify(translatedBody, null, 2));
       }
 
+      // Streaming + anthropic upstream → use failover-aware path.
+      if (stream) {
+        const includeUsage = body.stream_options?.include_usage !== false;
+        const state = createStreamState(model, includeUsage);
+        try {
+          await proxyStreamingWithFailover(resp, {
+            tag: "ChatCompletions",
+            manager: provider.manager,
+            config,
+            upstream: (account, signal) => {
+              const cloaked =
+                provider.applyCloaking?.({
+                  body: translatedBody,
+                  request: req,
+                  account,
+                  config,
+                }) ?? translatedBody;
+              return provider.callMessages({
+                body: cloaked,
+                request: req,
+                account,
+                config,
+                signal,
+                structured,
+              });
+            },
+            contentEvents: ANTHROPIC_CONTENT_EVENTS,
+            classifyError: classifyAnthropicError,
+            onEvent: (ev, usage) =>
+              extractUsageFromSSE(ev.event, tryParseJson(ev.data), usage),
+            transformEvent: (ev: SseEvent) => {
+              const parsed = tryParseJson(ev.data);
+              const out = anthropicSSEToChat(ev.event, parsed, state);
+              return out.length > 0 ? out.join("") : null;
+            },
+            errorAdapter: openaiErrorBody,
+          });
+        } catch (err: any) {
+          console.error("ChatCompletions streaming-failover error:", err?.message);
+          internalError(resp);
+        }
+        return;
+      }
+
       await proxyWithRetry("ChatCompletions", resp, config, {
         manager: provider.manager,
         upstream: (account, signal) => {
@@ -573,23 +628,7 @@ export function createChatCompletionsHandler(
           });
         },
         success: async (upstream, account) => {
-          if (stream) {
-            const includeUsage = body.stream_options?.include_usage !== false;
-            const state = createStreamState(model, includeUsage);
-            const result = await handleStreamingResponse(upstream, resp, {
-              onEvent: (event, data, usage) =>
-                anthropicSSEToChat(event, data, state, usage),
-            });
-            if (result.completed) {
-              provider.manager.recordSuccess(account.token.email, result.usage);
-            } else if (!result.clientDisconnected) {
-              provider.manager.recordFailure(
-                account.token.email,
-                "network",
-                "stream terminated before completion",
-              );
-            }
-          } else {
+          {
             const anthropicResp = await upstream.json();
             const usage = extractUsage(anthropicResp);
             provider.manager.recordSuccess(account.token.email, usage);
@@ -688,6 +727,58 @@ export function createResponsesHandler(
         body.text?.format?.type === "json_schema";
       const translatedBody = responsesToAnthropic(body);
 
+      // Streaming + anthropic upstream → use failover-aware path.
+      if (clientWantsStream) {
+        const state = makeResponsesState();
+        try {
+          await proxyStreamingWithFailover(resp, {
+            tag: "Responses",
+            manager: provider.manager,
+            config,
+            upstream: (account, signal) => {
+              const cloaked =
+                provider.applyCloaking?.({
+                  body: translatedBody,
+                  request: req,
+                  account,
+                  config,
+                }) ?? translatedBody;
+              return provider.callMessages({
+                body: cloaked,
+                request: req,
+                account,
+                config,
+                signal,
+                structured,
+              });
+            },
+            contentEvents: ANTHROPIC_CONTENT_EVENTS,
+            classifyError: classifyAnthropicError,
+            onEvent: (ev, usage) =>
+              extractUsageFromSSE(ev.event, tryParseJson(ev.data), usage),
+            transformEvent: (ev: SseEvent) => {
+              const parsed = tryParseJson(ev.data);
+              // The translator needs a usage object; updates are picked up
+              // by onEvent above, so a throwaway here is fine.
+              const dummyUsage = {
+                inputTokens: 0,
+                outputTokens: 0,
+                cacheCreationInputTokens: 0,
+                cacheReadInputTokens: 0,
+                reasoningOutputTokens: 0,
+              };
+              const out = anthropicSSEToResponses(ev.event, parsed, state, model, dummyUsage);
+              return out.length > 0 ? out.join("") : null;
+            },
+            errorAdapter: openaiErrorBody,
+          });
+        } catch (err: any) {
+          console.error("Responses streaming-failover error:", err?.message);
+          internalError(resp);
+        }
+        return;
+      }
+
       await proxyWithRetry("Responses", resp, config, {
         manager: provider.manager,
         upstream: (account, signal) => {
@@ -708,25 +799,7 @@ export function createResponsesHandler(
           });
         },
         success: async (upstream, account) => {
-          if (clientWantsStream) {
-            const state = makeResponsesState();
-            const streamResp = await handleStreamingResponse(upstream, resp, {
-              onEvent: (event, data, usage) =>
-                anthropicSSEToResponses(event, data, state, model, usage),
-            });
-            if (streamResp.completed) {
-              provider.manager.recordSuccess(
-                account.token.email,
-                streamResp.usage,
-              );
-            } else if (!streamResp.clientDisconnected) {
-              provider.manager.recordFailure(
-                account.token.email,
-                "network",
-                "stream terminated before completion",
-              );
-            }
-          } else {
+          {
             const anthropicResp = await upstream.json();
             const usage = extractUsage(anthropicResp);
             provider.manager.recordSuccess(account.token.email, usage);

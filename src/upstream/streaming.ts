@@ -96,7 +96,7 @@ export interface StreamResult {
   usage: UsageData;
 }
 
-function extractUsageFromSSE(event: string, data: any, usage: UsageData): void {
+export function extractUsageFromSSE(event: string, data: any, usage: UsageData): void {
   // Anthropic Messages stream — usage arrives on message_delta.
   if (event === "message_delta") {
     const u = data?.usage;
