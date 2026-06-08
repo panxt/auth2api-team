@@ -27,6 +27,9 @@ auth2api 的定位很克制：
 - **per-key 限流**：可为每个 key 单独设置每分钟请求数和并发上限，叠加在全局每 IP 限流之上
 - **运行时 key 管理**：通过 admin API（`/admin/keys`）在线增删改 key，独立于 config.yaml 存储，不改写手写 YAML
 - **可插拔存储**：用量事件与托管 key 默认存 SQLite（单 DB 文件），也可用旧的 JSONL/JSON 文件；OAuth token 始终为文件
+- **管理看板 `/ui/`**(团队 fork 新增):浏览器内 Vite + React SPA,登录页填 admin key 后可看实时 KPI、近 30 天每日成本折线、模型/端点饼图、Top 客户端柱状图、上游账号 5h/7 天窗口配额条;在 UI 里完成 API key CRUD、配额改、启停、手动 prewarm、新增 Anthropic/Codex 账号(manual OAuth);全部走 `/admin/*` 现有 HTTP API
+- **5h 窗口监控**:每个 Anthropic 上游账号都跟踪本地 anchor + 解析上游 `anthropic-ratelimit-unified-*` headers,UI 实时显示 5h / 7 天用量百分比 + 重置倒计时;`POST /admin/prewarm` 可手动 / launchd cron 提前触发窗口,把工作时段对齐两个完整窗口(详见 `docs/OPERATIONS.md §5.8`)
+- **Mid-SSE-stream failover**:Anthropic 上游返回 200 + SSE 内塞 `event: error` 的限流场景,代理会**缓冲首个 content delta 之前的 SSE**,识别 rate_limit/overloaded/extra-usage 错误后**静默切到下一个账号重发**,客户端只感觉响应稍微慢一点,不看见错;接 `/v1/messages`、`/v1/chat/completions`、`/v1/responses` 3 个端点(Anthropic 上游)+ `/v1/messages` 走 Codex 翻译路径
 
 > 团队部署 / 使用 / 观测 / 管理 / 排障详细手册见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md);
 > 同事接入手册(Claude Code / Codex CLI / IDE 插件 / Cowork 配置)见 [`docs/CLIENT_SETUP.md`](docs/CLIENT_SETUP.md);

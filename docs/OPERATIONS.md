@@ -588,6 +588,124 @@ powershell.exe -Command "Invoke-RestMethod -Method POST -Uri http://127.0.0.1:83
 
 工作量:host 侧 ~30 分钟,每个客户端 ~5 分钟(装 root CA + 改 baseUrl)。
 
+### 5.10 管理看板 `/ui/`
+
+浏览器里完成 80% 日常运维 — API key CRUD、配额管理、上游账号 5h/7 天窗口监控、用量大屏、新增 Anthropic / Codex 账号(manual OAuth)。
+
+#### 5.10.1 入口
+
+| 入口 | URL | 说明 |
+|---|---|---|
+| 本机 | `http://127.0.0.1:8317/ui/` | host 自身 |
+| 内网 | `http://<HOST>:8317/ui/` | 公司内网同事 |
+| TLS 走 Caddy | `https://<HOSTNAME>:8443/ui/` | 走 §5.9 部署的 Caddy,可被 Cowork 共用 |
+
+#### 5.10.2 登录
+
+第一次进入 `/ui/` → 提示输入 **admin API key**(`admin: true` 的)。粘贴 → 后端 `GET /admin/ui/whoami` 校验 → 成功后 key 存 `localStorage`,后续 fetch 自动带 `Authorization: Bearer <key>`。"退出登录"按钮清掉 localStorage。
+
+> 普通(非 admin)key 也能登,但只看得到自己一条 key + 不能改 / 删别人。所有 `/admin/*` 端点的权限模型在 UI 层重用,不另起一套。
+
+#### 5.10.3 五个页面
+
+| 路径 | 主要内容 |
+|---|---|
+| `/ui/stats` | KPI 卡片(总成本 / 总 token / 成功率 / 平均延迟 / 账号健康)+ 近 30 天每日成本堆叠折线 + 成本按模型 / 请求按端点饼图 + Top 10 客户端 + 配额完成度进度条 + 账号健康表。30s 自动刷新 |
+| `/ui/users` | API key 列表(merge config + managed)+ 新增 / 编辑 / 启停 / 删除。config 来源的 key 灰显只读(改它要编辑 yaml + 重启)|
+| `/ui/accounts` | 每个上游账号一张配额面板:5h 窗口用量条 + reset 倒计时(来自 Anthropic `unified-*` headers)、7 天周窗口、Retry-After 横幅;⚡立即 Prewarm 按钮;+ 新增账号按钮(manual OAuth)|
+| `/ui/oauth-add-modal` | 在 `/ui/accounts` 触发的 manual OAuth 模态:三步向导,粘贴 callback URL 完成添加 |
+
+#### 5.10.4 构建 + 部署
+
+UI 是独立 npm 工程 `web/`,build 产物落 `web/dist/`。Express 启动时 `app.use('/ui', express.static(web/dist))`。
+
+```bash
+# 首次安装:装 web 依赖 + 构建
+cd ~/path/to/auth2api/web
+npm install
+npm run build           # 输出 web/dist/index.html + bundle
+
+# 后端发版后顺手 build UI(分别需要时再跑)
+cd web && npm run build && cd ..
+
+# 重启服务让新 bundle 生效
+launchctl unload ~/Library/LaunchAgents/com.<user>.auth2api.plist
+launchctl load   ~/Library/LaunchAgents/com.<user>.auth2api.plist
+```
+
+> Dockerfile / 多阶段 build:还没接(plan 里的 v0.4 项),目前是手工 build。
+
+#### 5.10.5 注意
+
+- **不要把 admin key 群发**。同事不需要看后台,他们只要 `sk-` 业务 key(非 admin)就够调用 API
+- localStorage 存 admin key 等价于"浏览器内常驻凭证";关浏览器、退电脑前注意是不是公用机器
+- UI bundle 是无鉴权静态托管的(JS / CSS 公开),所有 `/admin/*` API 才是鉴权的;别在 UI bundle 里塞秘密(代码里没有)
+
+### 5.11 失败转移 / Failover 模型
+
+代理对上游错误有 **两层失败转移**机制:
+
+#### 5.11.1 Pre-stream(HTTP 状态码层)
+
+实现:`src/utils/http.ts` 的 `proxyWithRetry`。
+
+上游返 4xx / 5xx / 网络错误 / 超时 ─→ 当前账号 cooldown(按 §3.1 表)─→ `getNextAccount()` 自动换下一个 ─→ 重试。
+
+可失败转移的状态码:
+- **401** Auth 失败:刷新 token,刷新后还 401 → cooldown 当前 + 换下一个
+- **403** Forbidden(额度耗尽 / 权限问题):cooldown + 换
+- **400 with "extra usage" 错误体**:同 403 处理(Anthropic 把账号超额信号写在 400 里,内容含 `third-party apps now draw from extra usage` 字符串)
+- **429** Rate-limited:cooldown(短),换
+- **5xx** 上游故障:cooldown(短),换
+- 网络错误 / 连接拒绝 / 超时:cooldown,换
+
+不失败转移的(直接转发给客户端):
+- 4xx 客户端错误(messages 缺失、model 不支持等)— 业务问题,跟账号无关
+
+#### 5.11.2 Mid-SSE-stream(SSE 流内事件层)
+
+实现:`src/upstream/streaming-failover.ts`。
+
+上游返 **200 OK** 后开始流 SSE,但中间塞 `event: error`(Anthropic 越来越多用这种方式表达限流):
+
+```
+HTTP/1.1 200 OK
+event: message_start
+data: {"type":"message_start",...}
+
+event: error
+data: {"type":"error","error":{"type":"rate_limit_error","message":"..."}}
+```
+
+之前这种情况 `proxyWithRetry` 已经不管(状态码 200 → success callback),客户端看到坏掉的流。
+
+**现在**:加新的 `proxyStreamingWithFailover` helper,在 SSE 流开头**缓冲** 字节,看到首个 content delta 才 commit + flush 给客户端。期间如果碰到可失败转移的 error event(`rate_limit_error` / `overloaded_error` / `authentication_error` / "extra usage" 文本)→ 丢缓冲、cooldown 当前账号、自动用下一个账号重发 → 客户端透明。
+
+接入端点:
+
+| 端点 | 上游 | 流式失败转移 |
+|---|---|---|
+| `/v1/messages` | anthropic | ✓ |
+| `/v1/messages` | codex(经协议翻译)| ✓ |
+| `/v1/chat/completions` | anthropic(经翻译)| ✓ |
+| `/v1/responses` | anthropic(经翻译)| ✓ |
+| 上述 | cursor | 仅 pre-stream(协议特殊,后续)|
+
+#### 5.11.3 边界
+
+- **commit 后不再转移**:一旦字节流到客户端,新账号的输出会跟旧的拼不上,后续 error 只能转发
+- **64 KB 缓冲上限**:极端情况(上游卡着不吐 content delta)强制 commit 切 passthrough,避免内存爆
+- **粘性窗口**:`getNextAccount()` 仍尊重粘性策略(20-60min 锚定);失败转移强制释放粘性
+
+#### 5.11.4 如何观察失败转移在工作
+
+```bash
+# launchd 日志会打 "mid-stream failover from xxx@..." 这样的行
+tail -f ~/.<your-log-dir>/auth2api.launchd.out.log | grep -iE "failover|cooldown"
+```
+
+或者看 `/ui/accounts` 页:某个账号被打了几次 mid-stream 失败,会反映在 `totalFailures` 数和 cooldown 状态上。
+
 ---
 
 ## 6. 故障排查
