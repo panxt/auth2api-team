@@ -1074,7 +1074,11 @@ test("count_tokens with empty body returns upstream client error, not network er
       String(input),
       "https://api.anthropic.com/v1/messages/count_tokens?beta=true",
     );
-    assert.equal(init?.body, "{}");
+    // The handler injects the resolved default model into an empty body
+    // so the upstream call uses a canonical name (see
+    // handlers/anthropic.ts createCountTokensHandler). An empty inbound
+    // body therefore arrives at upstream as {"model":"claude-sonnet-4-6"}.
+    assert.equal(init?.body, '{"model":"claude-sonnet-4-6"}');
     return new Response(
       JSON.stringify({
         error: {
