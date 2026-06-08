@@ -444,9 +444,11 @@ export class AccountManager {
     const acct = this.accounts.get(email);
     if (!acct) return;
     acct.totalRequests++;
-    // Anchor the 5h rate-limit window. The window starts on the FIRST
-    // request after a >5h idle gap (Anthropic OAuth subscription semantics).
-    // Once anchored, subsequent attempts within the window do NOT shift it.
+    // Anchor the 5h rate-limit window — ONLY for providers whose upstream has
+    // a first-message-triggered tumbling window. Anthropic Pro/Max OAuth is
+    // the only one today; Codex / Cursor use different quota models so the
+    // 5h anchor doesn't apply (showing it in the UI would mislead).
+    if (this.provider !== "anthropic") return;
     const now = Date.now();
     if (
       acct.windowStartedAt == null ||
@@ -465,6 +467,12 @@ export class AccountManager {
   recordRateLimit(email: string, headers: Headers): void {
     const acct = this.accounts.get(email);
     if (!acct) return;
+    // Only the Anthropic upstream's `anthropic-ratelimit-*` (especially
+    // `unified-*`) headers have semantics we can interpret today. Codex /
+    // Cursor headers have different meanings and shouldn't be mixed into
+    // the same Anthropic-keyed snapshot. Skip non-Anthropic providers to
+    // avoid storing misleading rate-limit info. (Fix F10.)
+    if (this.provider !== "anthropic") return;
     const fields: Record<string, string> = {};
     let retryAfterSec: number | undefined;
     headers.forEach((value, key) => {

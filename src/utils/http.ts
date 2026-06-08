@@ -18,7 +18,10 @@ export function classifyFailure(status: number): AccountFailureKind {
   return "server";
 }
 
-function isAnthropicExtraUsageError(status: number, body: string): boolean {
+export function isAnthropicExtraUsageError(
+  status: number,
+  body: string,
+): boolean {
   if (status !== 400) return false;
   return /third-party apps now draw from extra usage/i.test(body);
 }
@@ -101,7 +104,7 @@ export interface ProxyOptions {
   maxRetries?: number;
 }
 
-function waitForRetry(ms: number, signal: AbortSignal): Promise<boolean> {
+export function waitForRetry(ms: number, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) return Promise.resolve(false);
 
   return new Promise((resolve) => {

@@ -81,7 +81,6 @@ async function proxyCodexMessages(args: {
   // but consumes upstream Responses SSE and emits Anthropic Messages SSE via
   // the existing translator.
   if (stream) {
-    const state = makeResponsesToAnthropicState(model);
     try {
       await proxyStreamingWithFailover(resp, {
         tag: "Messages(codex)",
@@ -99,10 +98,15 @@ async function proxyCodexMessages(args: {
         classifyError: classifyOpenAIResponsesError,
         onEvent: (ev, usage) =>
           extractUsageFromSSE(ev.event, tryParseJson(ev.data), usage),
-        transformEvent: (ev: SseEvent) => {
-          const parsed = tryParseJson(ev.data);
-          const out = responsesSSEToAnthropic(ev.event, parsed, state);
-          return out.length > 0 ? out.join("") : null;
+        // Per-attempt state factory — mid-stream failover must NOT reuse
+        // dirty translator state from a failed earlier attempt (F1).
+        makeTransformEvent: () => {
+          const state = makeResponsesToAnthropicState(model);
+          return (ev: SseEvent) => {
+            const parsed = tryParseJson(ev.data);
+            const out = responsesSSEToAnthropic(ev.event, parsed, state);
+            return out.length > 0 ? out.join("") : null;
+          };
         },
       });
     } catch (err: any) {

@@ -151,10 +151,19 @@ export async function streamUntilCommitOrFailover(
     heldBytes = 0;
   };
 
-  /** Emit a transformed-event's bytes. Pre-commit: buffer. Post-commit: write. */
+  /** Emit a transformed-event's bytes. Pre-commit: buffer. Post-commit: write.
+   *  A throwing translator (e.g. anthropicSSEToChat crashing on `undefined.X`
+   *  when upstream emits malformed JSON) MUST NOT take down the whole stream.
+   *  Catch and skip the event; the upstream might still recover. (Fix F6.) */
   const emitTransformed = (ev: SseEvent) => {
     if (!useTransform || !options.transformEvent) return;
-    const out = options.transformEvent(ev);
+    let out: Uint8Array | string | null;
+    try {
+      out = options.transformEvent(ev);
+    } catch (err) {
+      // Don't crash the stream on a translator throw; just drop this event.
+      return;
+    }
     if (out == null) return;
     const bytes = typeof out === "string" ? encoder.encode(out) : out;
     if (committed) {
@@ -241,12 +250,27 @@ export async function streamUntilCommitOrFailover(
       if (done) {
         // Final flush of any pending decoder bytes + buffer line.
         textBuffer += decoder.decode();
-        // Process any tailing event we accumulated.
+        // Process the terminal chunk respecting SSE event boundaries:
+        // blank lines dispatch the accumulated event. Without this, multiple
+        // events arriving in the final chunk merged into one event with
+        // concatenated `data:` lines. (Fix F8.)
         const lines = textBuffer.split("\n");
         for (const raw of lines) {
           const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
-          appendToCurrentEvent(line);
+          if (line === "") {
+            const ev = takeCurrentEvent();
+            if (ev) {
+              const dec = handleParsedEvent(ev);
+              if (dec) {
+                outResp.removeListener("close", onClose);
+                return { decision: dec, committed, usage };
+              }
+            }
+          } else {
+            appendToCurrentEvent(line);
+          }
         }
+        // Dispatch any trailing event without terminator.
         const tailEvent = takeCurrentEvent();
         if (tailEvent) {
           const dec = handleParsedEvent(tailEvent);
@@ -441,7 +465,12 @@ export const OPENAI_CHAT_CONTENT_EVENTS = new Set<string>([
 
 import { AccountManager, AvailableAccount } from "../accounts/manager";
 import { Config, isDebugLevel } from "../config";
-import type { ProxyOptions } from "../utils/http";
+import {
+  RETRYABLE_STATUSES,
+  isAnthropicExtraUsageError,
+  waitForRetry,
+  type ProxyOptions,
+} from "../utils/http";
 
 export interface StreamingProxyOptions {
   /** Tag for logging (e.g., "Messages", "ChatCompletions"). */
@@ -459,8 +488,13 @@ export interface StreamingProxyOptions {
   classifyError: StreamFailoverOptions["classifyError"];
   /** Per-event usage extractor. */
   onEvent?: StreamFailoverOptions["onEvent"];
-  /** Per-event output translator (e.g. codex Responses → Anthropic Messages). */
-  transformEvent?: StreamFailoverOptions["transformEvent"];
+  /** Factory called ONCE PER ATTEMPT — returns a fresh per-event transformer
+   *  closure. Use this when the transformer keeps stateful protocol state
+   *  (Anthropic→Chat / Anthropic→Responses / Responses→Anthropic each have
+   *  a `state` object that must be reset on retry so attempt #2 doesn't
+   *  inherit attempt #1's sequence numbers / respId / inTextBlock).
+   *  For pass-through (no translation), leave undefined. */
+  makeTransformEvent?: () => StreamFailoverOptions["transformEvent"];
   /** Pre-stream error → client error body adapter (same as ProxyOptions). */
   errorAdapter?: ProxyOptions["errorAdapter"];
   /** Max number of (pre+mid) attempts across distinct accounts. Default 3. */
@@ -501,6 +535,9 @@ export async function proxyStreamingWithFailover(
 
   let attempts = 0;
   let lastFailoverDetail: string | null = null;
+  // Track accounts whose token we've refreshed this request, so a second
+  // 401 on the same account doesn't loop forever. Mirrors proxyWithRetry.
+  const refreshedThisRequest = new Set<string>();
   const abort = new AbortController();
 
   // Make sure we abort the upstream connection if the client disconnects
@@ -541,6 +578,15 @@ export async function proxyStreamingWithFailover(
       const account = result.account;
       manager.recordAttempt(account.token.email);
 
+      // Surface upstream account attribution to the per-request stats slot
+      // so the stats-finish middleware records byAccount aggregation for
+      // streaming requests too. (Fix for review finding F3.)
+      const statsCtx = (resp.locals as any)?.stats;
+      if (statsCtx) {
+        statsCtx.accountEmail = account.token.email;
+        statsCtx.provider = manager.provider;
+      }
+
       // Open the upstream.
       let upstream: globalThis.Response;
       try {
@@ -553,13 +599,22 @@ export async function proxyStreamingWithFailover(
             `${tag} streaming attempt ${attempts} network error: ${err?.message}`,
           );
         }
+        // Exponential backoff between attempts (mirrors proxyWithRetry).
+        if (attempts < maxAttempts) {
+          const cont = await waitForRetry(attempts * 1000, abort.signal);
+          if (!cont) break;
+        }
         continue;
       }
 
       // Capture rate-limit headers regardless of outcome.
       manager.recordRateLimit?.(account.token.email, upstream.headers);
 
-      // Pre-stream HTTP error? Use the same classification proxyWithRetry uses.
+      // Pre-stream HTTP error. Mirror proxyWithRetry's classification:
+      //   - 401: refresh token once per account, then retry the SAME account
+      //          (avoids burning a healthy account on a normal token refresh).
+      //   - 403 / 429 / 5xx / extra-usage-400: account-scoped failure → cool down + try next.
+      //   - other 4xx: client request error → surface to client immediately.
       if (!upstream.ok) {
         const errBody = await upstream.text().catch(() => "");
         if (isDebugLevel(config.debug, "errors")) {
@@ -568,25 +623,57 @@ export async function proxyStreamingWithFailover(
           );
         }
         lastFailoverDetail = `HTTP ${upstream.status}`;
-        // Cooldown + retry if it's account-scoped (auth/forbidden/rate_limit/server).
-        if (
-          upstream.status === 401 ||
-          upstream.status === 403 ||
-          upstream.status === 429 ||
-          upstream.status >= 500
-        ) {
-          const kind: AccountFailureKind =
-            upstream.status === 401
-              ? "auth"
-              : upstream.status === 403
-                ? "forbidden"
-                : upstream.status === 429
-                  ? "rate_limit"
-                  : "server";
-          manager.recordFailure(account.token.email, kind, errBody.slice(0, 200));
-          // Try next account (still pre-stream, headers not flushed).
+
+        // 401: refresh once per account per request (Fix F4(a)).
+        if (upstream.status === 401) {
+          if (!refreshedThisRequest.has(account.token.email)) {
+            refreshedThisRequest.add(account.token.email);
+            const refreshed = await manager
+              .refreshAccount(account.token.email)
+              .catch(() => false);
+            if (refreshed && attempts < maxAttempts) {
+              // Retry SAME account with the refreshed token — don't increment
+              // by `continue` (we want the next loop iteration on this account).
+              attempts--; // un-count this attempt
+              continue;
+            }
+          }
+          manager.recordFailure(account.token.email, "auth", errBody.slice(0, 200));
           continue;
         }
+
+        // Extra-usage 400 → treat as forbidden (Fix F4(c)).
+        const isExtraUsage = isAnthropicExtraUsageError(upstream.status, errBody);
+        if (
+          isExtraUsage ||
+          upstream.status === 403 ||
+          RETRYABLE_STATUSES.has(upstream.status)
+        ) {
+          const kind: AccountFailureKind = isExtraUsage
+            ? "forbidden"
+            : upstream.status === 403
+              ? "forbidden"
+              : upstream.status === 429
+                ? "rate_limit"
+                : "server";
+          manager.recordFailure(
+            account.token.email,
+            kind,
+            errBody.slice(0, 200),
+          );
+          // 429/5xx — back off; 403/extra-usage rotate immediately (account
+          // is in cooldown so it won't be re-picked anyway).
+          if (
+            attempts < maxAttempts &&
+            !isExtraUsage &&
+            upstream.status !== 403
+          ) {
+            const cont = await waitForRetry(attempts * 1000, abort.signal);
+            if (!cont) break;
+          }
+          continue;
+        }
+
         // Other 4xx: bad request. Surface to client as-is and stop.
         const body = options.errorAdapter
           ? options.errorAdapter(upstream.status, errBody)
@@ -602,6 +689,10 @@ export async function proxyStreamingWithFailover(
       }
 
       // ── 200 OK — start consuming SSE with failover detection ──────────
+      // Fresh per-attempt translator state — if attempt #2 reused state from
+      // attempt #1 it would emit sequence-number jumps / mismatched ids /
+      // duplicate response.created. (Fix for review finding F1.)
+      const transformEvent = options.makeTransformEvent?.();
       const { decision, committed, usage } = await streamUntilCommitOrFailover(
         upstream,
         resp,
@@ -609,12 +700,16 @@ export async function proxyStreamingWithFailover(
           contentEvents: options.contentEvents,
           classifyError: options.classifyError,
           onEvent: options.onEvent,
-          transformEvent: options.transformEvent,
+          transformEvent,
         },
       );
 
       if (decision.kind === "done") {
         manager.recordSuccess(account.token.email, usage);
+        // Surface usage to the per-request stats slot so QuotaTracker and
+        // /admin/stats see the real token / cost numbers for streaming
+        // requests (Fix F2).
+        if (statsCtx) statsCtx.usage = usage;
         return {
           completed: true,
           clientDisconnected: false,
@@ -625,10 +720,7 @@ export async function proxyStreamingWithFailover(
       }
       if (decision.kind === "client-disconnected") {
         // Client gave up. Record as not-completed but not a real failure.
-        if (!committed) {
-          // Record nothing — we never started streaming back. The upstream
-          // call already happened, so it counts as a request.
-        }
+        if (statsCtx) statsCtx.usage = usage;
         return {
           completed: false,
           clientDisconnected: true,
@@ -639,6 +731,15 @@ export async function proxyStreamingWithFailover(
       }
       if (decision.kind === "committed-error") {
         // Already committed; can't retry. Stream is over.
+        // Treat as a network failure on this account so it cools down —
+        // an account that consistently drops streams post-commit shouldn't
+        // keep getting picked. (Fix F5.)
+        manager.recordFailure(
+          account.token.email,
+          "network",
+          "stream terminated post-commit",
+        );
+        if (statsCtx) statsCtx.usage = usage;
         return {
           completed: false,
           clientDisconnected: false,

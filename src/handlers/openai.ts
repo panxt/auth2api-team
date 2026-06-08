@@ -567,7 +567,6 @@ export function createChatCompletionsHandler(
       // Streaming + anthropic upstream → use failover-aware path.
       if (stream) {
         const includeUsage = body.stream_options?.include_usage !== false;
-        const state = createStreamState(model, includeUsage);
         try {
           await proxyStreamingWithFailover(resp, {
             tag: "ChatCompletions",
@@ -594,10 +593,14 @@ export function createChatCompletionsHandler(
             classifyError: classifyAnthropicError,
             onEvent: (ev, usage) =>
               extractUsageFromSSE(ev.event, tryParseJson(ev.data), usage),
-            transformEvent: (ev: SseEvent) => {
-              const parsed = tryParseJson(ev.data);
-              const out = anthropicSSEToChat(ev.event, parsed, state);
-              return out.length > 0 ? out.join("") : null;
+            // Per-attempt translator state (F1) — fresh on each retry.
+            makeTransformEvent: () => {
+              const state = createStreamState(model, includeUsage);
+              return (ev: SseEvent) => {
+                const parsed = tryParseJson(ev.data);
+                const out = anthropicSSEToChat(ev.event, parsed, state);
+                return out.length > 0 ? out.join("") : null;
+              };
             },
             errorAdapter: openaiErrorBody,
           });
@@ -729,7 +732,6 @@ export function createResponsesHandler(
 
       // Streaming + anthropic upstream → use failover-aware path.
       if (clientWantsStream) {
-        const state = makeResponsesState();
         try {
           await proxyStreamingWithFailover(resp, {
             tag: "Responses",
@@ -756,19 +758,30 @@ export function createResponsesHandler(
             classifyError: classifyAnthropicError,
             onEvent: (ev, usage) =>
               extractUsageFromSSE(ev.event, tryParseJson(ev.data), usage),
-            transformEvent: (ev: SseEvent) => {
-              const parsed = tryParseJson(ev.data);
-              // The translator needs a usage object; updates are picked up
-              // by onEvent above, so a throwaway here is fine.
-              const dummyUsage = {
-                inputTokens: 0,
-                outputTokens: 0,
-                cacheCreationInputTokens: 0,
-                cacheReadInputTokens: 0,
-                reasoningOutputTokens: 0,
+            // Per-attempt translator state (F1) — failover resets respId /
+            // sequence counters cleanly between accounts.
+            makeTransformEvent: () => {
+              const state = makeResponsesState();
+              return (ev: SseEvent) => {
+                const parsed = tryParseJson(ev.data);
+                // The translator needs a usage object; updates are picked up
+                // by onEvent above, so a throwaway here is fine.
+                const dummyUsage = {
+                  inputTokens: 0,
+                  outputTokens: 0,
+                  cacheCreationInputTokens: 0,
+                  cacheReadInputTokens: 0,
+                  reasoningOutputTokens: 0,
+                };
+                const out = anthropicSSEToResponses(
+                  ev.event,
+                  parsed,
+                  state,
+                  model,
+                  dummyUsage,
+                );
+                return out.length > 0 ? out.join("") : null;
               };
-              const out = anthropicSSEToResponses(ev.event, parsed, state, model, dummyUsage);
-              return out.length > 0 ? out.join("") : null;
             },
             errorAdapter: openaiErrorBody,
           });

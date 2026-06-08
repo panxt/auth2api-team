@@ -47,12 +47,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // On mount + whenever the in-memory key changes, refresh whoami.
+  // If the server rejects the key (e.g. it was disabled / rotated / quota
+  // tracker isn't tracking it), clear localStorage + drop the key so
+  // RequireAuth bounces us to /login instead of stranding the user in a
+  // page where every /admin/* call 401s. (Fix F9.)
   useEffect(() => {
     if (!key) {
       setWhoami(null);
       return;
     }
-    probe(key).then((w) => setWhoami(w));
+    let cancelled = false;
+    probe(key).then((w) => {
+      if (cancelled) return;
+      if (w) {
+        setWhoami(w);
+      } else {
+        // Stale key — server doesn't accept it anymore.
+        localStorage.removeItem(STORAGE_KEY);
+        setKey(null);
+        setWhoami(null);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [key, probe]);
 
   const login = useCallback(
