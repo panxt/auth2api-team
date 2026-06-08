@@ -6,6 +6,7 @@ import {
   PrewarmResp,
 } from "../api/accounts";
 import { ApiError } from "../api/client";
+import { AddAccountModal } from "../components/AddAccountModal";
 
 function fmtTokens(n: number): string {
   if (!n) return "—";
@@ -51,6 +52,7 @@ export function Accounts() {
   const [err, setErr] = useState<string | null>(null);
   const [prewarming, setPrewarming] = useState(false);
   const [lastPrewarm, setLastPrewarm] = useState<PrewarmResp | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -100,14 +102,31 @@ export function Accounts() {
             每个 OAuth 账号当前状态 + 累计统计。点 prewarm 可立即把所有 anthropic 账号的 5h 窗口往前对齐。
           </p>
         </div>
-        <button
-          className="btn-primary"
-          onClick={onPrewarm}
-          disabled={prewarming}
-        >
-          {prewarming ? "Prewarming..." : "⚡ 立即 Prewarm"}
-        </button>
+        <div className="flex gap-2">
+          <button
+            className="btn-secondary"
+            onClick={() => setShowAdd(true)}
+          >
+            + 新增账号
+          </button>
+          <button
+            className="btn-primary"
+            onClick={onPrewarm}
+            disabled={prewarming}
+          >
+            {prewarming ? "Prewarming..." : "⚡ 立即 Prewarm"}
+          </button>
+        </div>
       </header>
+
+      <AddAccountModal
+        open={showAdd}
+        onClose={() => setShowAdd(false)}
+        onAdded={() => {
+          // Refresh after a moment so the new account appears.
+          setTimeout(load, 500);
+        }}
+      />
 
       {lastPrewarm && (
         <div className="card mb-6">

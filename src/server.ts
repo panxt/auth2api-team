@@ -21,6 +21,8 @@ import {
   cleanupRpm,
 } from "./ratelimit/per-key";
 import { ManagedKeyStore, ManagedKeyError } from "./keys/store";
+import { startOAuth, exchangeOAuth } from "./admin/oauth";
+import { ProviderId } from "./auth/types";
 
 // Simple in-memory rate limiter per IP
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -486,6 +488,37 @@ export function createServer(
   // instead of with whenever the first real user request lands.
   // Admin-only because it issues real upstream calls that count against
   // weekly caps.
+  // POST /admin/oauth/:provider/start
+  // POST /admin/oauth/:provider/exchange
+  // Two-step manual-mode OAuth for the dashboard. See src/admin/oauth.ts
+  // for full doc. Admin-only because completing the flow registers a new
+  // upstream account against the proxy's auth-dir.
+  app.post("/admin/oauth/:provider/start", requireAdmin, (req, res) => {
+    try {
+      const result = startOAuth(registry, req.params.provider as ProviderId);
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: { message: err?.message || String(err) } });
+    }
+  });
+
+  app.post("/admin/oauth/:provider/exchange", requireAdmin, async (req, res) => {
+    try {
+      const { state, callbackUrl } = (req.body || {}) as {
+        state?: string;
+        callbackUrl?: string;
+      };
+      const result = await exchangeOAuth(
+        registry,
+        state ?? "",
+        callbackUrl ?? "",
+      );
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: { message: err?.message || String(err) } });
+    }
+  });
+
   // GET /admin/ui/whoami — used by the dashboard SPA right after login to
   // verify the entered admin key, and to display the logged-in identity in
   // the sidebar. Returns the same shape as one row of /admin/usage/keys.
