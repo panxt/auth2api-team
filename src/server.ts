@@ -1,4 +1,6 @@
 import express from "express";
+import path from "path";
+import fs from "fs";
 import { Config, isDebugLevel, ApiKeyEntry } from "./config";
 import { ProviderRegistry } from "./providers/registry";
 import { extractApiKey, hashApiKey } from "./utils/common";
@@ -467,6 +469,24 @@ export function createServer(
   // instead of with whenever the first real user request lands.
   // Admin-only because it issues real upstream calls that count against
   // weekly caps.
+  // GET /admin/ui/whoami — used by the dashboard SPA right after login to
+  // verify the entered admin key, and to display the logged-in identity in
+  // the sidebar. Returns the same shape as one row of /admin/usage/keys.
+  app.get("/admin/ui/whoami", (_req, res) => {
+    const entry = res.locals.apiKey as ApiKeyEntry | undefined;
+    if (!entry) {
+      res.status(401).json({ error: { message: "no api key in locals" } });
+      return;
+    }
+    res.json({
+      apiKeyShort: hashApiKey(entry.key).slice(0, 12),
+      label: entry.label ?? null,
+      owner: entry.owner ?? null,
+      admin: entry.admin,
+      enabled: entry.enabled,
+    });
+  });
+
   app.post("/admin/prewarm", requireAdmin, async (_req, res) => {
     const providers: unknown[] = [];
     for (const p of registry.all()) {
@@ -534,6 +554,34 @@ export function createServer(
     enforceKeyRateLimit,
     createCountTokensHandler(config, registry),
   );
+
+  // ── Admin dashboard SPA ─────────────────────────────────────────────
+  // The /ui/ tree is the React build output. Bundle files (hashed assets)
+  // are served as-is; any unknown /ui/* path falls back to index.html so
+  // the SPA's BrowserRouter can handle deep links like /ui/users.
+  // Loading the bundle is unauthenticated — the SPA itself prompts for an
+  // admin key on first run and gates further /admin/* fetches via that.
+  //
+  // The compiled file lives at <repo>/web/dist (relative to <repo>/dist/server.js).
+  const uiDir = path.resolve(__dirname, "..", "web", "dist");
+  if (fs.existsSync(uiDir)) {
+    app.use("/ui", express.static(uiDir, { index: "index.html" }));
+    app.get(/^\/ui(?:\/.*)?$/, (_req, res) => {
+      res.sendFile(path.join(uiDir, "index.html"));
+    });
+  } else {
+    // Backend was built but `web/dist` is missing (no FE build run).
+    // Surface a clear message instead of a 404.
+    app.get(/^\/ui(?:\/.*)?$/, (_req, res) => {
+      res
+        .status(503)
+        .type("text/plain")
+        .send(
+          "Admin dashboard is not built. Run `cd web && npm install && npm run build` " +
+            "and restart the auth2api service.",
+        );
+    });
+  }
 
   return app;
 }

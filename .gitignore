@@ -24,3 +24,5 @@ config.yaml.bak.*
 # OS metadata
 .DS_Store
 Thumbs.db
+web/node_modules
+web/dist
