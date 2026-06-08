@@ -82,6 +82,26 @@ export function extractUsage(resp: any): UsageData {
   };
 }
 
+/**
+ * Snapshot of upstream rate-limit headers, normalized into a single object.
+ * Anthropic returns `anthropic-ratelimit-{requests,tokens,input-tokens,
+ * output-tokens}-{limit,remaining,reset}` plus `retry-after` on 429.
+ * `null` means we haven't observed any rate-limit header from this account
+ * yet (e.g., OAuth subscription channel didn't surface them).
+ */
+export interface RateLimitSnapshot {
+  /** ISO when these values were observed (server-side). */
+  observedAt: string;
+  /** Raw retry-after seconds, if upstream sent it. */
+  retryAfterSec?: number;
+  /** Generic store of any `anthropic-ratelimit-*` header. Key without prefix. */
+  fields: Record<string, string>;
+}
+
+/** Anthropic's per-account 5h rate-limit window is "first-message anchored"
+ *  (see docs/ARCHITECTURE.md §5h window). 5 hours in ms. */
+const RATE_LIMIT_WINDOW_MS = 5 * 60 * 60 * 1000;
+
 interface AccountState {
   token: TokenData;
   cooldownUntil: number;
@@ -100,6 +120,11 @@ interface AccountState {
   totalCacheReadInputTokens: number;
   totalReasoningOutputTokens: number;
   refreshPromise: Promise<boolean> | null;
+  /** ISO timestamp of the first attempt in the current 5h rate-limit window.
+   *  When `now - windowStartedAt > 5h`, the next attempt opens a new window. */
+  windowStartedAt: string | null;
+  /** Latest rate-limit header snapshot from upstream. */
+  rateLimit: RateLimitSnapshot | null;
 }
 
 export interface AccountSnapshot {
@@ -123,6 +148,15 @@ export interface AccountSnapshot {
   refreshing: boolean;
   /** Codex only — chatgpt_plan_type claim ("plus", "pro", "free", …). */
   planType?: string;
+  /** When the current 5h rate-limit window started (first message), or null
+   *  if no traffic since startup. */
+  windowStartedAt: string | null;
+  /** When that window resets (= windowStartedAt + 5h), null if no window. */
+  windowResetAt: string | null;
+  /** Whether the window has expired already; next request opens a new one. */
+  windowExpired: boolean;
+  /** Latest rate-limit header snapshot observed from upstream, if any. */
+  rateLimit: RateLimitSnapshot | null;
 }
 
 export interface AvailableAccount {
@@ -408,9 +442,50 @@ export class AccountManager {
 
   recordAttempt(email: string): void {
     const acct = this.accounts.get(email);
-    if (acct) {
-      acct.totalRequests++;
+    if (!acct) return;
+    acct.totalRequests++;
+    // Anchor the 5h rate-limit window. The window starts on the FIRST
+    // request after a >5h idle gap (Anthropic OAuth subscription semantics).
+    // Once anchored, subsequent attempts within the window do NOT shift it.
+    const now = Date.now();
+    if (
+      acct.windowStartedAt == null ||
+      now - new Date(acct.windowStartedAt).getTime() > RATE_LIMIT_WINDOW_MS
+    ) {
+      acct.windowStartedAt = new Date(now).toISOString();
     }
+  }
+
+  /**
+   * Capture upstream rate-limit headers verbatim. Called by proxyWithRetry
+   * after every upstream response (success or error). Only fields with the
+   * `anthropic-ratelimit-` prefix (or `retry-after`) are kept — strip the
+   * provider prefix in the stored key for compactness.
+   */
+  recordRateLimit(email: string, headers: Headers): void {
+    const acct = this.accounts.get(email);
+    if (!acct) return;
+    const fields: Record<string, string> = {};
+    let retryAfterSec: number | undefined;
+    headers.forEach((value, key) => {
+      const k = key.toLowerCase();
+      if (k === "retry-after") {
+        const n = Number(value);
+        if (Number.isFinite(n)) retryAfterSec = n;
+      } else if (k.startsWith("anthropic-ratelimit-")) {
+        fields[k.slice("anthropic-ratelimit-".length)] = value;
+      } else if (k.startsWith("x-ratelimit-")) {
+        fields[k.slice("x-ratelimit-".length)] = value;
+      }
+    });
+    // Only store when we actually got something — never overwrite a valid
+    // snapshot with an empty one.
+    if (retryAfterSec === undefined && Object.keys(fields).length === 0) return;
+    acct.rateLimit = {
+      observedAt: new Date().toISOString(),
+      retryAfterSec,
+      fields,
+    };
   }
 
   recordSuccess(email: string, usage?: UsageData): void {
@@ -505,6 +580,15 @@ export class AccountManager {
     const now = Date.now();
     const snapshots: AccountSnapshot[] = [];
     for (const acct of this.accounts.values()) {
+      // Derive 5h window reset / expiry from the anchor.
+      let windowResetAt: string | null = null;
+      let windowExpired = false;
+      if (acct.windowStartedAt) {
+        const resetMs =
+          new Date(acct.windowStartedAt).getTime() + RATE_LIMIT_WINDOW_MS;
+        windowResetAt = new Date(resetMs).toISOString();
+        windowExpired = now > resetMs;
+      }
       snapshots.push({
         email: acct.token.email,
         available: acct.cooldownUntil <= now,
@@ -525,6 +609,10 @@ export class AccountManager {
         expiresAt: acct.token.expiresAt,
         refreshing: acct.refreshPromise !== null,
         planType: acct.token.planType,
+        windowStartedAt: acct.windowStartedAt,
+        windowResetAt,
+        windowExpired,
+        rateLimit: acct.rateLimit,
       });
     }
     return snapshots;
@@ -706,6 +794,8 @@ export class AccountManager {
       totalCacheReadInputTokens: 0,
       totalReasoningOutputTokens: 0,
       refreshPromise: null,
+      windowStartedAt: null,
+      rateLimit: null,
     };
   }
 }

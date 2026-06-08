@@ -7,6 +7,7 @@ import {
 } from "../api/accounts";
 import { ApiError } from "../api/client";
 import { AddAccountModal } from "../components/AddAccountModal";
+import { AccountQuotaPanel } from "../components/AccountQuotaPanel";
 
 function fmtTokens(n: number): string {
   if (!n) return "—";
@@ -234,6 +235,21 @@ export function Accounts() {
                 })}
               </tbody>
             </table>
+          </div>
+
+          {/* Per-account quota panel (5h / 7d windows + retry-after) */}
+          <div className={`grid gap-4 mt-4 ${accounts.length > 1 ? "lg:grid-cols-2" : ""}`}>
+            {accounts.map((a) => (
+              <div key={a.email} className="card">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="font-medium">{a.email}</div>
+                  {a.planType && (
+                    <span className="badge-muted">{a.planType}</span>
+                  )}
+                </div>
+                <AccountQuotaPanel account={a} />
+              </div>
+            ))}
           </div>
         </section>
       ))}

@@ -195,6 +195,12 @@ export async function proxyWithRetry(
         return;
       }
 
+      // Capture upstream rate-limit headers verbatim before the body is
+      // consumed. Best-effort: recordRateLimit is a no-op for providers /
+      // accounts that don't surface them. Done for BOTH success and error
+      // responses (429 / 200 both carry useful state for the dashboard).
+      manager.recordRateLimit?.(account.token.email, upstream.headers);
+
       if (upstream.ok) {
         tagStatsFailure(resp, null, manager.provider);
         try {

@@ -1,5 +1,14 @@
 import { get, post } from "./client";
 
+export interface RateLimitSnapshot {
+  observedAt: string;
+  retryAfterSec?: number;
+  /** Subset of fields actually returned by upstream. For Anthropic OAuth
+   *  these are the `unified-*` family — e.g. `unified-5h-reset`,
+   *  `unified-5h-utilization`, `unified-7d-utilization`, etc. */
+  fields: Record<string, string>;
+}
+
 export interface AccountSnapshot {
   email: string;
   available: boolean;
@@ -20,6 +29,10 @@ export interface AccountSnapshot {
   expiresAt: string;
   refreshing: boolean;
   planType?: string;
+  windowStartedAt: string | null;
+  windowResetAt: string | null;
+  windowExpired: boolean;
+  rateLimit: RateLimitSnapshot | null;
 }
 
 export interface AccountsResp {

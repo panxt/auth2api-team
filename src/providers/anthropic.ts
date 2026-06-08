@@ -67,6 +67,10 @@ async function prewarmOne(
     });
     const latencyMs = Date.now() - start;
 
+    // Capture rate-limit headers regardless of status — even a 429 carries
+    // a useful retry-after for the dashboard.
+    manager.recordRateLimit(email, upstream.headers);
+
     if (!upstream.ok) {
       const text = await upstream.text().catch(() => "");
       return {
