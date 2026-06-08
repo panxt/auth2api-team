@@ -108,10 +108,25 @@ function applyBaseDelta(b: BaseBucket, ev: StatsEvent, costUsd: number): void {
  * memory usage is O(unique clients + unique accounts + unique
  * endpoint*model). No cross-products.
  */
+/** Per-day bucket for the dashboard time-series. Updated on every event. */
+export interface DailyBucket {
+  /** UTC date in YYYY-MM-DD form. */
+  date: string;
+  requests: number;
+  totalTokens: number;
+  totalCostUsd: number;
+  /** Sub-totals by provider for the stacked area chart. */
+  byProvider: Record<
+    string,
+    { requests: number; totalTokens: number; totalCostUsd: number }
+  >;
+}
+
 export class StatsRecorder {
   private byClient = new Map<string, ClientBucket>();
   private byAccount = new Map<string, AccountBucket>();
   private byApi = new Map<string, ApiBucket>();
+  private daily = new Map<string, DailyBucket>();
   private totals: BaseBucket = emptyBucket(new Date().toISOString());
 
   private log: EventLog | null = null;
@@ -192,6 +207,7 @@ export class StatsRecorder {
     this.byClient.clear();
     this.byAccount.clear();
     this.byApi.clear();
+    this.daily.clear();
     this.totals = emptyBucket(new Date().toISOString());
   }
 
@@ -243,6 +259,56 @@ export class StatsRecorder {
       this.byApi.set(apiKey, pb);
     }
     applyBaseDelta(pb, ev, cost);
+
+    // Daily bucket for the dashboard time-series — UTC YYYY-MM-DD prefix
+    // of the event timestamp. Capped via getTimeseries(days), so unbounded
+    // memory is only a concern if someone keeps the server up for years.
+    const date = ev.ts.slice(0, 10);
+    let db = this.daily.get(date);
+    if (!db) {
+      db = {
+        date,
+        requests: 0,
+        totalTokens: 0,
+        totalCostUsd: 0,
+        byProvider: {},
+      };
+      this.daily.set(date, db);
+    }
+    const tokens =
+      (ev.usage?.inputTokens ?? 0) +
+      (ev.usage?.outputTokens ?? 0) +
+      (ev.usage?.cacheCreationInputTokens ?? 0) +
+      (ev.usage?.cacheReadInputTokens ?? 0) +
+      (ev.usage?.reasoningOutputTokens ?? 0);
+    db.requests += 1;
+    db.totalTokens += tokens;
+    db.totalCostUsd += cost;
+    const p = ev.provider ?? "unknown";
+    let pp = db.byProvider[p];
+    if (!pp) {
+      pp = { requests: 0, totalTokens: 0, totalCostUsd: 0 };
+      db.byProvider[p] = pp;
+    }
+    pp.requests += 1;
+    pp.totalTokens += tokens;
+    pp.totalCostUsd += cost;
+  }
+
+  /**
+   * Last `days` calendar days of activity, oldest → newest. Buckets with
+   * zero events are NOT padded — callers fill gaps client-side if they
+   * want a continuous x-axis.
+   */
+  getTimeseries(days: number): DailyBucket[] {
+    if (days <= 0) return [];
+    const cutoff = new Date();
+    cutoff.setUTCDate(cutoff.getUTCDate() - (days - 1));
+    cutoff.setUTCHours(0, 0, 0, 0);
+    const cutoffStr = cutoff.toISOString().slice(0, 10);
+    return Array.from(this.daily.values())
+      .filter((b) => b.date >= cutoffStr)
+      .sort((a, b) => a.date.localeCompare(b.date));
   }
 }
 

@@ -3,6 +3,7 @@ import { useAuth } from "./lib/auth";
 import { Login } from "./pages/Login";
 import { Users } from "./pages/Users";
 import { Accounts } from "./pages/Accounts";
+import { Stats } from "./pages/Stats";
 import { Layout } from "./components/Layout";
 
 /** Wraps inner routes — bounce to /login if no key. */
@@ -23,11 +24,12 @@ export default function App() {
           </RequireAuth>
         }
       >
-        <Route path="/" element={<Navigate to="/users" replace />} />
+        <Route path="/" element={<Navigate to="/stats" replace />} />
+        <Route path="/stats" element={<Stats />} />
         <Route path="/users" element={<Users />} />
         <Route path="/accounts" element={<Accounts />} />
       </Route>
-      <Route path="*" element={<Navigate to="/users" replace />} />
+      <Route path="*" element={<Navigate to="/stats" replace />} />
     </Routes>
   );
 }

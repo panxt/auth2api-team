@@ -328,6 +328,23 @@ export function createServer(
     });
   });
 
+  // GET /admin/stats/timeseries?days=30 — daily aggregates for the dashboard.
+  // Each bucket is one UTC day with totals + sub-totals by provider, for
+  // stacked line / area charts.
+  app.get("/admin/stats/timeseries", (req, res) => {
+    if (!statsRecorder) {
+      res.json({ enabled: false, days: [] });
+      return;
+    }
+    const requested = Number(req.query.days);
+    const days = Number.isFinite(requested) && requested > 0 ? Math.min(365, requested) : 30;
+    res.json({
+      days: statsRecorder.getTimeseries(days),
+      window: { days },
+      generated_at: new Date().toISOString(),
+    });
+  });
+
   // GET /admin/usage/keys — month-to-date consumption per API key vs its
   // quota. An admin key sees every key; a non-admin key sees only itself.
   // Raw keys are never returned — only the sha256 short prefix, plus the

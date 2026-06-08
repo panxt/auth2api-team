@@ -8,10 +8,10 @@ interface NavItem {
 }
 
 const NAV: NavItem[] = [
+  { to: "/stats", label: "看板", icon: "📊" },
   { to: "/users", label: "用户", icon: "👥" },
   { to: "/accounts", label: "账号", icon: "🔌" },
-  // v0.2+ will populate these:
-  // { to: "/stats", label: "用量", icon: "📊" },
+  // v0.3+ will populate these:
   // { to: "/config", label: "配置", icon: "⚙️" },
   // { to: "/onboarding", label: "手册", icon: "📄" },
 ];
