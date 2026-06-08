@@ -29,8 +29,9 @@ auth2api 的定位很克制：
 - **可插拔存储**：用量事件与托管 key 默认存 SQLite（单 DB 文件），也可用旧的 JSONL/JSON 文件；OAuth token 始终为文件
 
 > 团队部署 / 使用 / 观测 / 管理 / 排障详细手册见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md);
-> 同事接入手册(Claude Code / Codex CLI / IDE 插件配置)见 [`docs/CLIENT_SETUP.md`](docs/CLIENT_SETUP.md);
+> 同事接入手册(Claude Code / Codex CLI / IDE 插件 / Cowork 配置)见 [`docs/CLIENT_SETUP.md`](docs/CLIENT_SETUP.md);
 > 路由算法 / 账号选择 / 协议翻译等架构细节见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md);
+> Cowork 等桌面 3P 客户端走 https 的 TLS 前置部署手册见 [`docs/CADDY_TLS.md`](docs/CADDY_TLS.md);
 > 版本改动历史见 [`CHANGELOG.md`](CHANGELOG.md)。
 - **默认安全设置**：timing-safe API key 校验、每 IP 限流、仅允许 localhost 浏览器 CORS
 

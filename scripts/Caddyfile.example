@@ -1,0 +1,55 @@
+# auth2api Caddy 反代配置模板 ──
+#
+# 用法:
+#   1. 把这文件复制到 Caddy 配置位置(brew 装的:`/usr/local/etc/Caddyfile` 或
+#      `/opt/homebrew/etc/Caddyfile`;mise / 直接二进制装的:你自己选)。
+#   2. 替换占位符:
+#        <YOUR-HOSTNAME>    一个内网/局域网域名,例如 auth2api.local 或 ai.corp
+#        <YOUR-HOST-IP>     auth2api 服务所在机器的 IP,例如 172.16.13.203
+#   3. 启动 Caddy:`caddy run --config /usr/local/etc/Caddyfile`
+#      或用配套的 com.example.caddy.example.plist 启动后台服务。
+#   4. 客户端机器上信任 Caddy 的本地 CA,详见 docs/CADDY_TLS.md。
+#
+# 目标:在 auth2api(明文 http :8318)前面终结 TLS,让 Cowork 等只接受 https
+# 的客户端可以接入。auth2api 源码完全不动,只需 Caddy 终结 TLS。
+#
+# Listen on port 8443(非特权端口,不需要 root)
+# 若想用标准 https 端口 443,把下面的 :8443 改成 :443,
+# 并以 LaunchDaemon(root)启动 Caddy,而非 LaunchAgent。
+
+{
+    # 全局选项
+    auto_https off              # 关掉公网 ACME,我们用 internal CA
+    admin off                   # 关掉 Caddy 的 admin endpoint(无需远程管理)
+}
+
+# 用 hostname + 端口的方式同时接 hostname 和 IP 形式访问
+https://<YOUR-HOSTNAME>:8443, https://<YOUR-HOST-IP>:8443 {
+    # Caddy 自动建本地 CA + 签 server cert(零外部依赖)
+    # 证书材料存于 ~/Library/Application Support/Caddy/pki/authorities/local/
+    tls internal
+
+    # 反代到本机 auth2api(明文 http,只在 loopback 监听)
+    reverse_proxy 127.0.0.1:8318 {
+        # 流式接口(SSE / 流式 /v1/messages)必须保留长连接、关闭缓冲
+        flush_interval -1
+        transport http {
+            keepalive 30s
+            keepalive_idle_conns 4
+        }
+    }
+
+    # 访问日志(可关)
+    log {
+        output file /var/log/caddy/auth2api.access.log {
+            roll_size 100MiB
+            roll_keep 5
+        }
+        format json
+    }
+}
+
+# 健康检查(本地 http,可选,Caddy 自己听一个低端口 /healthz)
+:9080 {
+    respond /healthz "ok" 200
+}

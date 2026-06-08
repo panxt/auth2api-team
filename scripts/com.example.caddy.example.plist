@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ═══════════════════════════════════════════════════════════════════
+   Caddy 反代守护 — launchd plist 模板(macOS, LaunchAgent)
+  ═══════════════════════════════════════════════════════════════════
+
+  目的:常驻 Caddy 监听 https,反代到 127.0.0.1:8318 的 auth2api。
+  详情见 docs/CADDY_TLS.md。
+
+  用法:
+    1. cp scripts/com.example.caddy.example.plist \
+         ~/Library/LaunchAgents/com.<your-user>.caddy.plist
+    2. 替换占位符:
+         <user>       macOS 当前用户名
+         <CADDY-BIN>  caddy 二进制完整路径(`which caddy` 的输出)
+         <CADDYFILE>  /usr/local/etc/Caddyfile 或你放 Caddyfile 的位置
+    3. launchctl load ~/Library/LaunchAgents/com.<your-user>.caddy.plist
+    4. 验证:`launchctl list | grep caddy` 应看到 PID > 0
+       `curl -k https://127.0.0.1:8443/health` 应返回 auth2api 的 {"status":"ok"}
+
+  端口:模板用 8443(非特权)。若要 443:
+    - plist 移到 /Library/LaunchDaemons/(LaunchDaemon 以 root 跑)
+    - sudo launchctl load /Library/LaunchDaemons/com.<your-user>.caddy.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.&lt;user&gt;.caddy</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>&lt;CADDY-BIN&gt;</string>
+    <string>run</string>
+    <string>--config</string>
+    <string>&lt;CADDYFILE&gt;</string>
+    <string>--adapter</string>
+    <string>caddyfile</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/&lt;user&gt;</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/&lt;user&gt;</string>
+    <key>USER</key>
+    <string>&lt;user&gt;</string>
+    <key>XDG_CONFIG_HOME</key>
+    <string>/Users/&lt;user&gt;/.config</string>
+    <key>XDG_DATA_HOME</key>
+    <string>/Users/&lt;user&gt;/Library/Application Support</string>
+  </dict>
+
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/&lt;user&gt;/.auth2api-logs/caddy.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/&lt;user&gt;/.auth2api-logs/caddy.err.log</string>
+</dict>
+</plist>
