@@ -706,6 +706,92 @@ tail -f ~/.<your-log-dir>/auth2api.launchd.out.log | grep -iE "failover|cooldown
 
 或者看 `/ui/accounts` 页:某个账号被打了几次 mid-stream 失败,会反映在 `totalFailures` 数和 cooldown 状态上。
 
+### 5.12 把 config.yaml 里的 key 迁到 managed(SQLite)
+
+`config.yaml` 里手写的 key 是**只读**的(程序永不改写 yaml,见 §5.1)。如果想让某些 key 通过 UI / `POST /admin/keys` 增删改,就要把它们**迁移到 SQLite 的 `managed_keys` 表**。**Key 字符串保持不变**,同事客户端不用动。
+
+#### 5.12.1 一次性迁移脚本
+
+仓库自带 `scripts/migrate-config-keys-to-managed.py`,纯标准库(只依赖 sqlite3 + 文件 IO),无需额外依赖。
+
+```bash
+cd ~/path/to/auth2api
+
+# 1. 预览要迁哪些(不写库)
+./scripts/migrate-config-keys-to-managed.py --dry-run
+# 输出会列出:
+#   - admin 标记的 key → skip(留在 yaml 当 bootstrap)
+#   - 非 admin key → 待迁,显示 yaml 行号
+
+# 2. 停服务(脚本默认会拒绝在服务运行时写库,避免被 ManagedKeyStore.persist() 反向覆盖)
+launchctl unload ~/Library/LaunchAgents/com.$USER.auth2api.plist
+
+# 3. 执行迁移
+./scripts/migrate-config-keys-to-managed.py
+# → INSERT OR REPLACE INTO managed_keys (key, data) VALUES (...)
+# → 打印还要手动删的 yaml entries(脚本不动 yaml,避免破坏注释)
+
+# 4. 按脚本提示编辑 config.yaml,删掉迁过去的 entries
+#    (留 admin: true 那条不要删)
+$EDITOR config.yaml
+
+# 5. 重启服务
+launchctl load ~/Library/LaunchAgents/com.$USER.auth2api.plist
+
+# 6. 验证 — managed key 现在在 UI 里可编辑
+curl -s -H "Authorization: Bearer <admin>" http://127.0.0.1:8317/admin/keys | jq
+# 应该看到迁过去的 key,source: "managed"
+```
+
+> 不停服务也能跑(加 `--force`),但**有竞态风险**:如果迁移期间有任何
+> `/admin/keys` POST/PATCH/DELETE,运行中的 `ManagedKeyStore.persist()` 会
+> 用内存里的 managed set 全量重写表(`replaceAll` 语义),我们刚 INSERT
+> 的行会被丢掉。10s 重启窗口换确定性,值。
+
+#### 5.12.2 为什么不动 yaml
+
+`migrate-config-keys-to-managed.py` **写 SQLite,不动 yaml**。原因:
+
+- yaml 里有手写注释、字段顺序、缩进风格,程序写会破坏
+- 让人手动改 yaml,留 git diff 痕迹,知道哪几行被删了
+- 脚本只打印 "你要删第 N 行起的 entry",不替你按 enter
+
+如果你确定 yaml 没注释要保,自己写个 sed / yq 二次处理也行:
+```bash
+# 用 yq 删 label="lei/dev" 那行(YAML 风格保留靠 yq -y)
+yq -y 'del(."api-keys"[] | select(.label == "lei/dev"))' config.yaml > config.tmp.yaml
+mv config.tmp.yaml config.yaml
+```
+
+#### 5.12.3 迁移后的 admin / managed 分工
+
+建议保留如下结构:
+
+| 来源 | 适合放的 key | 改动方式 |
+|---|---|---|
+| `config.yaml`(只读) | **1 把 bootstrap admin key**(防止 SQLite 损坏时把自己锁外面)、可选少量"绝不变"的 key | 编辑 yaml + 重启 |
+| `managed_keys`(SQLite)| 日常给同事增删的 non-admin key、临时配额 / 启停 | UI / `/admin/keys` API,即时生效 |
+
+#### 5.12.4 万一迁错了,怎么回滚
+
+迁移前先 git commit 或 cp 备份 `config.yaml` + `~/.auth2api/auth2api.db`,然后:
+
+```bash
+# 完全回滚:把 yaml 还原 + 删 sqlite 行
+cp config.yaml.bak config.yaml
+sqlite3 ~/.auth2api/auth2api.db \
+  "DELETE FROM managed_keys WHERE key IN ('sk-xxx', 'sk-yyy');"
+launchctl unload ~/Library/LaunchAgents/com.$USER.auth2api.plist
+launchctl load   ~/Library/LaunchAgents/com.$USER.auth2api.plist
+```
+
+或者只回滚 SQLite 那边(yaml 改动保留):
+```bash
+sqlite3 ~/.auth2api/auth2api.db \
+  "DELETE FROM managed_keys WHERE key IN ('sk-xxx', 'sk-yyy');"
+# 然后把删过的 entries 加回 yaml,重启
+```
+
 ---
 
 ## 6. 故障排查
