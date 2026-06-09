@@ -3,6 +3,76 @@
 本文档记录 `<your-user>/auth2api-team`(fork)在上游 `AmazingAng/auth2api` 基础上的改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.0.0] — 2026-06-09
+
+第二个 major,主线把 v1.0.0 的命令行管理向 **Web Dashboard + 流稳定性** 推进。基线 = v1.0.0(`e6225c5`),含 19 个 commit。
+
+### Added(新增)
+
+- **Admin Dashboard `/ui`**(Vite + React + Tailwind,`web/`) — 单页 SPA 嵌入 auth2api 主进程(`express.static('/ui')`),零跨域、单端口。三大页面:
+  - **Users**(`/ui/users`):API key CRUD、配额、当月用量、启停;config.yaml 来源的 key 标灰只读
+  - **Accounts**(`/ui/accounts`):上游账号状态表 + 5h/7d 窗口倒计时 + `⚡ 立即 Prewarm` 按钮 + **UI 内新增账号(OAuth manual mode)**,Anthropic / Codex 支持,Cursor 仅 CLI 提示
+  - **Stats**(`/ui/stats`):Chart.js 看板,KPI 卡 / 折线 / 饼图 / TopN / 配额进度条 / 账号健康表;30s 自动刷新
+- **Non-admin 只读模式** — 非 admin key 登入后自动隐藏所有管理按钮(新增 / 编辑 / 删除 / 启停 / Prewarm / 新增账号),sidebar 显示"只读"角标。被绕过的请求(devtools / 缓存页)统一回 `权限不足,请联系管理员`。
+- **Mid-SSE-stream failover**(`src/upstream/streaming-failover.ts`) — 流到一半 upstream 报错(`event: error` / `response.failed` / 网络断)时,后端在客户端无感知的情况下切到**同 provider 下一个可用账号**续传;切换优先同 provider,失败回退跨 provider。translator state 采用 per-attempt factory 模式,避免序号 / respId 错乱。
+- **Anthropic 5h / 7d 窗口监控** — 抓 `unified-5h-utilization` / `unified-5h-reset` / `unified-7d-utilization` / `unified-7d-reset` headers,`AccountSnapshot` 暴露 `windowStartedAt` / `windowResetAt` / `rateLimit`,UI Account 页有专属 panel。
+- **Prewarm 调度** — `POST /admin/prewarm`(已存在)+ 新增 launchd `com.<user>.auth2api-prewarm.plist`,每天 08:00 自动 prewarm 所有 anthropic 账号,把 5h 窗口起点对齐到工作时间。工作日 5h × 2 个窗口 = 全天覆盖 8:30-17:30。
+- **Opus 4.8 支持** — `claude-opus-4-8` 在 model registry / aliases / pricing 全 wire 到位。
+- **Caddy + TLS 反代文档** — `docs/CADDY_TLS.md` + 推荐 launchd plist,给 Cowork 等强制 https 的企业桌面客户端用。HTTP/HTTPS 同时可达。
+- **config.yaml → SQLite 迁移工具** — `scripts/migrate-config-keys-to-managed.py`,纯 stdlib(无 PyYAML),`--dry-run` / `--force` / `--include-admin` 三个 flag,把非 admin key 从只读 yaml 迁到可 CRUD 的 `managed_keys` 表,保留原始 raw key string,客户端无需重新发 key。
+- **新增 admin endpoints**:
+  - `GET /admin/ui/whoami` — 当前 key 的 label / admin / enabled,SPA 登录后探活用
+  - `POST /admin/oauth/:provider/start` / `exchange` — UI manual-mode OAuth(in-memory pending Map,10min TTL)
+  - `POST /admin/prewarm` — 主动 prewarm(配合上面的调度)
+- **OPERATIONS.md** — 团队运维手册:管理脚本、launchd 部署、Caddy、key 迁移、回滚 recipe 全覆盖。
+
+### Fixed(修复)
+
+13 项 code review 修复(Claude `/code-review high` 10 项 F1-F10 + Codex CLI `codex review` 3 项 C1-C3):
+
+- **F1 mid-stream failover 状态泄漏** — translator state 在 failover 多次 attempt 间共享导致 sequence_number 跳号 / respId 错位。改 `makeTransformEvent: () => fn` factory,每次 attempt 拿一份新闭包。
+- **F2 mid-stream usage 丢统计** — usage 没写到 `res.locals.stats.usage`,导致 mid-stream 切换后的请求在 byClient/byApi 维度计费为 0。done/disconnected/committed-error 三路径都补 `statsCtx.usage = usage`。
+- **F3 mid-stream accountEmail/provider 丢失** — 同上,recordAttempt 后立即写到 stats slot。
+- **F4 pre-stream retry 缺失** — `proxyStreamingWithFailover` 没有 401-refresh-once / RETRYABLE_STATUSES / isAnthropicExtraUsageError / waitForRetry backoff,跟 `proxyWithRetry` 行为不一致。从 `utils/http.ts` 导出辅助并补齐。
+- **F5 committed-error 不计 failure** — 流已提交后断,recordFailure 没被调用,账号"假装健康"。补 `recordFailure(email, "network", "stream terminated post-commit")`。
+- **F6 translator 崩在 undefined data** — emitTransformed 加 try/catch,异常落回 close-with-error 而不是抛栈。
+- **F7 windowStartedAt 给非 anthropic provider 也打** — codex/cursor 没有 5h 窗口概念,误打了。`recordAttempt` 里 gated 到 `this.provider === "anthropic"`。
+- **F8 EOF flush 合并多事件** — SSE 流末尾未 newline 时,缓冲里多个连续 event 被并成一个。done 分支按 blank-line 切分逐个 emit。
+- **F9 SPA RequireAuth 不 gate** — whoami 探活 401 后,localStorage 不清,React 把死 key 抓在手里反复请求。AuthProvider 在 probe 返 null 时清 localStorage + setKey(null),路由自动跳 /login。
+- **F10 recordRateLimit 写死 Anthropic schema** — `unified-5h-*` 是 anthropic 字段,但所有 provider 都进这条路径,污染了 codex/cursor 的快照。gated 到 anthropic。
+- **C1 classifier 漏触发** — `proxyStreamingWithFailover` 只在 `ev.event === "error"` 时 invoke classifier,`response.failed` 这种 OpenAI Responses 错误事件被透传给客户端。改为总是 invoke,由 classifier 决定。
+- **C2 /v1/chat/completions usage chunk 丢** — translator 不带 usage,Codex 路径的 usage chunk 全部为 0。transformEvent 签名改 `(ev, usage) => ...`,把跑动累加的 usage 注入。
+- **C3 /v1/responses response.completed.usage 全 0** — 同上,Anthropic 路径下的 OpenAI Responses 翻译漏传 usage,fix 后真实数字。
+
+其他:
+
+- **smoke test count_tokens** 因 opus 4.8 注入 `model` 字段断言失败,更新 mock 断言匹配新 body 形状。
+- **Anthropic extra-usage 400 failover** — 上游 third-party extra-usage 余额耗尽返回 `400 { error: { type: "extra_usage_*" } }`,先前未识别,现 `isAnthropicExtraUsageError` 检测后纳入 failover。
+
+### Changed(行为变化)
+
+- **`AccountSnapshot`** 新增 `windowStartedAt` / `windowResetAt` / `windowExpired` / `rateLimit: RateLimitSnapshot | null` 字段;调用方读这些字段不会破坏老 snapshot 反序列化。
+- **`AccountManager`**:`recordAttempt(email)` 仅 anthropic 时锚 windowStartedAt;`recordRateLimit(email, headers)` 仅 anthropic 时解析 unified-* headers。`getAvailableAccount(email)` / `listEmails()` 加旁路绕过 sticky routing(给 prewarm 用,均匀打到所有账号)。
+- **`/admin/stats`** + **`/admin/stats/timeseries`** 当前对**所有**有效 key 开放(非 admin 也能看全量聚合)。如需收紧到 admin-only,见 OPERATIONS.md §权限。
+- **package.json scripts** — 根 + `web/` 都加 `node ./node_modules/<tool>/bin/...` 直调 path,绕过 macOS `/bin/sh` 对 ESM shebang 的不友好。
+
+### Internal(开发/工程)
+
+- **新增前端工程** — `web/`(Vite + React 18 + TypeScript + Tailwind + Chart.js + react-router),独立 `package.json`,build 产物 `web/dist/` gitignored。生产部署只多一步 `cd web && npm install && npm run build`。Dockerfile 多阶段已适配。
+- **新模块** — `src/upstream/streaming-failover.ts` (~700 行),`src/admin/oauth.ts`(in-memory pending),`scripts/migrate-config-keys-to-managed.py`(迁移工具)。
+- **代码审核两道关** — Claude `/code-review high`(F1-F10)+ OpenAI Codex CLI `codex review`(C1-C3),合计 13 项 P0/P1/P2 修复,全部上主线 + 补测。
+- **测试** — 全部既有测试保持绿;mid-stream failover 集成测试在 `tests/` 内补充。
+
+### 升级注意
+
+- v1.0.0 升 v2.0.0 **不需要 schema 迁移**,SQLite 表结构兼容;原 `managed_keys` 数据保留。
+- 第一次启动需要 build 前端:`cd web && npm install && npm run build`(生产 tarball 已带 `web/dist/`,免此步)。
+- 想用 5h 窗口对齐:在 launchd 配 `com.<user>.auth2api-prewarm.plist`,详见 OPERATIONS.md §5.9。
+- 想给同事开看板:不要直接发 admin key — 用 `scripts/auth2api-admin.sh add <name>` 给一把 non-admin key,他们登入后是只读模式,看用量足够。
+- 想 https:跟 Caddy 配,见 `docs/CADDY_TLS.md`,plist 模板已经备好。
+
+---
+
 ## [1.0.0] — 2026-05-28
 
 首个团队版正式发布。基线 = 上游 `AmazingAng/auth2api` @ `840fa10`(已含 codex + cursor provider、多账号粘性轮换 + 故障转移、`/admin/stats` 持久化统计)。本版本在此之上新增以下团队自研能力。
