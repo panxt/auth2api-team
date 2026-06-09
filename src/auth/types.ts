@@ -27,6 +27,10 @@ export interface TokenData {
   cursorClientId?: string;
   /** Cursor only — membership tier from Cursor local storage. */
   cursorMembershipType?: string;
+  /** Operator flag — when true the account is kept loaded but skipped by
+   *  `getNextAccount()` / `getAvailableAccount()` (no traffic, no refresh).
+   *  Toggled via PATCH /admin/accounts/:provider/:email. */
+  disabled?: boolean;
 }
 
 export interface TokenStorage {
@@ -44,4 +48,5 @@ export interface TokenStorage {
   cursor_config_version?: string;
   cursor_client_id?: string;
   cursor_membership_type?: string;
+  disabled?: boolean;
 }

@@ -293,6 +293,55 @@ auth2api supports multiple Claude OAuth accounts. Each account is stored as a se
 - Per-account token usage (input, output, cache) is tracked and logged periodically
 - Use `/admin/accounts` to inspect all account states
 
+## Admin Dashboard `/ui`
+
+Since v2.0, auth2api ships a built-in web dashboard. Open
+`http://<host>:8317/ui/` and sign in with an `admin: true` API key (non-admin
+keys land in a **read-only** view — they see usage but management buttons are
+hidden).
+
+| Path | Purpose |
+|---|---|
+| `/ui/stats` | KPI cards, line / pie / TopN charts, quota progress, account health table. Auto-refreshes every 30s |
+| `/ui/users` | API key CRUD, quotas, MTD usage. `config.yaml`-sourced keys are read-only |
+| `/ui/accounts` | Upstream account management (see below) |
+
+### Upstream account actions (new in v2.0.0)
+
+Each row in `/ui/accounts` exposes:
+
+| Button | Behavior |
+|---|---|
+| **⚡ Prewarm** (header) | Send a minimal ping through every anthropic account to anchor its 5h sliding window. Pair with a launchd job at 08:00 to align the window with working hours |
+| **+ Add account** (header) | OAuth manual flow — Anthropic / Codex via UI; Cursor still CLI-only (deep-link PKCE) |
+| **Disable / Enable** | Toggle `disabled` flag. Token file stays; selection + auto-refresh skip the account. Re-enable to restore |
+| **Re-authenticate** | Opens OAuth modal with provider locked + original email shown. Logging in with the same email upserts (replaces token, clears cooldown / failureCount / disabled). Different email = new account |
+| **Delete** | Permanently remove: drops from memory + deletes `~/.auth2api/<provider>-<email>.json`. Irreversible, double-confirmed |
+
+REST endpoints (for scripts / automation):
+
+```
+GET    /admin/accounts                       # list (snapshot includes `disabled`)
+POST   /admin/oauth/:provider/start          # OAuth step 1 — returns authUrl + state
+POST   /admin/oauth/:provider/exchange       # OAuth step 2 — { state, callbackUrl }
+PATCH  /admin/accounts/:provider/:email      # body { disabled: bool }
+DELETE /admin/accounts/:provider/:email      # permanent delete
+POST   /admin/prewarm                        # prewarm all anthropic accounts
+```
+
+All admin-only (`Authorization: Bearer <admin-key>`).
+
+### Build & deploy
+
+Build the SPA: `cd web && npm install && npm run build`. The main Express
+process serves `web/dist/` via `express.static('/ui')` — single port, no CORS.
+The Docker image already includes this build step.
+
+For HTTPS (required by some enterprise desktop clients like Cowork), see
+[`docs/CADDY_TLS.md`](docs/CADDY_TLS.md).
+
+---
+
 ## Admin status
 
 Use `/admin/accounts` with your configured API key to inspect the current account states:

@@ -445,6 +445,54 @@ export function createServer(
     });
   }
 
+  // DELETE /admin/accounts/:provider/:email — permanently remove an upstream
+  // account (drops from memory + deletes the token file from auth-dir).
+  // PATCH  /admin/accounts/:provider/:email — body { disabled: bool } toggles
+  // the operator-disabled flag (skip in selection + refresh, but keep file).
+  // Both admin-only.
+  app.delete(
+    "/admin/accounts/:provider/:email",
+    requireAdmin,
+    (req, res) => {
+      const provider = registry.get(req.params.provider as ProviderId);
+      if (!provider) {
+        res.status(404).json({ error: { message: `unknown provider ${req.params.provider}` } });
+        return;
+      }
+      const email = decodeURIComponent(req.params.email);
+      const removed = provider.manager.removeAccount(email);
+      if (!removed) {
+        res.status(404).json({ error: { message: `no account ${email} loaded for ${provider.id}` } });
+        return;
+      }
+      res.json({ ok: true, provider: provider.id, email });
+    },
+  );
+
+  app.patch(
+    "/admin/accounts/:provider/:email",
+    requireAdmin,
+    (req, res) => {
+      const provider = registry.get(req.params.provider as ProviderId);
+      if (!provider) {
+        res.status(404).json({ error: { message: `unknown provider ${req.params.provider}` } });
+        return;
+      }
+      const email = decodeURIComponent(req.params.email);
+      const body = (req.body || {}) as { disabled?: unknown };
+      if (typeof body.disabled !== "boolean") {
+        res.status(400).json({ error: { message: "body must be { disabled: boolean }" } });
+        return;
+      }
+      const next = provider.manager.setDisabled(email, body.disabled);
+      if (next === null) {
+        res.status(404).json({ error: { message: `no account ${email} loaded for ${provider.id}` } });
+        return;
+      }
+      res.json({ ok: true, provider: provider.id, email, disabled: next });
+    },
+  );
+
   app.get("/admin/accounts", (_req, res) => {
     const providers: Record<
       string,

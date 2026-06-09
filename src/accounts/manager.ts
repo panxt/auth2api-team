@@ -1,5 +1,5 @@
 import { ProviderId, TokenData } from "../auth/types";
-import { saveToken, loadAllTokens } from "../auth/token-storage";
+import { saveToken, loadAllTokens, deleteToken } from "../auth/token-storage";
 import { getDeviceId } from "../utils/common";
 import { RefreshTokenExhaustedError } from "../auth/refresh-errors";
 
@@ -125,6 +125,9 @@ interface AccountState {
   windowStartedAt: string | null;
   /** Latest rate-limit header snapshot from upstream. */
   rateLimit: RateLimitSnapshot | null;
+  /** Operator-disabled — kept loaded but skipped by account selection +
+   *  auto-refresh. Persisted to token file so it survives restart. */
+  disabled: boolean;
 }
 
 export interface AccountSnapshot {
@@ -157,6 +160,9 @@ export interface AccountSnapshot {
   windowExpired: boolean;
   /** Latest rate-limit header snapshot observed from upstream, if any. */
   rateLimit: RateLimitSnapshot | null;
+  /** When true the account is operator-disabled — token kept, but no traffic
+   *  and no refresh. UI surfaces this as a separate badge from cooldown. */
+  disabled: boolean;
 }
 
 export interface AvailableAccount {
@@ -346,6 +352,11 @@ export class AccountManager {
     }
     const existing = this.accounts.get(token.email);
     if (existing) {
+      // Re-auth re-enables a disabled account: the operator intentionally
+      // logged in again, so they want to use it. Clear the flag both in
+      // memory and on the new token we're about to persist.
+      token.disabled = false;
+      existing.disabled = false;
       existing.token = token;
       existing.cooldownUntil = 0;
       existing.failureCount = 0;
@@ -382,7 +393,7 @@ export class AccountManager {
     if (this.lastUsedIndex >= 0 && now < this.stickyUntil) {
       const email = this.accountOrder[this.lastUsedIndex];
       const acct = this.accounts.get(email)!;
-      if (acct.cooldownUntil <= now) {
+      if (!acct.disabled && acct.cooldownUntil <= now) {
         return {
           account: buildAvailableAccount(
             this.authDir,
@@ -400,7 +411,7 @@ export class AccountManager {
       const idx = (startIdx + i) % count;
       const email = this.accountOrder[idx];
       const acct = this.accounts.get(email)!;
-      if (acct.cooldownUntil <= now) {
+      if (!acct.disabled && acct.cooldownUntil <= now) {
         this.lastUsedIndex = idx;
         this.stickyUntil = now + randomStickyDuration();
         return {
@@ -414,11 +425,20 @@ export class AccountManager {
       }
     }
 
-    // All accounts in cooldown — find the most recoverable one
-    const firstAcct = this.accounts.get(this.accountOrder[0])!;
+    // No usable account — either in cooldown or operator-disabled. Find the
+    // most recoverable non-disabled one for the error response; if everything
+    // is disabled, surface that as a non-recoverable auth-like state so the
+    // caller doesn't keep retrying.
+    const nonDisabled = this.accountOrder.filter(
+      (e) => !this.accounts.get(e)!.disabled,
+    );
+    if (nonDisabled.length === 0) {
+      return { account: null, failureKind: "auth", retryAfterMs: null };
+    }
+    const firstAcct = this.accounts.get(nonDisabled[0])!;
     let bestKind: AccountFailureKind = firstAcct.lastFailureKind ?? "network";
     let bestRemainingMs = Math.max(0, firstAcct.cooldownUntil - now);
-    for (const email of this.accountOrder.slice(1)) {
+    for (const email of nonDisabled.slice(1)) {
       const acct = this.accounts.get(email)!;
       const kind = acct.lastFailureKind ?? "network";
       const remainingMs = Math.max(0, acct.cooldownUntil - now);
@@ -580,8 +600,74 @@ export class AccountManager {
   getAvailableAccount(email: string): AvailableAccount | null {
     const acct = this.accounts.get(email);
     if (!acct) return null;
+    if (acct.disabled) return null;
     if (acct.cooldownUntil > Date.now()) return null;
     return buildAvailableAccount(this.authDir, email, acct.token, this.provider);
+  }
+
+  /**
+   * Toggle the operator-disabled flag. Persists by re-saving the token file
+   * with the new `disabled` field (TokenStorage carries it). Returns the new
+   * disabled state, or null if the email isn't loaded.
+   *
+   * Side effects when disabling:
+   *   - Skipped by getNextAccount() / getAvailableAccount()
+   *   - Skipped by auto-refresh loop
+   *   - In-flight requests using this account are NOT aborted (they finish
+   *     naturally; record* methods will still update stats)
+   *   - If currently sticky, drop it so the next call rotates away
+   */
+  setDisabled(email: string, value: boolean): boolean | null {
+    const acct = this.accounts.get(email);
+    if (!acct) return null;
+    if (acct.disabled === value) return value;
+    acct.disabled = value;
+    acct.token.disabled = value;
+    saveToken(this.authDir, acct.token);
+    if (value) {
+      // Drop sticky pointer if it was on this account so the next request
+      // doesn't keep trying to use it.
+      const stickyIdx = this.lastUsedIndex;
+      if (
+        stickyIdx >= 0 &&
+        this.accountOrder[stickyIdx] === email
+      ) {
+        this.lastUsedIndex = -1;
+        this.stickyUntil = 0;
+      }
+    }
+    console.log(
+      `[${this.provider}] account ${email} ${value ? "disabled" : "enabled"}`,
+    );
+    return value;
+  }
+
+  /**
+   * Permanently remove an account: drop from memory + delete its token file.
+   * Returns true if removed, false if the email wasn't loaded.
+   *
+   * In-flight requests using this account see their record* calls become
+   * no-ops (the email key is gone from this.accounts) — this is safe; stats
+   * for that account are lost on purpose.
+   */
+  removeAccount(email: string): boolean {
+    if (!this.accounts.has(email)) return false;
+    this.accounts.delete(email);
+    const orderIdx = this.accountOrder.indexOf(email);
+    if (orderIdx >= 0) {
+      this.accountOrder.splice(orderIdx, 1);
+      // Sticky pointer can become stale if we just removed the sticky entry
+      // or shifted indices around it. Easiest correct fix: drop sticky.
+      if (this.lastUsedIndex === orderIdx || this.lastUsedIndex >= this.accountOrder.length) {
+        this.lastUsedIndex = -1;
+        this.stickyUntil = 0;
+      } else if (this.lastUsedIndex > orderIdx) {
+        this.lastUsedIndex--;
+      }
+    }
+    deleteToken(this.authDir, this.provider, email);
+    console.log(`[${this.provider}] account ${email} removed`);
+    return true;
   }
 
   getSnapshots(): AccountSnapshot[] {
@@ -621,6 +707,7 @@ export class AccountManager {
         windowResetAt,
         windowExpired,
         rateLimit: acct.rateLimit,
+        disabled: acct.disabled,
       });
     }
     return snapshots;
@@ -711,6 +798,9 @@ export class AccountManager {
     try {
       const now = Date.now();
       for (const acct of this.accounts.values()) {
+        // Skip disabled — token won't be used; refreshing it just wastes a
+        // refresh-token rotation. Re-auth (via addAccount) clears `disabled`.
+        if (acct.disabled) continue;
         if (this.shouldRefresh(acct, now)) {
           await this.refreshAccount(acct.token.email);
         }
@@ -804,6 +894,7 @@ export class AccountManager {
       refreshPromise: null,
       windowStartedAt: null,
       rateLimit: null,
+      disabled: token.disabled === true,
     };
   }
 }

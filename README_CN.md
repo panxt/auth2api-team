@@ -307,6 +307,57 @@ auth2api 支持多个 Claude OAuth 账号，每个账号的 token 作为独立�
 
 > 完整算法实现 `src/accounts/manager.ts:333-410`,详细说明见 [docs/ARCHITECTURE.md §3](docs/ARCHITECTURE.md#3-账号选择算法)。
 
+## 管理看板 `/ui`
+
+v2.0 起内置 Web Dashboard,做日常运维(查用量、增删改 API key、加 / 停用 / 删除 / 重新认证上游账号)不用敲 curl,浏览器打开 `http://<host>:8317/ui/` 即可。
+
+### 登录
+
+输入一个 `admin: true` 的 API key,持久化到 localStorage(下次自动登录)。非 admin key 也能登入,但进入 **只读模式** — 看得到自己的用量 + 全局看板,管理按钮自动隐藏。退出按 sidebar 底部"退出登录"。
+
+### 页面
+
+| 路径 | 内容 |
+|---|---|
+| `/ui/stats` | 大屏看板:KPI 卡 / 折线图 / 饼图 / TopN / 配额进度条 / 账号健康表,30s 自动刷新 |
+| `/ui/users` | API key CRUD、配额、当月用量。config.yaml 来源的 key 标灰只读 |
+| `/ui/accounts` | 上游账号管理 — 见下 |
+
+### 上游账号管理(本节是 v2.0.0 新增)
+
+`/ui/accounts` 每行账号末尾有四个操作:
+
+| 按钮 | 行为 |
+|---|---|
+| **⚡ 立即 Prewarm**(页头) | 给所有 anthropic 账号发一次最小 ping,主动锚定 5h 滑动窗口起点。配合 launchd 上 08:00 跑这个,可把窗口对齐到工作时间 |
+| **+ 新增账号**(页头) | OAuth manual 模式,Anthropic / Codex 走 UI;Cursor 仍只能 CLI(deep-link PKCE) |
+| **停用 / 启用**(行内) | 切换 `disabled` 标记。停用后 token 文件保留,但选号 + auto-refresh 都跳过 — 不浪费 refresh-token 轮换。再点"启用"恢复 |
+| **重新认证**(行内) | 打开 OAuth modal 并锁死 provider + 提示原 email。用相同 email 完成授权,后端 upsert 路径替换 token + 清掉 cooldown / failureCount / disabled;email 不同则被当作新增账号入池 |
+| **删除**(行内) | 永久删除:内存 + `~/.auth2api/<provider>-<email>.json` 双删,不可逆。需要二次确认 |
+
+对应的 REST endpoint(脚本 / 自动化用):
+
+```
+GET    /admin/accounts                         # 列表(snapshot 含 disabled 字段)
+POST   /admin/oauth/:provider/start            # 触发 OAuth 第一步,返回 authUrl + state
+POST   /admin/oauth/:provider/exchange         # body { state, callbackUrl } 完成第二步
+PATCH  /admin/accounts/:provider/:email        # body { disabled: bool } 切换停用
+DELETE /admin/accounts/:provider/:email        # 永久删除
+POST   /admin/prewarm                          # 主动 prewarm 所有 anthropic 账号
+```
+
+全部 admin-only(`Authorization: Bearer <admin-key>`)。"重新认证"在 UI 上是组合操作 — 调一次 start,用户授权后调一次 exchange,后端 addAccount 自动 upsert。
+
+### 部署
+
+生产 build:`cd web && npm install && npm run build`,产物 `web/dist/` 被主进程 `express.static('/ui')` 直接 serve,**单端口**(8317)、**零跨域**。Docker 镜像已包含。
+
+需要 HTTPS(给 Cowork 等强制 https 的桌面客户端用)看 [`docs/CADDY_TLS.md`](docs/CADDY_TLS.md)。
+
+完整运维细节(包括只读模式、403 友好提示、AUTH/角色隔离)见 [docs/OPERATIONS.md](docs/OPERATIONS.md)。
+
+---
+
 ## 管理状态
 
 通过 `/admin/accounts` 查看所有账号状态：

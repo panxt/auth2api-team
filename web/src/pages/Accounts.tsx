@@ -2,6 +2,8 @@ import { useEffect, useState, useCallback } from "react";
 import {
   listAccounts,
   prewarm,
+  deleteAccount,
+  setAccountDisabled,
   AccountSnapshot,
   PrewarmResp,
 } from "../api/accounts";
@@ -9,6 +11,7 @@ import { ApiError } from "../api/client";
 import { AddAccountModal } from "../components/AddAccountModal";
 import { AccountQuotaPanel } from "../components/AccountQuotaPanel";
 import { useAuth } from "../lib/auth";
+import { SupportedProvider } from "../api/oauth";
 
 function fmtTokens(n: number): string {
   if (!n) return "—";
@@ -33,6 +36,9 @@ function cooldownStatus(acct: AccountSnapshot): {
   detail?: string;
 } {
   const now = Date.now();
+  if (acct.disabled) {
+    return { badge: "disabled", className: "badge-muted" };
+  }
   if (acct.cooldownUntil > now) {
     const remainMs = acct.cooldownUntil - now;
     const remainMin = Math.ceil(remainMs / 60_000);
@@ -58,6 +64,10 @@ export function Accounts() {
   const [prewarming, setPrewarming] = useState(false);
   const [lastPrewarm, setLastPrewarm] = useState<PrewarmResp | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [reauth, setReauth] = useState<{
+    provider: SupportedProvider;
+    email: string;
+  } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -98,6 +108,42 @@ export function Accounts() {
     }
   }
 
+  async function onToggleDisabled(providerId: string, acct: AccountSnapshot) {
+    const target = !acct.disabled;
+    if (target && !confirm(`停用 ${acct.email}? 停用后不再被分配新请求,可重新启用。`)) return;
+    try {
+      await setAccountDisabled(providerId, acct.email, target);
+      load();
+    } catch (e) {
+      alert(`操作失败: ${(e as ApiError).message}`);
+    }
+  }
+
+  async function onDelete(providerId: string, acct: AccountSnapshot) {
+    if (
+      !confirm(
+        `永久删除 ${acct.email}? 不可逆 — 内存 + token 文件都会清掉。\n如需保留 token,改用"停用"。`,
+      )
+    )
+      return;
+    try {
+      await deleteAccount(providerId, acct.email);
+      load();
+    } catch (e) {
+      alert(`删除失败: ${(e as ApiError).message}`);
+    }
+  }
+
+  function onReauth(providerId: string, acct: AccountSnapshot) {
+    if (providerId !== "anthropic" && providerId !== "codex") {
+      alert(
+        "Cursor 走 deep-link PKCE,无法在 UI 重新认证 — 用 CLI:\n  npm run login -- --provider=cursor",
+      );
+      return;
+    }
+    setReauth({ provider: providerId as SupportedProvider, email: acct.email });
+  }
+
   return (
     <div>
       <header className="flex items-center justify-between mb-6">
@@ -134,14 +180,26 @@ export function Accounts() {
       </header>
 
       {isAdmin && (
-        <AddAccountModal
-          open={showAdd}
-          onClose={() => setShowAdd(false)}
-          onAdded={() => {
-            // Refresh after a moment so the new account appears.
-            setTimeout(load, 500);
-          }}
-        />
+        <>
+          <AddAccountModal
+            open={showAdd}
+            onClose={() => setShowAdd(false)}
+            onAdded={() => {
+              // Refresh after a moment so the new account appears.
+              setTimeout(load, 500);
+            }}
+          />
+          <AddAccountModal
+            open={!!reauth}
+            onClose={() => setReauth(null)}
+            onAdded={() => {
+              setReauth(null);
+              setTimeout(load, 500);
+            }}
+            reauthProvider={reauth?.provider}
+            reauthEmail={reauth?.email}
+          />
+        </>
       )}
 
       {lastPrewarm && (
@@ -197,13 +255,19 @@ export function Accounts() {
                   <th className="px-4 py-3 font-medium">Cache R/W</th>
                   <th className="px-4 py-3 font-medium">最近成功</th>
                   <th className="px-4 py-3 font-medium">Token 过期</th>
+                  {isAdmin && (
+                    <th className="px-4 py-3 font-medium text-right">操作</th>
+                  )}
                 </tr>
               </thead>
               <tbody className="divide-y divide-ink-800">
                 {accounts.map((a) => {
                   const cd = cooldownStatus(a);
                   return (
-                    <tr key={a.email} className="hover:bg-ink-900/50">
+                    <tr
+                      key={a.email}
+                      className={`hover:bg-ink-900/50 ${a.disabled ? "opacity-50" : ""}`}
+                    >
                       <td className="px-4 py-3 font-medium">
                         {a.email}
                         {a.planType && (
@@ -245,6 +309,31 @@ export function Accounts() {
                           ? "refreshing..."
                           : fmtRelative(a.expiresAt)}
                       </td>
+                      {isAdmin && (
+                        <td className="px-4 py-3 text-right whitespace-nowrap space-x-1">
+                          <button
+                            className="btn-ghost text-xs"
+                            onClick={() => onToggleDisabled(providerId, a)}
+                            title={a.disabled ? "重新启用" : "暂停使用,token 保留"}
+                          >
+                            {a.disabled ? "启用" : "停用"}
+                          </button>
+                          <button
+                            className="btn-ghost text-xs"
+                            onClick={() => onReauth(providerId, a)}
+                            title="OAuth 重新登录 — 用相同 email 登录会刷新 token"
+                          >
+                            重新认证
+                          </button>
+                          <button
+                            className="btn-ghost text-xs text-rose-400 hover:text-rose-300"
+                            onClick={() => onDelete(providerId, a)}
+                            title="永久删除(不可逆)"
+                          >
+                            删除
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   );
                 })}

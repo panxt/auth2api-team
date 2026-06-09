@@ -1,4 +1,4 @@
-import { get, post } from "./client";
+import { get, post, patch, del } from "./client";
 
 export interface RateLimitSnapshot {
   observedAt: string;
@@ -33,6 +33,7 @@ export interface AccountSnapshot {
   windowResetAt: string | null;
   windowExpired: boolean;
   rateLimit: RateLimitSnapshot | null;
+  disabled: boolean;
 }
 
 export interface AccountsResp {
@@ -72,4 +73,19 @@ export const prewarm = () => post<PrewarmResp>("/admin/prewarm");
 export const reload = () =>
   post<{ reloaded: Record<string, unknown>; generated_at: string }>(
     "/admin/reload",
+  );
+
+export const deleteAccount = (provider: string, email: string) =>
+  del<{ ok: true; provider: string; email: string }>(
+    `/admin/accounts/${provider}/${encodeURIComponent(email)}`,
+  );
+
+export const setAccountDisabled = (
+  provider: string,
+  email: string,
+  disabled: boolean,
+) =>
+  patch<{ ok: true; provider: string; email: string; disabled: boolean }>(
+    `/admin/accounts/${provider}/${encodeURIComponent(email)}`,
+    { disabled },
   );

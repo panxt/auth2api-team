@@ -50,6 +50,7 @@ export function tokenToStorage(data: TokenData): TokenStorage {
     cursor_config_version: data.cursorConfigVersion,
     cursor_client_id: data.cursorClientId,
     cursor_membership_type: data.cursorMembershipType,
+    disabled: data.disabled,
   };
 }
 
@@ -70,6 +71,7 @@ export function storageToToken(storage: TokenStorage): TokenData {
     cursorConfigVersion: storage.cursor_config_version,
     cursorClientId: storage.cursor_client_id,
     cursorMembershipType: storage.cursor_membership_type,
+    disabled: storage.disabled,
   };
 }
 
@@ -84,6 +86,29 @@ export function saveToken(authDir: string, data: TokenData): void {
   fs.writeFileSync(filePath, JSON.stringify(tokenToStorage(data), null, 2), {
     mode: 0o600,
   });
+}
+
+/**
+ * Delete the on-disk token file for a given account. Returns true if the file
+ * existed and was removed, false if it didn't exist (treat as already-deleted).
+ * Caller is responsible for removing the email from the in-memory AccountManager
+ * BEFORE calling this — otherwise the next reload() would re-add it (the file
+ * would still be there during the reload's filesystem scan).
+ */
+export function deleteToken(
+  authDir: string,
+  provider: ProviderId,
+  email: string,
+): boolean {
+  const sanitized = email
+    .replace(/[^a-zA-Z0-9@._-]/g, "_")
+    .replace(/\.\./g, "_");
+  const prefix = FILENAME_PREFIX[provider];
+  const filename = `${prefix}-${sanitized}.json`;
+  const filePath = path.join(authDir, filename);
+  if (!fs.existsSync(filePath)) return false;
+  fs.unlinkSync(filePath);
+  return true;
 }
 
 export function loadAllTokens(

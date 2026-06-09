@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Modal } from "./Modal";
 import {
   startOAuth,
@@ -13,13 +13,23 @@ export function AddAccountModal({
   open,
   onClose,
   onAdded,
+  // Re-auth mode: locks provider, jumps straight to authorize step, and shows
+  // a banner telling the operator "log in with the SAME email" so the manager's
+  // addAccount() upsert path replaces the existing token instead of creating
+  // a sibling account.
+  reauthProvider,
+  reauthEmail,
 }: {
   open: boolean;
   onClose: () => void;
   onAdded: (email: string) => void;
+  reauthProvider?: SupportedProvider;
+  reauthEmail?: string;
 }) {
   const [step, setStep] = useState<Step>("choose");
-  const [provider, setProvider] = useState<SupportedProvider>("anthropic");
+  const [provider, setProvider] = useState<SupportedProvider>(
+    reauthProvider ?? "anthropic",
+  );
   const [authUrl, setAuthUrl] = useState("");
   const [state, setState] = useState("");
   const [callbackPort, setCallbackPort] = useState(0);
@@ -30,7 +40,7 @@ export function AddAccountModal({
 
   function reset() {
     setStep("choose");
-    setProvider("anthropic");
+    setProvider(reauthProvider ?? "anthropic");
     setAuthUrl("");
     setState("");
     setCallbackPort(0);
@@ -43,6 +53,33 @@ export function AddAccountModal({
     reset();
     onClose();
   }
+
+  // In re-auth mode we skip the "choose provider" step entirely — provider is
+  // locked, and clicking "重新认证" should land directly on the authorize page
+  // with the OAuth URL already requested. Trigger when the modal opens.
+  useEffect(() => {
+    if (!open || !reauthProvider || step !== "choose" || busy || authUrl) return;
+    let cancelled = false;
+    setBusy(true);
+    setErr(null);
+    startOAuth(reauthProvider)
+      .then((r) => {
+        if (cancelled) return;
+        setState(r.state);
+        setAuthUrl(r.authUrl);
+        setCallbackPort(r.callbackPort);
+        setStep("authorize");
+      })
+      .catch((e) => {
+        if (!cancelled) setErr((e as ApiError).message);
+      })
+      .finally(() => {
+        if (!cancelled) setBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, reauthProvider, step, busy, authUrl]);
 
   async function onStart() {
     setBusy(true);
@@ -83,7 +120,7 @@ export function AddAccountModal({
     <Modal
       open={open}
       onClose={handleClose}
-      title="新增上游账号"
+      title={reauthProvider ? `重新认证 ${reauthEmail ?? ""}` : "新增上游账号"}
       size="lg"
     >
       {step === "choose" && (
@@ -147,9 +184,14 @@ export function AddAccountModal({
 
       {step === "authorize" && (
         <div className="space-y-4">
+          {reauthProvider && reauthEmail && (
+            <div className="badge-warn px-3 py-2 block text-sm">
+              ⚠️ 请用 <code className="font-mono">{reauthEmail}</code> 这个账号登录,否则会被当作新增账号入池。
+            </div>
+          )}
           <ol className="space-y-3 text-sm text-ink-300 list-decimal list-inside">
             <li>
-              点下方"打开"按钮(或复制 URL 在新标签贴入),用要新增的{" "}
+              点下方"打开"按钮(或复制 URL 在新标签贴入),用{reauthProvider ? "**相同**的" : "要新增的"}{" "}
               <b>{provider === "anthropic" ? "Claude" : "ChatGPT"}</b>{" "}
               账号完成授权。
             </li>
