@@ -11,6 +11,7 @@ import {
 } from "../api/keys";
 import { ApiError } from "../api/client";
 import { Modal } from "../components/Modal";
+import { useAuth } from "../lib/auth";
 
 interface MergedRow extends UsageKey {
   source: "managed" | "config";
@@ -29,6 +30,9 @@ function fmtTokens(n: number | undefined): string {
 }
 
 export function Users() {
+  const { whoami } = useAuth();
+  const isAdmin = !!whoami?.admin;
+
   const [rows, setRows] = useState<MergedRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -41,10 +45,17 @@ export function Users() {
     setLoading(true);
     setErr(null);
     try {
-      const [usage, managed] = await Promise.all([listUsage(), listManaged()]);
-      const managedByShort = new Map<string, ManagedKeyView>();
-      for (const m of managed.keys) {
-        if (m.source === "managed") managedByShort.set(m.id, m);
+      // listUsage() hits /admin/usage/keys (any valid key; returns only the
+      // caller's row for non-admin). listManaged() hits /admin/keys which is
+      // admin-only, so for non-admin keys we skip it — the source/managedId
+      // distinction is moot when the editor UI is hidden anyway.
+      const usage = await listUsage();
+      let managedByShort = new Map<string, ManagedKeyView>();
+      if (isAdmin) {
+        const managed = await listManaged();
+        for (const m of managed.keys) {
+          if (m.source === "managed") managedByShort.set(m.id, m);
+        }
       }
       const merged: MergedRow[] = usage.keys.map((u) => {
         const m = managedByShort.get(u.apiKeyShort);
@@ -61,7 +72,7 @@ export function Users() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => {
     load();
@@ -98,17 +109,26 @@ export function Users() {
     <div>
       <header className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-semibold">用户管理</h1>
+          <h1 className="text-2xl font-semibold">
+            用户管理
+            {!isAdmin && (
+              <span className="ml-2 align-middle badge-muted text-xs">只读模式</span>
+            )}
+          </h1>
           <p className="text-sm text-ink-400 mt-1">
-            API key 增删改 + 配额 + 当月用量。config.yaml 里的 key 标灰只读。
+            {isAdmin
+              ? "API key 增删改 + 配额 + 当月用量。config.yaml 里的 key 标灰只读。"
+              : "当前 key 非 admin,仅能查看自己的用量。需要管理权限请联系管理员。"}
           </p>
         </div>
-        <button
-          className="btn-primary"
-          onClick={() => setShowCreate(true)}
-        >
-          + 新增 key
-        </button>
+        {isAdmin && (
+          <button
+            className="btn-primary"
+            onClick={() => setShowCreate(true)}
+          >
+            + 新增 key
+          </button>
+        )}
       </header>
 
       {loading && <div className="text-ink-400">加载中...</div>}
@@ -126,7 +146,9 @@ export function Users() {
                 <th className="px-4 py-3 font-medium">配额(月)</th>
                 <th className="px-4 py-3 font-medium">本月用量</th>
                 <th className="px-4 py-3 font-medium">Owner</th>
-                <th className="px-4 py-3 font-medium text-right">操作</th>
+                {isAdmin && (
+                  <th className="px-4 py-3 font-medium text-right">操作</th>
+                )}
               </tr>
             </thead>
             <tbody className="divide-y divide-ink-800">
@@ -156,22 +178,26 @@ export function Users() {
                       {row.admin ? "✓" : "·"}
                     </td>
                     <td className="px-4 py-3 text-center">
-                      <button
-                        onClick={() => onToggleEnabled(row)}
-                        disabled={!row.managedId}
-                        className={`text-lg ${
-                          row.managedId
-                            ? "cursor-pointer"
-                            : "cursor-not-allowed opacity-50"
-                        }`}
-                        title={
-                          row.managedId
-                            ? "点击切换启停"
-                            : "config 来源,只读"
-                        }
-                      >
-                        {row.enabled ? "✓" : "✗"}
-                      </button>
+                      {isAdmin ? (
+                        <button
+                          onClick={() => onToggleEnabled(row)}
+                          disabled={!row.managedId}
+                          className={`text-lg ${
+                            row.managedId
+                              ? "cursor-pointer"
+                              : "cursor-not-allowed opacity-50"
+                          }`}
+                          title={
+                            row.managedId
+                              ? "点击切换启停"
+                              : "config 来源,只读"
+                          }
+                        >
+                          {row.enabled ? "✓" : "✗"}
+                        </button>
+                      ) : (
+                        <span className="text-lg">{row.enabled ? "✓" : "✗"}</span>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       {limit != null ? (
@@ -194,31 +220,38 @@ export function Users() {
                     <td className="px-4 py-3 text-ink-400">
                       {row.owner || "—"}
                     </td>
-                    <td className="px-4 py-3 text-right whitespace-nowrap space-x-2">
-                      <button
-                        className="btn-ghost text-xs"
-                        onClick={() => setEditing(row)}
-                        disabled={!row.managedId}
-                        title={!row.managedId ? "config 来源,只读" : ""}
-                      >
-                        编辑
-                      </button>
-                      <button
-                        className="btn-ghost text-xs text-rose-400 hover:text-rose-300"
-                        onClick={() => onDelete(row)}
-                        disabled={!row.managedId}
-                        title={!row.managedId ? "config 来源,只读" : ""}
-                      >
-                        删除
-                      </button>
-                    </td>
+                    {isAdmin && (
+                      <td className="px-4 py-3 text-right whitespace-nowrap space-x-2">
+                        <button
+                          className="btn-ghost text-xs"
+                          onClick={() => setEditing(row)}
+                          disabled={!row.managedId}
+                          title={!row.managedId ? "config 来源,只读" : ""}
+                        >
+                          编辑
+                        </button>
+                        <button
+                          className="btn-ghost text-xs text-rose-400 hover:text-rose-300"
+                          onClick={() => onDelete(row)}
+                          disabled={!row.managedId}
+                          title={!row.managedId ? "config 来源,只读" : ""}
+                        >
+                          删除
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 );
               })}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="px-4 py-8 text-center text-ink-500">
-                    没有 key,点右上角"新增"创建一个
+                  <td
+                    colSpan={isAdmin ? 8 : 7}
+                    className="px-4 py-8 text-center text-ink-500"
+                  >
+                    {isAdmin
+                      ? "没有 key,点右上角\"新增\"创建一个"
+                      : "暂无可见 key"}
                   </td>
                 </tr>
               )}

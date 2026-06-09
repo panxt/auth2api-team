@@ -8,6 +8,7 @@ import {
 import { ApiError } from "../api/client";
 import { AddAccountModal } from "../components/AddAccountModal";
 import { AccountQuotaPanel } from "../components/AccountQuotaPanel";
+import { useAuth } from "../lib/auth";
 
 function fmtTokens(n: number): string {
   if (!n) return "—";
@@ -48,6 +49,9 @@ function cooldownStatus(acct: AccountSnapshot): {
 }
 
 export function Accounts() {
+  const { whoami } = useAuth();
+  const isAdmin = !!whoami?.admin;
+
   const [data, setData] = useState<Record<string, AccountSnapshot[]>>({});
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -98,36 +102,47 @@ export function Accounts() {
     <div>
       <header className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-semibold">上游账号</h1>
+          <h1 className="text-2xl font-semibold">
+            上游账号
+            {!isAdmin && (
+              <span className="ml-2 align-middle badge-muted text-xs">只读模式</span>
+            )}
+          </h1>
           <p className="text-sm text-ink-400 mt-1">
-            每个 OAuth 账号当前状态 + 累计统计。点 prewarm 可立即把所有 anthropic 账号的 5h 窗口往前对齐。
+            {isAdmin
+              ? "每个 OAuth 账号当前状态 + 累计统计。点 prewarm 可立即把所有 anthropic 账号的 5h 窗口往前对齐。"
+              : "每个 OAuth 账号当前状态 + 累计统计。新增账号 / Prewarm 需 admin 权限,请联系管理员。"}
           </p>
         </div>
-        <div className="flex gap-2">
-          <button
-            className="btn-secondary"
-            onClick={() => setShowAdd(true)}
-          >
-            + 新增账号
-          </button>
-          <button
-            className="btn-primary"
-            onClick={onPrewarm}
-            disabled={prewarming}
-          >
-            {prewarming ? "Prewarming..." : "⚡ 立即 Prewarm"}
-          </button>
-        </div>
+        {isAdmin && (
+          <div className="flex gap-2">
+            <button
+              className="btn-secondary"
+              onClick={() => setShowAdd(true)}
+            >
+              + 新增账号
+            </button>
+            <button
+              className="btn-primary"
+              onClick={onPrewarm}
+              disabled={prewarming}
+            >
+              {prewarming ? "Prewarming..." : "⚡ 立即 Prewarm"}
+            </button>
+          </div>
+        )}
       </header>
 
-      <AddAccountModal
-        open={showAdd}
-        onClose={() => setShowAdd(false)}
-        onAdded={() => {
-          // Refresh after a moment so the new account appears.
-          setTimeout(load, 500);
-        }}
-      />
+      {isAdmin && (
+        <AddAccountModal
+          open={showAdd}
+          onClose={() => setShowAdd(false)}
+          onAdded={() => {
+            // Refresh after a moment so the new account appears.
+            setTimeout(load, 500);
+          }}
+        />
+      )}
 
       {lastPrewarm && (
         <div className="card mb-6">

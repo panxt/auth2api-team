@@ -50,6 +50,14 @@ export async function api<T = unknown>(
   }
 
   if (!resp.ok) {
+    // 403 from /admin/* means the caller's key is valid but not admin.
+    // The UI normally hides management buttons for non-admin keys (see
+    // pages/Users.tsx + pages/Accounts.tsx), so reaching this branch means
+    // either a stale cached page or someone poking via devtools — either
+    // way, surface a friendly message instead of the raw backend text.
+    if (resp.status === 403) {
+      throw new ApiError(403, "权限不足,请联系管理员", body);
+    }
     const msg =
       (body && typeof body === "object" && "error" in body
         ? ((body as any).error?.message ?? JSON.stringify(body))

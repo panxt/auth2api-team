@@ -58,8 +58,10 @@ export function Layout() {
           <div className="text-ink-500 mb-1">已登录为</div>
           <div className="font-medium truncate">
             {whoami?.label ?? "(unlabeled)"}
-            {whoami?.admin && (
+            {whoami?.admin ? (
               <span className="ml-1 badge-ok">admin</span>
+            ) : (
+              <span className="ml-1 badge-muted">只读</span>
             )}
           </div>
           <button
