@@ -164,5 +164,86 @@ export function applyCloaking(options: CloakingOptions): any {
     sessionID,
   );
 
+  fixCacheControlOrder(body);
+
   return body;
+}
+
+/**
+ * Anthropic enforces a strict ordering on prompt-caching breakpoints:
+ *
+ *   "a ttl='1h' cache_control block must not come after a ttl='5m' cache_control
+ *    block. blocks are processed in the following order: tools, system, messages."
+ *
+ * Two ways this fails in practice:
+ *   1. Some clients (notably the macOS Claude app and a few third-party
+ *      desktop clients) build a body where a 1h breakpoint comes LATER than a
+ *      5m one in the global processing order.
+ *   2. `applyCloaking` itself injects a `cache_control: {type:"ephemeral"}`
+ *      CLI-prefix block at the head of `system[]` (no ttl → Anthropic treats
+ *      as 5m). If the client had a 1h breakpoint anywhere after that, we
+ *      created the violation.
+ *
+ * Fix strategy is *reordering by swap*, not demotion: collect every
+ * cache_control object across tools / system / messages in their natural
+ * order, then reassign them in TTL-descending order. The breakpoint
+ * positions stay where they were (no message reordering) — only which
+ * cache_control object sits at each position changes. This preserves the
+ * client's intent of "some block gets a 1h cache" instead of throwing away
+ * the longer TTL.
+ *
+ * Called at the end of applyCloaking so the injected prefix is included in
+ * the walk. Anthropic upstream is the only one that uses cache_control;
+ * codex / cursor don't go through cloaking.
+ *
+ * Approach contributed by ops/prod team after observing the macOS Claude
+ * app hit Anthropic's 400 through this proxy.
+ */
+function fixCacheControlOrder(body: any): void {
+  const TTL_RANK: Record<string, number> = { "1h": 2, "5m": 1 };
+  const refs: Array<{ obj: any; key: string }> = [];
+
+  if (Array.isArray(body.tools)) {
+    for (const t of body.tools) {
+      if (t?.cache_control) refs.push({ obj: t, key: "cache_control" });
+    }
+  }
+  if (Array.isArray(body.system)) {
+    for (const s of body.system) {
+      if (s?.cache_control) refs.push({ obj: s, key: "cache_control" });
+    }
+  }
+  if (Array.isArray(body.messages)) {
+    for (const m of body.messages) {
+      // Defensive: Anthropic docs only document cache_control on content
+      // blocks, but some clients attach it to the message itself.
+      if (m?.cache_control) refs.push({ obj: m, key: "cache_control" });
+      if (Array.isArray(m?.content)) {
+        for (const c of m.content) {
+          if (c?.cache_control) refs.push({ obj: c, key: "cache_control" });
+        }
+      }
+    }
+  }
+
+  if (refs.length < 2) return;
+  const ttls = refs.map((r) => r.obj[r.key]);
+  const sorted = [...ttls].sort(
+    (a, b) => (TTL_RANK[b?.ttl] ?? 0) - (TTL_RANK[a?.ttl] ?? 0),
+  );
+  let changed = false;
+  for (let i = 0; i < refs.length; i++) {
+    if (refs[i].obj[refs[i].key] !== sorted[i]) {
+      refs[i].obj[refs[i].key] = sorted[i];
+      changed = true;
+    }
+  }
+  if (changed) {
+    console.log(
+      "[cache_control] reordered TTLs:",
+      ttls.map((t) => t?.ttl ?? "(default)"),
+      "→",
+      sorted.map((t) => t?.ttl ?? "(default)"),
+    );
+  }
 }
