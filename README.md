@@ -331,6 +331,28 @@ POST   /admin/prewarm                        # prewarm all anthropic accounts
 
 All admin-only (`Authorization: Bearer <admin-key>`).
 
+### Usage analytics & limits (v2.1+)
+
+- **Time window + per-user × per-model breakdown.** `/ui/stats` has a
+  今天/当月/全部 toggle (default month) that drives the whole page. `GET
+  /admin/stats?window=today|month|all` returns `byClientModel` (a client × model
+  cross-axis); the page shows a top-clients table (cost + tokens + requests) and
+  a per-user/per-model cost+token breakdown.
+- **Per-key model allowlist.** A key may set `allowed-models` (multi-select in
+  the UI; empty = all). Calling a model not on the list is rejected with
+  `403 model_not_allowed` before any upstream call. Aliases and canonical ids
+  compare equal.
+- **Per-key / per-model daily + monthly quota.** `quota` supports
+  `monthly-tokens` / `monthly-cost-usd` / `daily-tokens` / `daily-cost-usd` at
+  the key level, plus a `per-model` map with the same four caps per model.
+  First cap hit → 429 with a month- or day-boundary `Retry-After`.
+- **Per-account monthly budget + tier label.** `PATCH
+  /admin/accounts/:provider/:email` accepts `{ monthlyBudgetUsd, tierLabel }`;
+  the accounts page draws a month-to-date utilization bar (display-only).
+
+Viewing the analytics is open to any valid key; all write/limit operations are
+admin-only (hidden in the UI for non-admin, 403 on bypass).
+
 ### Build & deploy
 
 Build the SPA: `cd web && npm install && npm run build`. The main Express

@@ -348,6 +348,55 @@ POST   /admin/prewarm                          # 主动 prewarm 所有 anthropic
 
 全部 admin-only(`Authorization: Bearer <admin-key>`)。"重新认证"在 UI 上是组合操作 — 调一次 start,用户授权后调一次 exchange,后端 addAccount 自动 upsert。
 
+#### 账号月度预算 / 档位(v2.1+)
+
+`/ui/accounts` 行内 **预算** 按钮(admin)可给每个上游账号标一个**月度预算(USD)**和**档位标签**(如 `$25` / `$125` / `Max`)。账号面板按"本月已花 / 预算"画利用率进度条(70%/90% 变色),把订阅档位和实际消耗对应起来。**纯展示,不强制限流**(限流在 per-key 额度那侧)。
+
+```
+PATCH /admin/accounts/:provider/:email   # body { monthlyBudgetUsd?: number|null, tierLabel?: string|null }
+```
+
+### 用量分析与限额(v2.1+)
+
+#### 时间窗口 + per-user × per-model 明细
+
+`/ui/stats` 顶部有 **当天 / 当月 / 全部** 段控(默认当月),切换**联动整页**(KPI、Top 客户端、模型分布、明细表)。两张新表:
+
+- **Top 10 客户端**:按成本排名,同时显示 cost + token + 请求数。
+- **每人 · 各模型 明细**:每个客户端在每个模型上分别花了多少 cost / token,随窗口联动。
+
+```
+GET /admin/stats?window=today|month|all   # 响应含 byClientModel(client×model 交叉维度)
+```
+
+#### per-key 模型白名单
+
+每个 key 可配 `allowed-models`(UI 里多选,留空 = 全部允许)。调用不在白名单的模型直接 **403 `model_not_allowed`**(在打到上游之前)。config 与 SQLite 两种来源都支持;值可填别名(`opus`)或规范 id(`claude-opus-4-8`),比较前统一 resolve。
+
+#### per-key / per-model · 日 + 月 额度
+
+`quota` 现在支持四个维度(任意组合,到额返回 429):
+
+```yaml
+api-keys:
+  - key: sk-xxx
+    quota:
+      monthly-cost-usd: 100      # key 月总成本
+      monthly-tokens: 50000000   # key 月总 token
+      daily-cost-usd: 10         # key 当日成本
+      daily-tokens: 5000000      # key 当日 token
+      per-model:                 # 单个模型单独限额
+        claude-opus-4-8:
+          monthly-cost-usd: 50
+          daily-cost-usd: 5
+        claude-sonnet-4-6:
+          daily-tokens: 2000000
+```
+
+UI 的用户编辑弹窗里有对应的"总额"+"按模型"额度编辑器。`Retry-After` 按命中的窗口取月边界或日边界;429 的 message 会指明命中了哪条上限、哪个模型。
+
+> **权限**:以上分析对任意有效 key **只读可见**(查看权限放大);改 key、设额度、改账号预算等**写操作只有 admin** 能做,非 admin 在 UI 上按钮隐藏、绕过则后端 403。
+
 ### 部署
 
 生产 build:`cd web && npm install && npm run build`,产物 `web/dist/` 被主进程 `express.static('/ui')` 直接 serve,**单端口**(8317)、**零跨域**。Docker 镜像已包含。
