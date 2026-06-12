@@ -14,6 +14,7 @@ import { QuotaTracker } from "./usage/quota";
 import { computeCost } from "./usage/pricing";
 import { ManagedKeyStore } from "./keys/store";
 import { openStorage } from "./storage";
+import { RequestLogger } from "./logging/logger";
 
 function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
@@ -218,12 +219,22 @@ async function startServer(): Promise<void> {
     quotaTracker.start(storage.eventLog);
   }
 
+  // Per-request diagnostic log. Independent store + retention so pruning it
+  // never affects quota replay. Config merges defaults < yaml < persisted.
+  const requestLogger = new RequestLogger(
+    storage.requestLog,
+    storage.settings,
+    config.logging,
+  );
+  requestLogger.startCleanup();
+
   const app = createServer(
     config,
     registry,
     statsRecorder,
     quotaTracker,
     keyStore,
+    requestLogger,
   );
   const host = config.host || "127.0.0.1";
   const port = config.port;
@@ -238,6 +249,7 @@ async function startServer(): Promise<void> {
     console.log(`  GET  /v1/models`);
     console.log(`  GET  /admin/accounts`);
     if (statsRecorder) console.log(`  GET  /admin/stats`);
+    console.log(`  GET  /admin/logs`);
     console.log(`  GET  /health`);
   });
 

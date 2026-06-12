@@ -3,7 +3,17 @@ import path from "path";
 import Database from "better-sqlite3";
 import type { StatsEvent } from "../stats/recorder";
 import type { ApiKeyEntry } from "../config";
-import { EventLog, KeyRepository, Storage, normalizeKeyEntry } from "./types";
+import {
+  EventLog,
+  KeyRepository,
+  Storage,
+  normalizeKeyEntry,
+  RequestLogStore,
+  RequestLogRecord,
+  RequestLogFilter,
+  RequestLogPage,
+  SettingsStore,
+} from "./types";
 
 /**
  * Single SQLite database (better-sqlite3, synchronous) holding usage events
@@ -16,6 +26,8 @@ export class SqliteStorage implements Storage {
   private db: Database.Database;
   readonly eventLog: EventLog;
   readonly keyRepo: KeyRepository;
+  readonly requestLog: RequestLogStore;
+  readonly settings: SettingsStore;
 
   constructor(dbPath: string) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
@@ -32,6 +44,33 @@ export class SqliteStorage implements Storage {
         key TEXT PRIMARY KEY,
         data TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS request_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL,
+        api_key_hash TEXT,
+        ip TEXT,
+        endpoint TEXT,
+        model TEXT,
+        provider TEXT,
+        account_email TEXT,
+        status TEXT,
+        status_code INTEGER,
+        failure_kind TEXT,
+        latency_ms INTEGER,
+        input_tokens INTEGER,
+        output_tokens INTEGER,
+        error_detail TEXT,
+        request_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_rl_ts ON request_logs(ts);
+      CREATE INDEX IF NOT EXISTS idx_rl_status ON request_logs(status);
+      CREATE INDEX IF NOT EXISTS idx_rl_account ON request_logs(account_email);
+      CREATE INDEX IF NOT EXISTS idx_rl_key ON request_logs(api_key_hash);
+      CREATE INDEX IF NOT EXISTS idx_rl_model ON request_logs(model);
     `);
     // The DB file itself holds secrets (managed keys) — lock it down.
     try {
@@ -101,6 +140,142 @@ export class SqliteStorage implements Storage {
         return out;
       },
       replaceAll: (entries: ApiKeyEntry[]) => replaceAllKeys(entries),
+    };
+
+    // ── Settings (key → JSON) ──
+    const getSetting = this.db.prepare(
+      "SELECT value FROM app_settings WHERE key = ?",
+    );
+    const upsertSetting = this.db.prepare(
+      "INSERT INTO app_settings (key, value) VALUES (?, ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    );
+    this.settings = {
+      get: <T = unknown>(key: string): T | null => {
+        const row = getSetting.get(key) as { value: string } | undefined;
+        if (!row) return null;
+        try {
+          return JSON.parse(row.value) as T;
+        } catch {
+          return null;
+        }
+      },
+      set: (key: string, value: unknown) => {
+        upsertSetting.run(key, JSON.stringify(value));
+      },
+    };
+
+    // ── Request logs ──
+    const insertLog = this.db.prepare(
+      `INSERT INTO request_logs
+        (ts, api_key_hash, ip, endpoint, model, provider, account_email,
+         status, status_code, failure_kind, latency_ms, input_tokens,
+         output_tokens, error_detail, request_id)
+       VALUES (@ts, @apiKeyHash, @ip, @endpoint, @model, @provider,
+         @accountEmail, @status, @statusCode, @failureKind, @latencyMs,
+         @inputTokens, @outputTokens, @errorDetail, @requestId)`,
+    );
+    this.requestLog = {
+      append: (rec: RequestLogRecord) => {
+        insertLog.run(rec as any);
+      },
+      query: (filter: RequestLogFilter): RequestLogPage => {
+        const where: string[] = [];
+        const params: any[] = [];
+        if (filter.cursor != null) {
+          where.push("id < ?");
+          params.push(filter.cursor);
+        }
+        if (filter.status) {
+          where.push("status = ?");
+          params.push(filter.status);
+        }
+        if (filter.email) {
+          where.push("account_email = ?");
+          params.push(filter.email);
+        }
+        if (filter.model) {
+          where.push("model = ?");
+          params.push(filter.model);
+        }
+        if (filter.endpoint) {
+          where.push("endpoint = ?");
+          params.push(filter.endpoint);
+        }
+        if (filter.provider) {
+          where.push("provider = ?");
+          params.push(filter.provider);
+        }
+        if (filter.apiKeyPrefix) {
+          where.push("api_key_hash LIKE ?");
+          params.push(`${filter.apiKeyPrefix}%`);
+        }
+        if (filter.since) {
+          where.push("ts >= ?");
+          params.push(filter.since);
+        }
+        if (filter.until) {
+          where.push("ts <= ?");
+          params.push(filter.until);
+        }
+        if (filter.q) {
+          where.push("error_detail LIKE ?");
+          params.push(`%${filter.q}%`);
+        }
+        const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+        // Fetch limit+1 to detect whether older rows remain.
+        const rows = this.db
+          .prepare(
+            `SELECT * FROM request_logs ${clause} ORDER BY id DESC LIMIT ?`,
+          )
+          .all(...params, filter.limit + 1) as any[];
+        const hasMore = rows.length > filter.limit;
+        const page = rows.slice(0, filter.limit);
+        return {
+          rows: page.map((r) => ({
+            id: r.id,
+            ts: r.ts,
+            apiKeyHash: r.api_key_hash,
+            ip: r.ip,
+            endpoint: r.endpoint,
+            model: r.model,
+            provider: r.provider,
+            accountEmail: r.account_email,
+            status: r.status,
+            statusCode: r.status_code,
+            failureKind: r.failure_kind,
+            latencyMs: r.latency_ms,
+            inputTokens: r.input_tokens,
+            outputTokens: r.output_tokens,
+            errorDetail: r.error_detail,
+            requestId: r.request_id,
+          })),
+          nextCursor: hasMore ? page[page.length - 1].id : null,
+        };
+      },
+      prune: (opts: { maxAgeDays?: number; maxRows?: number }): number => {
+        let removed = 0;
+        if (opts.maxAgeDays && opts.maxAgeDays > 0) {
+          const cutoff = new Date();
+          cutoff.setUTCDate(cutoff.getUTCDate() - opts.maxAgeDays);
+          const info = this.db
+            .prepare("DELETE FROM request_logs WHERE ts < ?")
+            .run(cutoff.toISOString());
+          removed += info.changes;
+        }
+        if (opts.maxRows && opts.maxRows > 0) {
+          // Keep the newest maxRows ids; delete everything older.
+          const info = this.db
+            .prepare(
+              `DELETE FROM request_logs WHERE id <= (
+                 SELECT id FROM request_logs ORDER BY id DESC LIMIT 1 OFFSET ?
+               )`,
+            )
+            .run(opts.maxRows);
+          removed += info.changes;
+        }
+        return removed;
+      },
     };
   }
 

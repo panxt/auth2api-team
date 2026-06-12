@@ -140,6 +140,77 @@ interface RawApiKeyEntry {
 
 export type DebugMode = "off" | "errors" | "verbose";
 
+/**
+ * Per-request logging (for failure diagnosis). Stored separately from the
+ * stats/quota event log so its retention can be pruned freely without
+ * breaking month-to-date quota replay. Admin-editable at runtime via
+ * /admin/logging/config (persisted to the SettingsStore); the config.yaml
+ * `logging:` block, if present, only seeds the initial defaults.
+ */
+export interface LoggingConfig {
+  /** Master switch. When false, nothing is written to the request log. */
+  enabled: boolean;
+  /** Which requests to log: every request, or only failures. */
+  capture: "all" | "failures";
+  /** How much of the upstream error to store. */
+  "error-detail": "full" | "snippet" | "off";
+  /** Max chars kept when error-detail is "snippet". */
+  "snippet-length": number;
+  /** Strip token-like secrets (sk-…, Bearer …, JWTs) from errorDetail. */
+  redact: boolean;
+  /** Persist the upstream request_id (handy for support tickets). */
+  "store-request-id": boolean;
+  retention: {
+    /** Delete records older than this many days (0 = no age limit). */
+    "max-age-days": number;
+    /** Hard cap on stored rows; oldest beyond this are deleted (0 = no cap). */
+    "max-rows": number;
+    /** How often the cleanup sweep runs. */
+    "cleanup-interval-minutes": number;
+  };
+}
+
+export const DEFAULT_LOGGING_CONFIG: LoggingConfig = {
+  enabled: true,
+  capture: "failures",
+  "error-detail": "snippet",
+  "snippet-length": 500,
+  redact: true,
+  "store-request-id": true,
+  retention: {
+    "max-age-days": 14,
+    "max-rows": 200000,
+    "cleanup-interval-minutes": 60,
+  },
+};
+
+/**
+ * Merge logging config sources in precedence order:
+ *   built-in defaults  <  config.yaml `logging:`  <  persisted (UI) override.
+ * Deep-merges the nested `retention` object so a partial override (e.g. just
+ * max-age-days) keeps the other retention defaults.
+ */
+export function resolveLoggingConfig(
+  ...layers: (Partial<LoggingConfig> | undefined | null)[]
+): LoggingConfig {
+  const out: LoggingConfig = {
+    ...DEFAULT_LOGGING_CONFIG,
+    retention: { ...DEFAULT_LOGGING_CONFIG.retention },
+  };
+  for (const layer of layers) {
+    if (!layer) continue;
+    for (const [k, v] of Object.entries(layer)) {
+      if (v === undefined) continue;
+      if (k === "retention" && v && typeof v === "object") {
+        out.retention = { ...out.retention, ...(v as object) };
+      } else {
+        (out as any)[k] = v;
+      }
+    }
+  }
+  return out;
+}
+
 export interface Config {
   host: string;
   port: number;
@@ -155,6 +226,8 @@ export interface Config {
    * Merged over DEFAULT_PRICING at cost time. Optional — omit to use defaults.
    */
   pricing?: Record<string, ModelPrice>;
+  /** Optional seed for the per-request logging config (UI overrides win). */
+  logging?: Partial<LoggingConfig>;
   debug: DebugMode;
 }
 

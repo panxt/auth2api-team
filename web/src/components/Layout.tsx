@@ -7,13 +7,15 @@ interface NavItem {
   icon: string;
 }
 
-const NAV: NavItem[] = [
+interface NavItemDef extends NavItem {
+  adminOnly?: boolean;
+}
+
+const NAV: NavItemDef[] = [
   { to: "/stats", label: "看板", icon: "📊" },
   { to: "/users", label: "用户", icon: "👥" },
   { to: "/accounts", label: "账号", icon: "🔌" },
-  // v0.3+ will populate these:
-  // { to: "/config", label: "配置", icon: "⚙️" },
-  // { to: "/onboarding", label: "手册", icon: "📄" },
+  { to: "/logs", label: "日志", icon: "📜", adminOnly: true },
 ];
 
 export function Layout() {
@@ -35,7 +37,7 @@ export function Layout() {
         </div>
 
         <nav className="flex-1 p-3 space-y-1">
-          {NAV.map((item) => (
+          {NAV.filter((item) => !item.adminOnly || whoami?.admin).map((item) => (
             <NavLink
               key={item.to}
               to={item.to}

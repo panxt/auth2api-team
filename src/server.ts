@@ -29,6 +29,8 @@ import {
 import { ManagedKeyStore, ManagedKeyError } from "./keys/store";
 import { startOAuth, exchangeOAuth } from "./admin/oauth";
 import { ProviderId } from "./auth/types";
+import { RequestLogger } from "./logging/logger";
+import { LoggingConfig } from "./config";
 
 // Simple in-memory rate limiter per IP
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -78,11 +80,13 @@ export function createServer(
   statsRecorder?: StatsRecorder,
   quotaTracker?: QuotaTracker,
   keyStore?: ManagedKeyStore,
+  requestLogger?: RequestLogger,
 ): express.Application {
   const app = express();
-  // Stats slots are seeded whenever either subsystem needs them: the recorder
-  // for reporting, the quota tracker for live consumption feed.
-  const wantStatsSlot = !!statsRecorder || !!quotaTracker;
+  // Stats slots are seeded whenever any subsystem needs them: the recorder
+  // for reporting, the quota tracker for live consumption feed, or the
+  // request logger for diagnostics.
+  const wantStatsSlot = !!statsRecorder || !!quotaTracker || !!requestLogger;
 
   app.use(express.json({ limit: config["body-limit"] }));
 
@@ -161,6 +165,8 @@ export function createServer(
         accountEmail: null,
         usage: null,
         failureKind: null,
+        errorDetail: null,
+        requestId: null,
       };
     }
     next();
@@ -172,6 +178,17 @@ export function createServer(
   // from double-counting.
   const statsFinishMiddleware: express.RequestHandler = (req, res, next) => {
     if (!wantStatsSlot) return next();
+    // Capture the last JSON body sent so the request log can record the error
+    // text without each handler having to call tagStatsError. Streaming (SSE)
+    // errors don't go through res.json — those paths tagStatsError explicitly.
+    if (requestLogger) {
+      const origJson = res.json.bind(res);
+      res.json = (body: any) => {
+        const ctx = res.locals.stats;
+        if (ctx) ctx.lastJsonBody = body;
+        return origJson(body);
+      };
+    }
     let recorded = false;
     const recordStats = (override?: {
       status: "success" | "failure";
@@ -218,6 +235,41 @@ export function createServer(
         ? statsRecorder.record(input)
         : { v: 1 as const, ts: new Date().toISOString(), ...input };
       quotaTracker?.record(event);
+
+      // Per-request diagnostic log (separate store + retention). Pulls the
+      // error text from an explicit tagStatsError, else from the captured
+      // JSON error body; request_id likewise.
+      if (requestLogger) {
+        const c = ctx as any;
+        const body = c?.lastJsonBody;
+        const errorDetail =
+          c?.errorDetail ??
+          (status === "failure" && body
+            ? typeof body?.error?.message === "string"
+              ? body.error.message
+              : JSON.stringify(body).slice(0, 2000)
+            : null);
+        const requestId =
+          c?.requestId ??
+          (body && typeof body?.request_id === "string" ? body.request_id : null);
+        requestLogger.record({
+          ts: event.ts,
+          apiKeyHash: input.apiKeyHash,
+          ip: input.ip,
+          endpoint: input.endpoint,
+          model: input.model,
+          provider: input.provider,
+          accountEmail: input.accountEmail,
+          status,
+          statusCode: input.statusCode,
+          failureKind: input.failureKind,
+          latencyMs: input.latencyMs,
+          inputTokens: input.usage?.inputTokens ?? null,
+          outputTokens: input.usage?.outputTokens ?? null,
+          errorDetail,
+          requestId,
+        });
+      }
     };
     res.on("finish", () => recordStats());
     res.on("close", () => {
@@ -437,6 +489,56 @@ export function createServer(
       generated_at: new Date().toISOString(),
     });
   });
+
+  // ── Request log (admin-only) ──
+  // GET /admin/logs — newest-first, filterable, cursor-paginated. Raw api keys
+  // are never returned (only a hash prefix). GET/PUT /admin/logging/config —
+  // read / live-update the logging policy (persisted to the SettingsStore).
+  if (requestLogger) {
+    app.get("/admin/logs", requireAdmin, (req, res) => {
+      const q = req.query;
+      const limRaw = Number(q.limit);
+      const limit =
+        Number.isFinite(limRaw) && limRaw > 0 ? Math.min(1000, limRaw) : 100;
+      const cursorRaw = Number(q.cursor);
+      const cursor = Number.isFinite(cursorRaw) ? cursorRaw : undefined;
+      const str = (v: unknown) =>
+        typeof v === "string" && v.length ? v : undefined;
+      const page = requestLogger.query({
+        limit,
+        cursor,
+        status: q.status === "failure" || q.status === "success" ? q.status : undefined,
+        apiKeyPrefix: str(q.apiKey),
+        email: str(q.email),
+        model: str(q.model),
+        endpoint: str(q.endpoint),
+        provider: str(q.provider),
+        since: str(q.since),
+        until: str(q.until),
+        q: str(q.q),
+      });
+      // Redact: only expose the 12-char hash prefix, never the full hash.
+      const rows = page.rows.map((r) => ({
+        ...r,
+        apiKeyShort: r.apiKeyHash.slice(0, 12),
+        apiKeyHash: undefined,
+      }));
+      res.json({ logs: rows, nextCursor: page.nextCursor, generated_at: new Date().toISOString() });
+    });
+
+    app.get("/admin/logging/config", requireAdmin, (_req, res) => {
+      res.json(requestLogger.getConfig());
+    });
+
+    app.put("/admin/logging/config", requireAdmin, (req, res) => {
+      try {
+        const next = requestLogger.updateConfig((req.body || {}) as Partial<LoggingConfig>);
+        res.json(next);
+      } catch (err: any) {
+        res.status(400).json({ error: { message: err?.message || String(err) } });
+      }
+    });
+  }
 
   // GET /admin/usage/keys — month-to-date consumption per API key vs its
   // quota. An admin key sees every key; a non-admin key sees only itself.

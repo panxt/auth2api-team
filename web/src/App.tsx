@@ -4,6 +4,7 @@ import { Login } from "./pages/Login";
 import { Users } from "./pages/Users";
 import { Accounts } from "./pages/Accounts";
 import { Stats } from "./pages/Stats";
+import { Logs } from "./pages/Logs";
 import { Layout } from "./components/Layout";
 
 /** Wraps inner routes — bounce to /login if no key. */
@@ -28,6 +29,7 @@ export default function App() {
         <Route path="/stats" element={<Stats />} />
         <Route path="/users" element={<Users />} />
         <Route path="/accounts" element={<Accounts />} />
+        <Route path="/logs" element={<Logs />} />
       </Route>
       <Route path="*" element={<Navigate to="/stats" replace />} />
     </Routes>

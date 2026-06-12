@@ -2,14 +2,21 @@ import fs from "fs";
 import path from "path";
 import { Config } from "../config";
 import { Storage } from "./types";
-import { FileEventLog, FileKeyRepository } from "./file";
+import {
+  FileEventLog,
+  FileKeyRepository,
+  FileRequestLogStore,
+  FileSettingsStore,
+} from "./file";
 
 export { Storage, EventLog, KeyRepository } from "./types";
 
 function fileStorage(authDir: string): Storage {
   const eventLog = new FileEventLog(authDir);
   const keyRepo = new FileKeyRepository(authDir);
-  return { eventLog, keyRepo, close: () => eventLog.close() };
+  const requestLog = new FileRequestLogStore(authDir);
+  const settings = new FileSettingsStore(authDir);
+  return { eventLog, keyRepo, requestLog, settings, close: () => eventLog.close() };
 }
 
 /** Expand ~ and resolve a relative sqlite-path against authDir (not cwd). */

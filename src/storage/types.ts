@@ -25,10 +25,69 @@ export interface KeyRepository {
   replaceAll(entries: ApiKeyEntry[]): void;
 }
 
-/** A selected storage backend: the two repositories plus a shared close(). */
+/**
+ * One persisted per-request log record (for failure diagnosis). Stored
+ * separately from the usage EventLog so retention can be pruned freely.
+ * `errorDetail`/`requestId` are optional and governed by LoggingConfig.
+ */
+export interface RequestLogRecord {
+  ts: string; // ISO8601 UTC
+  apiKeyHash: string; // full hash; redacted to a prefix at the API layer
+  ip: string;
+  endpoint: string;
+  model: string | null;
+  provider: string | null;
+  accountEmail: string | null;
+  status: "success" | "failure";
+  statusCode: number;
+  failureKind: string | null;
+  latencyMs: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  errorDetail: string | null;
+  requestId: string | null;
+}
+
+/** Filter + pagination for a request-log query. Newest-first. */
+export interface RequestLogFilter {
+  limit: number; // capped by the caller
+  cursor?: number | null; // return rows strictly older than this opaque cursor
+  status?: "success" | "failure";
+  apiKeyPrefix?: string;
+  email?: string;
+  model?: string;
+  endpoint?: string;
+  provider?: string;
+  since?: string; // ts >= since
+  until?: string; // ts <= until
+  q?: string; // case-insensitive substring of errorDetail
+}
+
+export interface RequestLogPage {
+  rows: (RequestLogRecord & { id: number })[];
+  nextCursor: number | null; // pass back as `cursor` to load older rows
+}
+
+/** Pluggable store for the per-request log (sqlite indexed / file rolling). */
+export interface RequestLogStore {
+  append(rec: RequestLogRecord): void;
+  query(filter: RequestLogFilter): RequestLogPage;
+  /** Delete by age and/or row cap; returns number of records removed. */
+  prune(opts: { maxAgeDays?: number; maxRows?: number }): number;
+}
+
+/** Tiny key→JSON settings store for runtime-editable config (logging, …). */
+export interface SettingsStore {
+  get<T = unknown>(key: string): T | null;
+  set(key: string, value: unknown): void;
+}
+
+/** A selected storage backend: the repositories plus a shared close(). */
 export interface Storage {
   eventLog: EventLog;
   keyRepo: KeyRepository;
+  requestLog: RequestLogStore;
+  settings: SettingsStore;
   close(): Promise<void>;
 }
 

@@ -565,3 +565,15 @@ export function tagStatsUsage(res: ResLike, usage: UsageData): void {
   if (!res.locals.stats) return;
   res.locals.stats.usage = usage;
 }
+
+/** Record a human-readable upstream/rejection error for the request log. */
+export function tagStatsError(res: ResLike, detail: string): void {
+  if (!res.locals.stats) return;
+  res.locals.stats.errorDetail = detail;
+}
+
+/** Record the upstream request_id (Anthropic/OpenAI) for support tickets. */
+export function tagStatsRequestId(res: ResLike, requestId: string): void {
+  if (!res.locals.stats) return;
+  res.locals.stats.requestId = requestId;
+}
