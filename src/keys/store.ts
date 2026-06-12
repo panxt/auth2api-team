@@ -20,6 +20,7 @@ export interface KeyInput {
   admin?: boolean;
   quota?: ApiKeyEntry["quota"];
   "rate-limit"?: ApiKeyEntry["rate-limit"];
+  "allowed-models"?: ApiKeyEntry["allowed-models"];
 }
 
 /** A key as shown to the UI — never includes the raw secret, only its id. */
@@ -32,6 +33,7 @@ export interface KeyView {
   admin: boolean;
   quota: ApiKeyEntry["quota"] | null;
   "rate-limit": ApiKeyEntry["rate-limit"] | null;
+  "allowed-models": ApiKeyEntry["allowed-models"] | null;
 }
 
 function keyId(key: string): string {
@@ -51,6 +53,7 @@ function normalizeEntry(v: any): ApiKeyEntry {
     admin: v.admin ?? false,
     quota: v.quota,
     "rate-limit": v["rate-limit"],
+    "allowed-models": v["allowed-models"],
   };
 }
 
@@ -64,6 +67,7 @@ function toView(entry: ApiKeyEntry, source: "config" | "managed"): KeyView {
     admin: entry.admin,
     quota: entry.quota ?? null,
     "rate-limit": entry["rate-limit"] ?? null,
+    "allowed-models": entry["allowed-models"] ?? null,
   };
 }
 
@@ -121,6 +125,7 @@ export class ManagedKeyStore {
       admin: input.admin ?? false,
       quota: input.quota,
       "rate-limit": input["rate-limit"],
+      "allowed-models": input["allowed-models"],
     };
     this.managed.set(key, entry);
     this.live.set(key, entry);
@@ -137,6 +142,8 @@ export class ManagedKeyStore {
     if (patch.admin !== undefined) entry.admin = patch.admin;
     if (patch.quota !== undefined) entry.quota = patch.quota;
     if (patch["rate-limit"] !== undefined) entry["rate-limit"] = patch["rate-limit"];
+    if (patch["allowed-models"] !== undefined)
+      entry["allowed-models"] = patch["allowed-models"];
     this.live.set(entry.key, entry);
     this.persist();
     return toView(entry, "managed");

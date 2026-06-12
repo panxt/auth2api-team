@@ -52,6 +52,7 @@ export interface ManagedKeyView {
   admin: boolean;
   quota: KeyQuota | null;
   "rate-limit": KeyRateLimit | null;
+  "allowed-models": string[] | null;
   source: "managed" | "config";
 }
 
@@ -64,6 +65,7 @@ export interface CreateKeyResponse {
   admin: boolean;
   quota: KeyQuota | null;
   "rate-limit": KeyRateLimit | null;
+  "allowed-models"?: string[] | null;
 }
 
 export interface CreateKeyInput {
@@ -73,9 +75,20 @@ export interface CreateKeyInput {
   enabled?: boolean;
   quota?: KeyQuota;
   "rate-limit"?: KeyRateLimit;
+  "allowed-models"?: string[];
 }
 
 export type PatchKeyInput = CreateKeyInput;
+
+/* ── /v1/models (for the model allowlist picker) ──────────────────────── */
+
+export interface ModelInfo {
+  id: string;
+  object?: string;
+}
+
+export const listModels = () =>
+  get<{ object: string; data: ModelInfo[] }>("/v1/models");
 
 /* ── API methods ────────────────────────────────────────────────────────── */
 

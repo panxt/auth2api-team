@@ -95,6 +95,13 @@ export interface ApiKeyEntry {
   admin: boolean;
   quota?: ApiKeyQuota;
   "rate-limit"?: ApiKeyRateLimit;
+  /**
+   * Optional model allowlist. When set (non-empty), this key may only call
+   * models in the list (compared after alias resolution via resolveModel);
+   * any other model is rejected with 403. Empty/omitted = all models allowed.
+   * Values may be aliases ("opus") or canonical ids ("claude-opus-4-8").
+   */
+  "allowed-models"?: string[];
 }
 
 /** Raw object form of an api-key entry as parsed from YAML (before defaults). */
@@ -106,6 +113,7 @@ interface RawApiKeyEntry {
   admin?: boolean;
   quota?: ApiKeyQuota;
   "rate-limit"?: ApiKeyRateLimit;
+  "allowed-models"?: string[];
 }
 
 export type DebugMode = "off" | "errors" | "verbose";
@@ -156,6 +164,7 @@ export function normalizeApiKeys(
         admin: item.admin ?? false,
         quota: item.quota,
         "rate-limit": item["rate-limit"],
+        "allowed-models": item["allowed-models"],
       });
     } else {
       // Don't silently lose a misconfigured entry — a dropped key would just

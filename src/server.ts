@@ -14,6 +14,8 @@ import {
 } from "./handlers/anthropic";
 import { StatsRecorder } from "./stats/recorder";
 import { QuotaTracker, secondsUntilMonthResetUTC } from "./usage/quota";
+import { isModelAllowed } from "./usage/model-access";
+import { resolveModel } from "./upstream/translator";
 import {
   checkKeyRpm,
   acquireConcurrency,
@@ -252,6 +254,27 @@ export function createServer(
         .json({
           error: { message: "Monthly cost budget exceeded", type: "quota_exceeded" },
         });
+      return;
+    }
+    next();
+  };
+
+  // Per-key model allowlist. Resolves the requested model the same way the
+  // handlers do (body.model → alias resolution) and rejects with 403 when the
+  // key restricts models and this one isn't on the list. No allowlist → pass.
+  // Done in middleware so every inference route is covered uniformly.
+  const requireModelAccess: express.RequestHandler = (req, res, next) => {
+    const entry = res.locals.apiKey as ApiKeyEntry | undefined;
+    const allow = entry?.["allowed-models"];
+    if (!allow || allow.length === 0) return next();
+    const requested = (req.body?.model as string | undefined) || "claude-sonnet-4-6";
+    if (!isModelAllowed(entry, requested)) {
+      res.status(403).json({
+        error: {
+          message: `Model '${resolveModel(requested)}' is not allowed for this API key`,
+          type: "model_not_allowed",
+        },
+      });
       return;
     }
     next();
@@ -633,12 +656,14 @@ export function createServer(
   // Routes — OpenAI compatible
   app.post(
     "/v1/chat/completions",
+    requireModelAccess,
     requireQuota,
     enforceKeyRateLimit,
     createChatCompletionsHandler(config, registry),
   );
   app.post(
     "/v1/responses",
+    requireModelAccess,
     requireQuota,
     enforceKeyRateLimit,
     createResponsesHandler(config, registry),
@@ -647,12 +672,14 @@ export function createServer(
   // Routes — Anthropic native passthrough
   app.post(
     "/v1/messages",
+    requireModelAccess,
     requireQuota,
     enforceKeyRateLimit,
     createMessagesHandler(config, registry),
   );
   app.post(
     "/v1/messages/count_tokens",
+    requireModelAccess,
     requireQuota,
     enforceKeyRateLimit,
     createCountTokensHandler(config, registry),

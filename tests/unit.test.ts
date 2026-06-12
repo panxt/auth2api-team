@@ -25,8 +25,39 @@ import {
   isDebugLevel,
   resolveAuthDir,
   normalizeApiKeys,
+  ApiKeyEntry,
 } from "../src/config";
+import { isModelAllowed } from "../src/usage/model-access";
 import { UsageData } from "../src/accounts/manager";
+
+// ══════════════════════════════════════════════════
+// usage/model-access.ts
+// ══════════════════════════════════════════════════
+
+function keyWith(allowed?: string[]): ApiKeyEntry {
+  return { key: "k", enabled: true, admin: false, "allowed-models": allowed };
+}
+
+test("isModelAllowed: no allowlist → all models allowed", () => {
+  assert.equal(isModelAllowed(keyWith(undefined), "claude-opus-4-8"), true);
+  assert.equal(isModelAllowed(keyWith([]), "anything"), true);
+  assert.equal(isModelAllowed(undefined, "claude-opus-4-8"), true);
+});
+
+test("isModelAllowed: allowlist gates by resolved model id", () => {
+  const k = keyWith(["claude-sonnet-4-6"]);
+  assert.equal(isModelAllowed(k, "claude-sonnet-4-6"), true);
+  // alias resolves to the same canonical id
+  assert.equal(isModelAllowed(k, "sonnet"), true);
+  assert.equal(isModelAllowed(k, "claude-opus-4-8"), false);
+  assert.equal(isModelAllowed(k, "opus"), false);
+});
+
+test("isModelAllowed: alias in the allowlist matches canonical request", () => {
+  const k = keyWith(["opus"]); // stored as alias
+  assert.equal(isModelAllowed(k, "claude-opus-4-8"), true);
+  assert.equal(isModelAllowed(k, "sonnet"), false);
+});
 
 // ══════════════════════════════════════════════════
 // utils/common.ts

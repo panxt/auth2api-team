@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import {
   listUsage,
   listManaged,
+  listModels,
   createKey,
   updateKey,
   deleteKey,
@@ -16,6 +17,7 @@ import { useAuth } from "../lib/auth";
 interface MergedRow extends UsageKey {
   source: "managed" | "config";
   managedId: string | null;   // null = config-only key (read-only)
+  allowedModels: string[] | null; // model allowlist (managed keys only)
 }
 
 function fmtUSD(n: number | undefined): string {
@@ -36,6 +38,7 @@ export function Users() {
   const [rows, setRows] = useState<MergedRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [models, setModels] = useState<string[]>([]); // for the allowlist picker
 
   const [showCreate, setShowCreate] = useState(false);
   const [editing, setEditing] = useState<MergedRow | null>(null);
@@ -63,6 +66,7 @@ export function Users() {
           ...u,
           source: m ? "managed" : "config",
           managedId: m ? m.id : null,
+          allowedModels: m ? m["allowed-models"] : null,
         };
       });
       setRows(merged);
@@ -77,6 +81,14 @@ export function Users() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Fetch the available model list once (admin only) for the allowlist picker.
+  useEffect(() => {
+    if (!isAdmin) return;
+    listModels()
+      .then((r) => setModels(r.data.map((m) => m.id)))
+      .catch(() => setModels([]));
+  }, [isAdmin]);
 
   async function onToggleEnabled(row: MergedRow) {
     if (!row.managedId) {
@@ -145,6 +157,7 @@ export function Users() {
                 <th className="px-4 py-3 font-medium text-center">启用</th>
                 <th className="px-4 py-3 font-medium">配额(月)</th>
                 <th className="px-4 py-3 font-medium">本月用量</th>
+                <th className="px-4 py-3 font-medium">可用模型</th>
                 <th className="px-4 py-3 font-medium">Owner</th>
                 {isAdmin && (
                   <th className="px-4 py-3 font-medium text-right">操作</th>
@@ -217,6 +230,19 @@ export function Users() {
                         )}
                       </div>
                     </td>
+                    <td className="px-4 py-3">
+                      {row.allowedModels && row.allowedModels.length > 0 ? (
+                        <div className="flex flex-wrap gap-1 max-w-[14rem]">
+                          {row.allowedModels.map((m) => (
+                            <span key={m} className="badge-muted text-xs">
+                              {m}
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-ink-500 text-xs">全部</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-ink-400">
                       {row.owner || "—"}
                     </td>
@@ -246,7 +272,7 @@ export function Users() {
               {rows.length === 0 && (
                 <tr>
                   <td
-                    colSpan={isAdmin ? 8 : 7}
+                    colSpan={isAdmin ? 9 : 8}
                     className="px-4 py-8 text-center text-ink-500"
                   >
                     {isAdmin
@@ -262,6 +288,7 @@ export function Users() {
 
       <CreateKeyModal
         open={showCreate}
+        models={models}
         onClose={() => setShowCreate(false)}
         onCreated={(rawKey) => {
           setShowCreate(false);
@@ -272,6 +299,7 @@ export function Users() {
 
       <EditKeyModal
         row={editing}
+        models={models}
         onClose={() => setEditing(null)}
         onSaved={() => {
           setEditing(null);
@@ -319,10 +347,12 @@ export function Users() {
 
 function CreateKeyModal({
   open,
+  models,
   onClose,
   onCreated,
 }: {
   open: boolean;
+  models: string[];
   onClose: () => void;
   onCreated: (rawKey: string) => void;
 }) {
@@ -330,6 +360,7 @@ function CreateKeyModal({
   const [owner, setOwner] = useState("");
   const [admin, setAdmin] = useState(false);
   const [quotaUsd, setQuotaUsd] = useState("");
+  const [allowedModels, setAllowedModels] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -338,6 +369,7 @@ function CreateKeyModal({
     setOwner("");
     setAdmin(false);
     setQuotaUsd("");
+    setAllowedModels([]);
     setErr(null);
   }
 
@@ -351,6 +383,7 @@ function CreateKeyModal({
       if (!isNaN(usd) && usd > 0) {
         input.quota = { "monthly-cost-usd": usd };
       }
+      if (allowedModels.length > 0) input["allowed-models"] = allowedModels;
       const resp = await createKey(input);
       reset();
       onCreated(resp.key);
@@ -418,6 +451,11 @@ function CreateKeyModal({
             onChange={(e) => setQuotaUsd(e.target.value)}
           />
         </div>
+        <ModelAllowlistPicker
+          models={models}
+          selected={allowedModels}
+          onChange={setAllowedModels}
+        />
         {err && <div className="badge-err px-3 py-2 block">{err}</div>}
         <div className="flex justify-end gap-2 pt-2">
           <button
@@ -446,10 +484,12 @@ function CreateKeyModal({
 
 function EditKeyModal({
   row,
+  models,
   onClose,
   onSaved,
 }: {
   row: MergedRow | null;
+  models: string[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -457,6 +497,7 @@ function EditKeyModal({
   const [owner, setOwner] = useState("");
   const [admin, setAdmin] = useState(false);
   const [quotaUsd, setQuotaUsd] = useState("");
+  const [allowedModels, setAllowedModels] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -467,6 +508,7 @@ function EditKeyModal({
       setAdmin(row.admin);
       const q = row.quota?.["monthly-cost-usd"];
       setQuotaUsd(q != null ? String(q) : "");
+      setAllowedModels(row.allowedModels ?? []);
       setErr(null);
     }
   }, [row]);
@@ -486,6 +528,8 @@ function EditKeyModal({
         owner: owner || undefined,
         admin,
         quota,
+        // Always send: an empty array clears the allowlist (= all allowed).
+        "allowed-models": allowedModels,
       });
       onSaved();
     } catch (e) {
@@ -538,6 +582,11 @@ function EditKeyModal({
             onChange={(e) => setQuotaUsd(e.target.value)}
           />
         </div>
+        <ModelAllowlistPicker
+          models={models}
+          selected={allowedModels}
+          onChange={setAllowedModels}
+        />
         {err && <div className="badge-err px-3 py-2 block">{err}</div>}
         <div className="flex justify-end gap-2 pt-2">
           <button className="btn-secondary" onClick={onClose}>
@@ -553,5 +602,71 @@ function EditKeyModal({
         </div>
       </div>
     </Modal>
+  );
+}
+
+/* ─── Model allowlist picker ─────────────────────────────────── */
+
+function ModelAllowlistPicker({
+  models,
+  selected,
+  onChange,
+}: {
+  models: string[];
+  selected: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const toggle = (m: string) => {
+    onChange(
+      selected.includes(m)
+        ? selected.filter((x) => x !== m)
+        : [...selected, m],
+    );
+  };
+  return (
+    <div>
+      <label className="block text-sm text-ink-400 mb-1.5">
+        可用模型{" "}
+        <span className="text-ink-500">
+          (不选 = 允许全部;选中后仅允许这些,其余 403)
+        </span>
+      </label>
+      {models.length === 0 ? (
+        <div className="text-xs text-ink-500">模型列表加载中或不可用</div>
+      ) : (
+        <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto p-2 bg-ink-900 rounded-md">
+          {models.map((m) => {
+            const on = selected.includes(m);
+            return (
+              <button
+                key={m}
+                type="button"
+                onClick={() => toggle(m)}
+                className={`text-xs px-2 py-1 rounded-md border ${
+                  on
+                    ? "bg-emerald-600 border-emerald-500 text-white"
+                    : "border-ink-700 text-ink-300 hover:bg-ink-800"
+                }`}
+              >
+                {on ? "✓ " : ""}
+                {m}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {selected.length > 0 && (
+        <div className="text-xs text-ink-500 mt-1">
+          已选 {selected.length} 个
+          <button
+            type="button"
+            className="ml-2 text-ink-400 hover:text-ink-200 underline"
+            onClick={() => onChange([])}
+          >
+            清空
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
