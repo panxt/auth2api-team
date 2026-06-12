@@ -58,11 +58,26 @@ export interface ApiBucket extends BaseBucket {
   provider: ProviderId | null;
 }
 
+/** Cross-axis: one bucket per (client, model). Powers the per-user × per-model
+ *  cost/token breakdown. apiKeyShort lets the UI join a human label. */
+export interface ClientModelBucket extends BaseBucket {
+  apiKeyShort: string;
+  model: string;
+  provider: ProviderId | null;
+}
+
+/** Time window for a snapshot. "all" = cumulative since recorder start;
+ *  "today"/"month" = rolled up from per-day facts (UTC). */
+export type StatsWindow = "today" | "month" | "all";
+
 export interface StatsSnapshot {
   byClient: Record<string, ClientBucket>;
   byAccount: Record<string, AccountBucket>;
   byApi: Record<string, ApiBucket>;
+  byClientModel: Record<string, ClientModelBucket>;
   totals: BaseBucket;
+  /** Echoes the window this snapshot was computed for. */
+  window: StatsWindow;
 }
 
 function emptyBucket(now: string): BaseBucket {
@@ -101,6 +116,25 @@ function applyBaseDelta(b: BaseBucket, ev: StatsEvent, costUsd: number): void {
   b.lastSeenAt = ev.ts;
 }
 
+/** Fold one BaseBucket's totals into another (for windowed roll-ups). Keeps
+ *  the earliest firstSeenAt / latest lastSeenAt across the merged sources. */
+function mergeBase(target: BaseBucket, src: BaseBucket): void {
+  if (target.requests === 0 || src.firstSeenAt < target.firstSeenAt) {
+    target.firstSeenAt = src.firstSeenAt;
+  }
+  target.requests += src.requests;
+  target.successes += src.successes;
+  target.failures += src.failures;
+  target.totalInputTokens += src.totalInputTokens;
+  target.totalOutputTokens += src.totalOutputTokens;
+  target.totalCacheCreationInputTokens += src.totalCacheCreationInputTokens;
+  target.totalCacheReadInputTokens += src.totalCacheReadInputTokens;
+  target.totalReasoningOutputTokens += src.totalReasoningOutputTokens;
+  target.totalCostUsd += src.totalCostUsd;
+  target.totalLatencyMs += src.totalLatencyMs;
+  if (src.lastSeenAt > target.lastSeenAt) target.lastSeenAt = src.lastSeenAt;
+}
+
 /**
  * Three independent aggregate views — keyed by client (API key hash),
  * upstream account (provider + email), and API surface (endpoint + model
@@ -122,11 +156,44 @@ export interface DailyBucket {
   >;
 }
 
+/**
+ * Fine-grained per-day fact bucket — the single source that windowed
+ * snapshots (today / month) roll up from. One bucket per
+ * (date, client, endpoint, model, provider, account-email) tuple seen that
+ * day. byClient / byApi / byClientModel / byAccount / totals for any window
+ * are all derivable from these, guaranteeing the windowed views stay
+ * mutually consistent.
+ *
+ * Cardinality assumption: this is an internal small-team tool (≤ dozens of
+ * keys). Buckets older than DAY_FACT_RETENTION are pruned so memory stays
+ * bounded; large multi-tenant deployments should move this to a SQL
+ * GROUP BY instead.
+ */
+interface DayFactBucket extends BaseBucket {
+  date: string;
+  apiKeyHash: string;
+  apiKeyShort: string;
+  endpoint: string;
+  model: string;
+  provider: ProviderId | null;
+  accountEmail: string | null;
+  lastIp: string;
+  lastUa: string;
+}
+
+/** Keep this many days of per-day facts in memory (covers "today" + "month"). */
+const DAY_FACT_RETENTION = 40;
+
 export class StatsRecorder {
   private byClient = new Map<string, ClientBucket>();
   private byAccount = new Map<string, AccountBucket>();
   private byApi = new Map<string, ApiBucket>();
+  private byClientModel = new Map<string, ClientModelBucket>();
   private daily = new Map<string, DailyBucket>();
+  /** Fine-grained per-day facts, key = date|hash|endpoint|model|provider|email. */
+  private dayFacts = new Map<string, DayFactBucket>();
+  /** Tracks the most recent date inserted so we only prune on date rollover. */
+  private latestFactDate = "";
   private totals: BaseBucket = emptyBucket(new Date().toISOString());
 
   private log: EventLog | null = null;
@@ -193,13 +260,102 @@ export class StatsRecorder {
     return event;
   }
 
-  getSnapshot(): StatsSnapshot {
+  /**
+   * Aggregate snapshot for a time window.
+   *   - "all"   → cumulative since recorder start (cheap; returns live maps).
+   *   - "month" → current UTC calendar month, rolled up from per-day facts.
+   *   - "today" → current UTC day, rolled up from per-day facts.
+   * All windowed axes (byClient/byApi/byClientModel/byAccount/totals) are
+   * derived from the same dayFacts source so they never disagree.
+   */
+  getSnapshot(window: StatsWindow = "all"): StatsSnapshot {
+    if (window === "all") {
+      return {
+        byClient: Object.fromEntries(this.byClient),
+        byAccount: Object.fromEntries(this.byAccount),
+        byApi: Object.fromEntries(this.byApi),
+        byClientModel: Object.fromEntries(this.byClientModel),
+        totals: { ...this.totals },
+        window,
+      };
+    }
+    return this.rollupWindow(window);
+  }
+
+  /** Roll up byClient/byApi/byClientModel/byAccount/totals from dayFacts for
+   *  the given window ("today" | "month"), using the UTC wall clock now. */
+  private rollupWindow(window: "today" | "month"): StatsSnapshot {
+    const now = new Date();
+    const prefix =
+      window === "today"
+        ? now.toISOString().slice(0, 10) // YYYY-MM-DD
+        : now.toISOString().slice(0, 7); // YYYY-MM
+    const nowIso = now.toISOString();
+    const byClient = new Map<string, ClientBucket>();
+    const byApi = new Map<string, ApiBucket>();
+    const byClientModel = new Map<string, ClientModelBucket>();
+    const byAccount = new Map<string, AccountBucket>();
+    const totals = emptyBucket(nowIso);
+
+    for (const f of this.dayFacts.values()) {
+      if (!f.date.startsWith(prefix)) continue;
+      mergeBase(totals, f);
+
+      let cb = byClient.get(f.apiKeyHash);
+      if (!cb) {
+        cb = { ...emptyBucket(f.firstSeenAt), apiKeyShort: f.apiKeyShort, lastIp: f.lastIp, lastUa: f.lastUa };
+        byClient.set(f.apiKeyHash, cb);
+      }
+      mergeBase(cb, f);
+      cb.lastIp = f.lastIp || cb.lastIp;
+      cb.lastUa = f.lastUa || cb.lastUa;
+
+      const apiKey = `${f.endpoint}|${f.model}|${f.provider ?? "unknown"}`;
+      let pb = byApi.get(apiKey);
+      if (!pb) {
+        pb = { ...emptyBucket(f.firstSeenAt), endpoint: f.endpoint, model: f.model, provider: f.provider };
+        byApi.set(apiKey, pb);
+      }
+      mergeBase(pb, f);
+
+      const cmKey = `${f.apiKeyHash}|${f.model}`;
+      let cm = byClientModel.get(cmKey);
+      if (!cm) {
+        cm = { ...emptyBucket(f.firstSeenAt), apiKeyShort: f.apiKeyShort, model: f.model, provider: f.provider };
+        byClientModel.set(cmKey, cm);
+      }
+      mergeBase(cm, f);
+
+      if (f.provider && f.accountEmail) {
+        const accKey = `${f.provider}:${f.accountEmail}`;
+        let ab = byAccount.get(accKey);
+        if (!ab) {
+          ab = { ...emptyBucket(f.firstSeenAt), provider: f.provider, email: f.accountEmail };
+          byAccount.set(accKey, ab);
+        }
+        mergeBase(ab, f);
+      }
+    }
+
     return {
-      byClient: Object.fromEntries(this.byClient),
-      byAccount: Object.fromEntries(this.byAccount),
-      byApi: Object.fromEntries(this.byApi),
-      totals: { ...this.totals },
+      byClient: Object.fromEntries(byClient),
+      byAccount: Object.fromEntries(byAccount),
+      byApi: Object.fromEntries(byApi),
+      byClientModel: Object.fromEntries(byClientModel),
+      totals,
+      window,
     };
+  }
+
+  /** Drop per-day facts older than DAY_FACT_RETENTION days (UTC). */
+  private pruneDayFacts(): void {
+    if (!this.latestFactDate) return;
+    const cutoff = new Date(`${this.latestFactDate}T00:00:00Z`);
+    cutoff.setUTCDate(cutoff.getUTCDate() - (DAY_FACT_RETENTION - 1));
+    const cutoffStr = cutoff.toISOString().slice(0, 10);
+    for (const [k, f] of this.dayFacts) {
+      if (f.date < cutoffStr) this.dayFacts.delete(k);
+    }
   }
 
   /** Reset all in-memory aggregates. Doesn't touch the JSONL on disk. */
@@ -207,6 +363,9 @@ export class StatsRecorder {
     this.byClient.clear();
     this.byAccount.clear();
     this.byApi.clear();
+    this.byClientModel.clear();
+    this.dayFacts.clear();
+    this.latestFactDate = "";
     this.daily.clear();
     this.totals = emptyBucket(new Date().toISOString());
   }
@@ -259,6 +418,49 @@ export class StatsRecorder {
       this.byApi.set(apiKey, pb);
     }
     applyBaseDelta(pb, ev, cost);
+
+    // Cumulative client × model cross-axis (powers per-user/per-model
+    // breakdown for the "all" window; windowed views roll up from dayFacts).
+    const cmKey = `${clientKey}|${apiModel}`;
+    let cm = this.byClientModel.get(cmKey);
+    if (!cm) {
+      cm = {
+        ...emptyBucket(ev.ts),
+        apiKeyShort: ev.apiKeyHash.slice(0, 12),
+        model: apiModel,
+        provider: apiProvider,
+      };
+      this.byClientModel.set(cmKey, cm);
+    }
+    applyBaseDelta(cm, ev, cost);
+
+    // Fine-grained per-day fact — the single source windowed snapshots roll
+    // up from. Pruned to DAY_FACT_RETENTION days on date rollover.
+    const factDate = ev.ts.slice(0, 10);
+    const factKey = `${factDate}|${clientKey}|${ev.endpoint}|${apiModel}|${apiProvider ?? "unknown"}|${ev.accountEmail ?? ""}`;
+    let fb = this.dayFacts.get(factKey);
+    if (!fb) {
+      fb = {
+        ...emptyBucket(ev.ts),
+        date: factDate,
+        apiKeyHash: clientKey,
+        apiKeyShort: ev.apiKeyHash.slice(0, 12),
+        endpoint: ev.endpoint,
+        model: apiModel,
+        provider: apiProvider,
+        accountEmail: ev.accountEmail,
+        lastIp: ev.ip,
+        lastUa: ev.ua,
+      };
+      this.dayFacts.set(factKey, fb);
+    }
+    fb.lastIp = ev.ip || fb.lastIp;
+    fb.lastUa = ev.ua || fb.lastUa;
+    applyBaseDelta(fb, ev, cost);
+    if (factDate > this.latestFactDate) {
+      this.latestFactDate = factDate;
+      this.pruneDayFacts();
+    }
 
     // Daily bucket for the dashboard time-series — UTC YYYY-MM-DD prefix
     // of the event timestamp. Capped via getTimeseries(days), so unbounded

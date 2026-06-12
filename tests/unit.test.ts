@@ -1339,6 +1339,63 @@ test("StatsRecorder splits buckets by client / account / api key", () => {
   assert.equal(Object.keys(snapshot.byApi).length, 2);
 });
 
+test("StatsRecorder windowed snapshot: today / month / all roll up consistently", () => {
+  const recorder = new StatsRecorder();
+  const now = new Date();
+  const todayIso = now.toISOString();
+  // A timestamp earlier in the same UTC month (day 1, 00:30) — in "month" but
+  // not "today" (unless today IS the 1st, in which case shift to last month).
+  const isFirst = now.getUTCDate() === 1;
+  const earlierThisMonth = isFirst
+    ? // today is the 1st → put the "month-only" event in the *previous* month
+      // so it lands outside both today and this month
+      new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15)).toISOString()
+    : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 30)).toISOString();
+  // A timestamp ~70 days ago — outside today and this month.
+  const old = new Date(now.getTime() - 70 * 86400_000).toISOString();
+
+  recorder.applyEvent(makeStatsEvent({ ts: todayIso })); // today + month + all
+  recorder.applyEvent(makeStatsEvent({ ts: earlierThisMonth }));
+  recorder.applyEvent(makeStatsEvent({ ts: old }));
+
+  const all = recorder.getSnapshot("all");
+  const month = recorder.getSnapshot("month");
+  const today = recorder.getSnapshot("today");
+
+  assert.equal(all.window, "all");
+  assert.equal(all.totals.requests, 3);
+  // today always has exactly the 1 event stamped "now"
+  assert.equal(today.window, "today");
+  assert.equal(today.totals.requests, 1);
+  // month ⊇ today and ⊆ all; on the 1st the earlier event is last month
+  const expectedMonth = isFirst ? 1 : 2;
+  assert.equal(month.totals.requests, expectedMonth);
+  // monotonicity: today ≤ month ≤ all
+  assert.ok(today.totals.requests <= month.totals.requests);
+  assert.ok(month.totals.requests <= all.totals.requests);
+
+  // byClientModel cross-axis present in every window (M2)
+  const cmKey = `${"a".repeat(64)}|claude-sonnet-4-6`;
+  assert.equal(all.byClientModel[cmKey].requests, 3);
+  assert.equal(all.byClientModel[cmKey].apiKeyShort, "a".repeat(12));
+  assert.equal(today.byClientModel[cmKey].requests, 1);
+  assert.equal(month.byClientModel[cmKey].requests, expectedMonth);
+});
+
+test("StatsRecorder windowed byClientModel splits per model", () => {
+  const recorder = new StatsRecorder();
+  const todayIso = new Date().toISOString();
+  recorder.applyEvent(makeStatsEvent({ ts: todayIso, model: "claude-opus-4-8" }));
+  recorder.applyEvent(makeStatsEvent({ ts: todayIso, model: "claude-sonnet-4-6" }));
+  recorder.applyEvent(makeStatsEvent({ ts: todayIso, model: "claude-sonnet-4-6" }));
+  const today = recorder.getSnapshot("today");
+  const hash = "a".repeat(64);
+  assert.equal(today.byClientModel[`${hash}|claude-opus-4-8`].requests, 1);
+  assert.equal(today.byClientModel[`${hash}|claude-sonnet-4-6`].requests, 2);
+  // same client, so byClient collapses both models
+  assert.equal(today.byClient[hash].requests, 3);
+});
+
 test("StatsRecorder skips byAccount when provider/email missing", () => {
   const recorder = new StatsRecorder();
   recorder.applyEvent(

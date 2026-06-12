@@ -319,13 +319,18 @@ export function createServer(
   //   byClient — keyed by sha256(api-key); show short hex prefix to operator
   //   byAccount — keyed by `${provider}:${email}` (upstream OAuth account)
   //   byApi — keyed by `${endpoint}|${model}|${provider}`
-  app.get("/admin/stats", (_req, res) => {
+  app.get("/admin/stats", (req, res) => {
     if (!statsRecorder) {
       res.json({ enabled: false });
       return;
     }
+    // ?window=today|month|all — default "all" preserves the pre-2.x behavior
+    // for any caller that doesn't pass the param.
+    const w = req.query.window;
+    const window =
+      w === "today" || w === "month" || w === "all" ? w : "all";
     res.json({
-      ...statsRecorder.getSnapshot(),
+      ...statsRecorder.getSnapshot(window),
       generated_at: new Date().toISOString(),
     });
   });

@@ -34,15 +34,26 @@ export interface ApiBucket extends BaseBucket {
   provider: string | null;
 }
 
+export interface ClientModelBucket extends BaseBucket {
+  apiKeyShort: string;
+  model: string;
+  provider: string | null;
+}
+
+export type StatsWindow = "today" | "month" | "all";
+
 export interface StatsSnapshot {
   byClient: Record<string, ClientBucket>;
   byAccount: Record<string, AccountBucket>;
   byApi: Record<string, ApiBucket>;
+  byClientModel: Record<string, ClientModelBucket>;
   totals: BaseBucket;
+  window: StatsWindow;
   generated_at: string;
 }
 
-export const fetchStats = () => get<StatsSnapshot>("/admin/stats");
+export const fetchStats = (window: StatsWindow = "month") =>
+  get<StatsSnapshot>(`/admin/stats?window=${window}`);
 
 /* ── /admin/stats/timeseries ────────────────────────────────────────── */
 

@@ -12,8 +12,14 @@ import {
   Legend,
   Filler,
 } from "chart.js";
-import { Line, Doughnut, Bar } from "react-chartjs-2";
-import { fetchStats, fetchTimeseries, StatsSnapshot, DailyBucket } from "../api/stats";
+import { Line, Doughnut } from "react-chartjs-2";
+import {
+  fetchStats,
+  fetchTimeseries,
+  StatsSnapshot,
+  StatsWindow,
+  DailyBucket,
+} from "../api/stats";
 import { listUsage, UsageKey } from "../api/keys";
 import { listAccounts, AccountSnapshot } from "../api/accounts";
 import { ApiError } from "../api/client";
@@ -103,11 +109,13 @@ export function Stats() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
+  // 时间窗口:默认当月,作用全页(KPI / Top 客户端 / 模型分布 / 明细)。
+  const [window, setWindow] = useState<StatsWindow>("month");
 
   const load = useCallback(async () => {
     try {
       const [s, t, u, a] = await Promise.all([
-        fetchStats(),
+        fetchStats(window),
         fetchTimeseries(30),
         listUsage(),
         listAccounts(),
@@ -127,7 +135,7 @@ export function Stats() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [window]);
 
   useEffect(() => {
     load();
@@ -201,32 +209,74 @@ export function Stats() {
     };
   }, [stats]);
 
-  /* ── derive: top 10 clients by cost ─────────────────────────────── */
+  /* ── label lookup: apiKeyShort → human label ─────────────────────── */
+
+  const labelFor = useCallback(
+    (short: string) => {
+      for (const u of usage) {
+        if (u.apiKeyShort === short) return u.label || short.slice(0, 8);
+      }
+      return short.slice(0, 8);
+    },
+    [usage],
+  );
+
+  /* ── derive: top 10 clients by cost (cost + tokens + requests) ───── */
 
   const topClients = useMemo(() => {
-    if (!stats) return null;
-    // join byClient with usage keys to get labels
-    const labels = new Map<string, string>();
-    for (const u of usage) {
-      labels.set(u.apiKeyShort, u.label || u.apiKeyShort);
-    }
-    const sorted = Object.values(stats.byClient)
-      .sort((a, b) => b.totalCostUsd - a.totalCostUsd)
+    if (!stats) return [];
+    return Object.values(stats.byClient)
+      .map((c) => ({
+        label: labelFor(c.apiKeyShort),
+        short: c.apiKeyShort,
+        cost: c.totalCostUsd,
+        tokens:
+          c.totalInputTokens +
+          c.totalOutputTokens +
+          c.totalCacheCreationInputTokens +
+          c.totalCacheReadInputTokens +
+          c.totalReasoningOutputTokens,
+        requests: c.requests,
+      }))
+      .sort((a, b) => b.cost - a.cost)
       .slice(0, 10);
-    return {
-      labels: sorted.map(
-        (c) => labels.get(c.apiKeyShort) || c.apiKeyShort.slice(0, 8),
-      ),
-      datasets: [
-        {
-          label: "Cost (USD)",
-          data: sorted.map((c) => Number(c.totalCostUsd.toFixed(2))),
-          backgroundColor: sorted.map((_, i) => colorAt(i)),
-          borderRadius: 4,
-        },
-      ],
-    };
-  }, [stats, usage]);
+  }, [stats, labelFor]);
+
+  /* ── derive: per-user × per-model breakdown (cost + tokens) ──────── */
+
+  const clientModelRows = useMemo(() => {
+    if (!stats) return [];
+    // Group byClientModel under each client, so the table shows每人 then
+    // each model they used with cost + tokens.
+    const byClient = new Map<
+      string,
+      {
+        label: string;
+        short: string;
+        totalCost: number;
+        models: Array<{ model: string; cost: number; tokens: number; requests: number }>;
+      }
+    >();
+    for (const b of Object.values(stats.byClientModel)) {
+      let g = byClient.get(b.apiKeyShort);
+      if (!g) {
+        g = { label: labelFor(b.apiKeyShort), short: b.apiKeyShort, totalCost: 0, models: [] };
+        byClient.set(b.apiKeyShort, g);
+      }
+      const tokens =
+        b.totalInputTokens +
+        b.totalOutputTokens +
+        b.totalCacheCreationInputTokens +
+        b.totalCacheReadInputTokens +
+        b.totalReasoningOutputTokens;
+      g.totalCost += b.totalCostUsd;
+      g.models.push({ model: b.model, cost: b.totalCostUsd, tokens, requests: b.requests });
+    }
+    const rows = Array.from(byClient.values());
+    rows.sort((a, b) => b.totalCost - a.totalCost);
+    rows.forEach((r) => r.models.sort((a, b) => b.cost - a.cost));
+    return rows;
+  }, [stats, labelFor]);
 
   /* ── stats KPI ──────────────────────────────────────────────────── */
 
@@ -272,11 +322,38 @@ export function Stats() {
         <div>
           <h1 className="text-2xl font-semibold">用量看板</h1>
           <p className="text-sm text-ink-400 mt-1">
-            全量历史(自首次启动 / 最近一次清空起)。每 30 秒自动刷新。
+            {window === "today"
+              ? "今天(UTC)。"
+              : window === "month"
+                ? "本月至今(UTC)。"
+                : "全量历史(自首次启动 / 最近一次清空起)。"}
+            每 30 秒自动刷新。
           </p>
         </div>
-        <div className="text-xs text-ink-500">
-          最近刷新:{lastRefresh.toLocaleTimeString()}
+        <div className="flex items-center gap-3">
+          {/* 时间窗口段控 */}
+          <div className="inline-flex rounded-md border border-ink-700 overflow-hidden text-sm">
+            {([
+              ["today", "当天"],
+              ["month", "当月"],
+              ["all", "全部"],
+            ] as const).map(([w, txt]) => (
+              <button
+                key={w}
+                onClick={() => setWindow(w)}
+                className={`px-3 py-1.5 ${
+                  window === w
+                    ? "bg-emerald-600 text-white"
+                    : "text-ink-300 hover:bg-ink-800"
+                }`}
+              >
+                {txt}
+              </button>
+            ))}
+          </div>
+          <div className="text-xs text-ink-500">
+            最近刷新:{lastRefresh.toLocaleTimeString()}
+          </div>
         </div>
       </header>
 
@@ -410,28 +487,106 @@ export function Stats() {
         </section>
       </div>
 
-      {/* Top clients bar */}
-      <section className="card">
-        <h2 className="text-lg font-medium mb-3">Top 10 客户端 · 成本</h2>
-        <div className="h-80">
-          {topClients ? (
-            <Bar
-              data={topClients}
-              options={{
-                ...COMMON_CHART_OPTS,
-                indexAxis: "y" as const,
-                plugins: {
-                  legend: { display: false },
-                  tooltip: COMMON_CHART_OPTS.plugins.tooltip,
-                },
-              }}
-            />
-          ) : (
-            <div className="h-full grid place-items-center text-ink-500">
-              暂无数据
-            </div>
-          )}
+      {/* Top clients — cost + tokens + requests */}
+      <section className="card overflow-x-auto p-0">
+        <div className="px-5 py-3 border-b border-ink-800">
+          <h2 className="text-lg font-medium">Top 10 客户端 · 成本 + Token</h2>
         </div>
+        <table className="w-full text-sm">
+          <thead className="bg-ink-900 text-ink-400">
+            <tr className="text-left">
+              <th className="px-4 py-2 font-medium">#</th>
+              <th className="px-4 py-2 font-medium">客户端</th>
+              <th className="px-4 py-2 font-medium text-right">成本</th>
+              <th className="px-4 py-2 font-medium text-right">Token</th>
+              <th className="px-4 py-2 font-medium text-right">请求</th>
+              <th className="px-4 py-2 font-medium">占比</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-ink-800">
+            {topClients.map((c, i) => {
+              const top = topClients[0]?.cost || 1;
+              const pct = (c.cost / top) * 100;
+              return (
+                <tr key={c.short} className="hover:bg-ink-900/50">
+                  <td className="px-4 py-2 text-ink-500">{i + 1}</td>
+                  <td className="px-4 py-2 font-medium">
+                    {c.label}
+                    <span className="text-xs text-ink-500 ml-2">{c.short}</span>
+                  </td>
+                  <td className="px-4 py-2 text-right text-emerald-300">{fmtUsd(c.cost)}</td>
+                  <td className="px-4 py-2 text-right text-blue-300">{fmtTokens(c.tokens)}</td>
+                  <td className="px-4 py-2 text-right text-ink-400">{fmtInt(c.requests)}</td>
+                  <td className="px-4 py-2">
+                    <div className="h-2 bg-ink-800 rounded-full overflow-hidden w-32">
+                      <div
+                        className="h-full bg-emerald-500"
+                        style={{ width: `${Math.min(100, pct)}%` }}
+                      />
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+            {topClients.length === 0 && (
+              <tr>
+                <td colSpan={6} className="px-4 py-6 text-center text-ink-500">
+                  暂无数据
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </section>
+
+      {/* Per-user × per-model breakdown */}
+      <section className="card overflow-x-auto p-0">
+        <div className="px-5 py-3 border-b border-ink-800">
+          <h2 className="text-lg font-medium">每人 · 各模型 成本 / Token 明细</h2>
+          <p className="text-xs text-ink-500 mt-0.5">
+            每个客户端在每个模型上的消耗(随上方时间窗口联动)。
+          </p>
+        </div>
+        <table className="w-full text-sm">
+          <thead className="bg-ink-900 text-ink-400">
+            <tr className="text-left">
+              <th className="px-4 py-2 font-medium">客户端</th>
+              <th className="px-4 py-2 font-medium">模型</th>
+              <th className="px-4 py-2 font-medium text-right">成本</th>
+              <th className="px-4 py-2 font-medium text-right">Token</th>
+              <th className="px-4 py-2 font-medium text-right">请求</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-ink-800">
+            {clientModelRows.flatMap((r) =>
+              r.models.map((m, mi) => (
+                <tr key={`${r.short}|${m.model}`} className="hover:bg-ink-900/50">
+                  <td className="px-4 py-2 font-medium">
+                    {mi === 0 ? (
+                      <>
+                        {r.label}
+                        <span className="text-xs text-ink-500 ml-2">{r.short}</span>
+                      </>
+                    ) : (
+                      <span className="text-ink-700">↳</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-2 text-ink-300">{m.model}</td>
+                  <td className="px-4 py-2 text-right text-emerald-300">{fmtUsd(m.cost)}</td>
+                  <td className="px-4 py-2 text-right text-blue-300">{fmtTokens(m.tokens)}</td>
+                  <td className="px-4 py-2 text-right text-ink-400">{fmtInt(m.requests)}</td>
+                </tr>
+              )),
+            )}
+            {clientModelRows.length === 0 && (
+              <tr>
+                <td colSpan={5} className="px-4 py-6 text-center text-ink-500">
+                  暂无数据
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </section>
 
       {/* Quota progress */}
