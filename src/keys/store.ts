@@ -18,7 +18,8 @@ export interface KeyInput {
   owner?: string;
   enabled?: boolean;
   admin?: boolean;
-  quota?: ApiKeyEntry["quota"];
+  // null explicitly clears a previously-set quota.
+  quota?: ApiKeyEntry["quota"] | null;
   "rate-limit"?: ApiKeyEntry["rate-limit"];
   "allowed-models"?: ApiKeyEntry["allowed-models"];
   "denied-models"?: ApiKeyEntry["denied-models"];
@@ -127,7 +128,7 @@ export class ManagedKeyStore {
       owner: input.owner,
       enabled: input.enabled ?? true,
       admin: input.admin ?? false,
-      quota: input.quota,
+      quota: input.quota ?? undefined,
       "rate-limit": input["rate-limit"],
       "allowed-models": input["allowed-models"],
       "denied-models": input["denied-models"],
@@ -145,7 +146,8 @@ export class ManagedKeyStore {
     if (patch.owner !== undefined) entry.owner = patch.owner;
     if (patch.enabled !== undefined) entry.enabled = patch.enabled;
     if (patch.admin !== undefined) entry.admin = patch.admin;
-    if (patch.quota !== undefined) entry.quota = patch.quota;
+    // null clears the quota; an object replaces it; undefined leaves it as-is.
+    if (patch.quota !== undefined) entry.quota = patch.quota ?? undefined;
     if (patch["rate-limit"] !== undefined) entry["rate-limit"] = patch["rate-limit"];
     if (patch["allowed-models"] !== undefined)
       entry["allowed-models"] = patch["allowed-models"];

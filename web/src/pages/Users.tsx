@@ -536,7 +536,7 @@ function EditKeyModal({
         owner: owner || undefined,
         admin,
         // null clears the quota; cleanQuota returns null when all caps empty.
-        quota: cleanQuota(quota) ?? undefined,
+        quota: cleanQuota(quota),
         // Always send: an empty array clears the list.
         "allowed-models": allowedModels,
         "denied-models": deniedModels,

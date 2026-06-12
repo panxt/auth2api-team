@@ -132,6 +132,36 @@ test("SqliteStorage: ManagedKeyStore persists keys to the DB across restart", as
   }
 });
 
+test("ManagedKeyStore: allowed/denied-models + quota survive a restart", () => {
+  const file = dbPath();
+  try {
+    const s1 = new SqliteStorage(file);
+    const store1 = new ManagedKeyStore(s1.keyRepo, new Map());
+    store1.load();
+    const created = store1.create({
+      label: "restricted",
+      "allowed-models": ["claude-sonnet-4-6"],
+      "denied-models": ["claude-opus-4-8"],
+      quota: { "monthly-cost-usd": 50 },
+    });
+    s1.close();
+
+    // Reopen → the model lists (and quota) must still be there. Regression for
+    // normalizeKeyEntry dropping the new fields on disk reload.
+    const s2 = new SqliteStorage(file);
+    const live2 = new Map();
+    const store2 = new ManagedKeyStore(s2.keyRepo, live2);
+    store2.load();
+    const entry = live2.get(created.key);
+    assert.deepEqual(entry["allowed-models"], ["claude-sonnet-4-6"]);
+    assert.deepEqual(entry["denied-models"], ["claude-opus-4-8"]);
+    assert.equal(entry.quota["monthly-cost-usd"], 50);
+    s2.close();
+  } finally {
+    fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  }
+});
+
 function logRec(p: Partial<RequestLogRecord>): RequestLogRecord {
   return {
     ts: new Date().toISOString(),

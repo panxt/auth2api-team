@@ -81,7 +81,8 @@ export interface CreateKeyInput {
   owner?: string;
   admin?: boolean;
   enabled?: boolean;
-  quota?: KeyQuota;
+  // null explicitly clears a previously-set quota on PATCH.
+  quota?: KeyQuota | null;
   "rate-limit"?: KeyRateLimit;
   "allowed-models"?: string[];
   "denied-models"?: string[];

@@ -8,6 +8,7 @@ import {
   LoggingConfig,
 } from "../api/logs";
 import { ApiError } from "../api/client";
+import { listAccounts } from "../api/accounts";
 import { useAuth } from "../lib/auth";
 
 const PAGE = 100;
@@ -34,7 +35,22 @@ export function Logs() {
   const [email, setEmail] = useState("");
   const [model, setModel] = useState("");
   const [q, setQ] = useState("");
+  const [sinceDate, setSinceDate] = useState(""); // YYYY-MM-DD
+  const [untilDate, setUntilDate] = useState("");
   const [applied, setApplied] = useState<LogFilter>({ status: "failure" });
+  // Known upstream accounts → datalist options for the 上游账号 combobox.
+  const [accountOpts, setAccountOpts] = useState<string[]>([]);
+
+  useEffect(() => {
+    listAccounts()
+      .then((r) => {
+        const emails: string[] = [];
+        for (const info of Object.values(r.providers))
+          for (const a of info.accounts) emails.push(a.email);
+        setAccountOpts(emails);
+      })
+      .catch(() => setAccountOpts([]));
+  }, []);
 
   const load = useCallback(
     async (reset: boolean) => {
@@ -77,6 +93,9 @@ export function Logs() {
       email: email.trim() || undefined,
       model: model.trim() || undefined,
       q: q.trim() || undefined,
+      // date inputs → UTC day bounds (inclusive)
+      since: sinceDate ? `${sinceDate}T00:00:00.000Z` : undefined,
+      until: untilDate ? `${untilDate}T23:59:59.999Z` : undefined,
     });
   }
 
@@ -119,10 +138,16 @@ export function Logs() {
           <label className="block text-xs text-ink-500 mb-1">上游账号</label>
           <input
             className="input !py-1 text-sm"
-            placeholder="email"
+            placeholder="选择或输入 email"
+            list="account-options"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />
+          <datalist id="account-options">
+            {accountOpts.map((e) => (
+              <option key={e} value={e} />
+            ))}
+          </datalist>
         </div>
         <div>
           <label className="block text-xs text-ink-500 mb-1">模型</label>
@@ -131,6 +156,26 @@ export function Logs() {
             placeholder="claude-opus-4-8"
             value={model}
             onChange={(e) => setModel(e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-ink-500 mb-1">起(UTC)</label>
+          <input
+            type="date"
+            className="input !py-1 text-sm"
+            value={sinceDate}
+            max={untilDate || undefined}
+            onChange={(e) => setSinceDate(e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-ink-500 mb-1">止(UTC)</label>
+          <input
+            type="date"
+            className="input !py-1 text-sm"
+            value={untilDate}
+            min={sinceDate || undefined}
+            onChange={(e) => setUntilDate(e.target.value)}
           />
         </div>
         <div className="flex-1 min-w-[12rem]">

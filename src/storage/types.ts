@@ -102,5 +102,9 @@ export function normalizeKeyEntry(v: any): ApiKeyEntry | null {
     admin: v.admin ?? false,
     quota: v.quota,
     "rate-limit": v["rate-limit"],
+    // These must round-trip too — otherwise UI-set model allow/deny lists are
+    // silently dropped when managed keys are reloaded from disk on restart.
+    "allowed-models": v["allowed-models"],
+    "denied-models": v["denied-models"],
   };
 }
