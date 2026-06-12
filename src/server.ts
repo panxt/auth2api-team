@@ -548,17 +548,63 @@ export function createServer(
         return;
       }
       const email = decodeURIComponent(req.params.email);
-      const body = (req.body || {}) as { disabled?: unknown };
-      if (typeof body.disabled !== "boolean") {
-        res.status(400).json({ error: { message: "body must be { disabled: boolean }" } });
+      const body = (req.body || {}) as {
+        disabled?: unknown;
+        monthlyBudgetUsd?: unknown;
+        tierLabel?: unknown;
+      };
+
+      // Budget / tier annotations (display-only). Accept number|null and
+      // string|null; undefined means "leave unchanged".
+      const hasBudget = "monthlyBudgetUsd" in body;
+      const hasTier = "tierLabel" in body;
+      if (hasBudget || hasTier) {
+        if (
+          hasBudget &&
+          body.monthlyBudgetUsd !== null &&
+          typeof body.monthlyBudgetUsd !== "number"
+        ) {
+          res.status(400).json({ error: { message: "monthlyBudgetUsd must be a number or null" } });
+          return;
+        }
+        if (hasTier && body.tierLabel !== null && typeof body.tierLabel !== "string") {
+          res.status(400).json({ error: { message: "tierLabel must be a string or null" } });
+          return;
+        }
+        const ok = provider.manager.setBudget(email, {
+          monthlyBudgetUsd: hasBudget
+            ? (body.monthlyBudgetUsd as number | null)
+            : undefined,
+          tierLabel: hasTier ? (body.tierLabel as string | null) : undefined,
+        });
+        if (!ok) {
+          res.status(404).json({ error: { message: `no account ${email} loaded for ${provider.id}` } });
+          return;
+        }
+      }
+
+      // Disabled toggle (optional — may be combined with budget in one PATCH).
+      let disabled: boolean | undefined;
+      if ("disabled" in body) {
+        if (typeof body.disabled !== "boolean") {
+          res.status(400).json({ error: { message: "disabled must be a boolean" } });
+          return;
+        }
+        const next = provider.manager.setDisabled(email, body.disabled);
+        if (next === null) {
+          res.status(404).json({ error: { message: `no account ${email} loaded for ${provider.id}` } });
+          return;
+        }
+        disabled = next;
+      }
+
+      if (!hasBudget && !hasTier && disabled === undefined) {
+        res.status(400).json({
+          error: { message: "body must set at least one of { disabled, monthlyBudgetUsd, tierLabel }" },
+        });
         return;
       }
-      const next = provider.manager.setDisabled(email, body.disabled);
-      if (next === null) {
-        res.status(404).json({ error: { message: `no account ${email} loaded for ${provider.id}` } });
-        return;
-      }
-      res.json({ ok: true, provider: provider.id, email, disabled: next });
+      res.json({ ok: true, provider: provider.id, email, disabled });
     },
   );
 

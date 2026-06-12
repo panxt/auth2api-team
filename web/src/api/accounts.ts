@@ -34,6 +34,8 @@ export interface AccountSnapshot {
   windowExpired: boolean;
   rateLimit: RateLimitSnapshot | null;
   disabled: boolean;
+  monthlyBudgetUsd: number | null;
+  tierLabel: string | null;
 }
 
 export interface AccountsResp {
@@ -88,4 +90,14 @@ export const setAccountDisabled = (
   patch<{ ok: true; provider: string; email: string; disabled: boolean }>(
     `/admin/accounts/${provider}/${encodeURIComponent(email)}`,
     { disabled },
+  );
+
+export const setAccountBudget = (
+  provider: string,
+  email: string,
+  body: { monthlyBudgetUsd?: number | null; tierLabel?: string | null },
+) =>
+  patch<{ ok: true; provider: string; email: string }>(
+    `/admin/accounts/${provider}/${encodeURIComponent(email)}`,
+    body,
   );

@@ -4,14 +4,23 @@ import {
   prewarm,
   deleteAccount,
   setAccountDisabled,
+  setAccountBudget,
   AccountSnapshot,
   PrewarmResp,
 } from "../api/accounts";
+import { fetchStats } from "../api/stats";
 import { ApiError } from "../api/client";
 import { AddAccountModal } from "../components/AddAccountModal";
 import { AccountQuotaPanel } from "../components/AccountQuotaPanel";
+import { Modal } from "../components/Modal";
 import { useAuth } from "../lib/auth";
 import { SupportedProvider } from "../api/oauth";
+
+function fmtUsd(n: number): string {
+  if (!n) return "$0";
+  if (n >= 10) return `$${n.toFixed(2)}`;
+  return `$${n.toFixed(4)}`;
+}
 
 function fmtTokens(n: number): string {
   if (!n) return "—";
@@ -68,17 +77,34 @@ export function Accounts() {
     provider: SupportedProvider;
     email: string;
   } | null>(null);
+  const [budgetEdit, setBudgetEdit] = useState<{
+    provider: string;
+    acct: AccountSnapshot;
+  } | null>(null);
+  // Month-to-date cost per account, keyed by "provider:email" (from stats).
+  const [monthCost, setMonthCost] = useState<Record<string, number>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
     setErr(null);
     try {
-      const resp = await listAccounts();
+      const [resp, stats] = await Promise.all([
+        listAccounts(),
+        // byAccount cost for the current month → drives the budget bars.
+        fetchStats("month").catch(() => null),
+      ]);
       const byProvider: Record<string, AccountSnapshot[]> = {};
       for (const [p, info] of Object.entries(resp.providers)) {
         if (info.account_count > 0) byProvider[p] = info.accounts;
       }
       setData(byProvider);
+      if (stats) {
+        const costs: Record<string, number> = {};
+        for (const [k, b] of Object.entries(stats.byAccount)) {
+          costs[k] = b.totalCostUsd;
+        }
+        setMonthCost(costs);
+      }
     } catch (e) {
       setErr((e as ApiError).message);
     } finally {
@@ -144,6 +170,21 @@ export function Accounts() {
     setReauth({ provider: providerId as SupportedProvider, email: acct.email });
   }
 
+  async function onSaveBudget(
+    provider: string,
+    email: string,
+    monthlyBudgetUsd: number | null,
+    tierLabel: string | null,
+  ) {
+    try {
+      await setAccountBudget(provider, email, { monthlyBudgetUsd, tierLabel });
+      setBudgetEdit(null);
+      setTimeout(load, 300);
+    } catch (e) {
+      alert(`保存失败: ${(e as ApiError).message}`);
+    }
+  }
+
   return (
     <div>
       <header className="flex items-center justify-between mb-6">
@@ -198,6 +239,11 @@ export function Accounts() {
             }}
             reauthProvider={reauth?.provider}
             reauthEmail={reauth?.email}
+          />
+          <BudgetModal
+            edit={budgetEdit}
+            onClose={() => setBudgetEdit(null)}
+            onSave={onSaveBudget}
           />
         </>
       )}
@@ -270,6 +316,9 @@ export function Accounts() {
                     >
                       <td className="px-4 py-3 font-medium">
                         {a.email}
+                        {a.tierLabel && (
+                          <span className="ml-2 badge-ok">{a.tierLabel}</span>
+                        )}
                         {a.planType && (
                           <span className="ml-2 badge-muted">{a.planType}</span>
                         )}
@@ -326,6 +375,13 @@ export function Accounts() {
                             重新认证
                           </button>
                           <button
+                            className="btn-ghost text-xs"
+                            onClick={() => setBudgetEdit({ provider: providerId, acct: a })}
+                            title="设置月度预算 / 档位标签(展示用)"
+                          >
+                            预算
+                          </button>
+                          <button
                             className="btn-ghost text-xs text-rose-400 hover:text-rose-300"
                             onClick={() => onDelete(providerId, a)}
                             title="永久删除(不可逆)"
@@ -343,17 +399,58 @@ export function Accounts() {
 
           {/* Per-account quota panel (5h / 7d windows + retry-after) */}
           <div className={`grid gap-4 mt-4 ${accounts.length > 1 ? "lg:grid-cols-2" : ""}`}>
-            {accounts.map((a) => (
-              <div key={a.email} className="card">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="font-medium">{a.email}</div>
-                  {a.planType && (
-                    <span className="badge-muted">{a.planType}</span>
-                  )}
+            {accounts.map((a) => {
+              const cost = monthCost[`${providerId}:${a.email}`] ?? 0;
+              const budget = a.monthlyBudgetUsd;
+              const pct = budget && budget > 0 ? (cost / budget) * 100 : 0;
+              const tone =
+                pct >= 90 ? "bg-rose-500" : pct >= 70 ? "bg-amber-500" : "bg-emerald-500";
+              return (
+                <div key={a.email} className="card">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="font-medium">
+                      {a.email}
+                      {a.tierLabel && (
+                        <span className="ml-2 badge-ok">{a.tierLabel}</span>
+                      )}
+                    </div>
+                    {a.planType && (
+                      <span className="badge-muted">{a.planType}</span>
+                    )}
+                  </div>
+
+                  {/* Monthly budget utilization (display-only) */}
+                  <div className="mb-3">
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-ink-400">本月预算</span>
+                      <span className="text-ink-400">
+                        {fmtUsd(cost)}
+                        {budget && budget > 0 ? (
+                          <>
+                            {" / "}${budget}{" "}
+                            <span className={pct >= 90 ? "text-rose-400" : "text-ink-500"}>
+                              ({pct.toFixed(0)}%)
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-ink-500"> / 未设预算</span>
+                        )}
+                      </span>
+                    </div>
+                    {budget && budget > 0 && (
+                      <div className="h-2 bg-ink-800 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full ${tone} transition-all`}
+                          style={{ width: `${Math.min(100, pct)}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  <AccountQuotaPanel account={a} />
                 </div>
-                <AccountQuotaPanel account={a} />
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       ))}
@@ -365,5 +462,92 @@ export function Accounts() {
         </div>
       )}
     </div>
+  );
+}
+
+/* ─── Budget / tier editor modal ─────────────────────────────── */
+
+function BudgetModal({
+  edit,
+  onClose,
+  onSave,
+}: {
+  edit: { provider: string; acct: AccountSnapshot } | null;
+  onClose: () => void;
+  onSave: (
+    provider: string,
+    email: string,
+    monthlyBudgetUsd: number | null,
+    tierLabel: string | null,
+  ) => void;
+}) {
+  const [budget, setBudget] = useState("");
+  const [tier, setTier] = useState("");
+
+  useEffect(() => {
+    if (edit) {
+      setBudget(
+        edit.acct.monthlyBudgetUsd != null
+          ? String(edit.acct.monthlyBudgetUsd)
+          : "",
+      );
+      setTier(edit.acct.tierLabel ?? "");
+    }
+  }, [edit]);
+
+  if (!edit) return null;
+
+  return (
+    <Modal open={!!edit} onClose={onClose} title={`预算 / 档位 — ${edit.acct.email}`}>
+      <div className="space-y-4">
+        <div>
+          <label className="block text-sm text-ink-400 mb-1.5">
+            月度预算(USD)<span className="text-ink-500">(留空 = 不设)</span>
+          </label>
+          <input
+            className="input"
+            type="number"
+            min="0"
+            step="1"
+            placeholder="125"
+            value={budget}
+            onChange={(e) => setBudget(e.target.value)}
+          />
+          <p className="text-xs text-ink-500 mt-1">
+            展示用 —— 账号页按"本月已花 / 预算"画进度条,不强制限流。
+          </p>
+        </div>
+        <div>
+          <label className="block text-sm text-ink-400 mb-1.5">
+            档位标签 <span className="text-ink-500">(例:$125 / Max)</span>
+          </label>
+          <input
+            className="input"
+            placeholder="$125"
+            value={tier}
+            onChange={(e) => setTier(e.target.value)}
+          />
+        </div>
+        <div className="flex justify-end gap-2 pt-2">
+          <button className="btn-secondary" onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="btn-primary"
+            onClick={() => {
+              const b = budget.trim() === "" ? null : Number(budget);
+              onSave(
+                edit.provider,
+                edit.acct.email,
+                b != null && !isNaN(b) && b > 0 ? b : null,
+                tier.trim() === "" ? null : tier.trim(),
+              );
+            }}
+          >
+            保存
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }

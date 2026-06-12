@@ -163,6 +163,10 @@ export interface AccountSnapshot {
   /** When true the account is operator-disabled — token kept, but no traffic
    *  and no refresh. UI surfaces this as a separate badge from cooldown. */
   disabled: boolean;
+  /** Display-only monthly budget (USD), or null if unset. */
+  monthlyBudgetUsd: number | null;
+  /** Display-only tier label (e.g. "$25"), or null if unset. */
+  tierLabel: string | null;
 }
 
 export interface AvailableAccount {
@@ -643,6 +647,28 @@ export class AccountManager {
   }
 
   /**
+   * Set display-only budget / tier annotations on an account, persisted to the
+   * token file. Pass undefined for a field to leave it unchanged; pass null to
+   * clear it. Returns true if the account exists, false otherwise.
+   */
+  setBudget(
+    email: string,
+    opts: { monthlyBudgetUsd?: number | null; tierLabel?: string | null },
+  ): boolean {
+    const acct = this.accounts.get(email);
+    if (!acct) return false;
+    if (opts.monthlyBudgetUsd !== undefined) {
+      acct.token.monthlyBudgetUsd =
+        opts.monthlyBudgetUsd === null ? undefined : opts.monthlyBudgetUsd;
+    }
+    if (opts.tierLabel !== undefined) {
+      acct.token.tierLabel = opts.tierLabel === null ? undefined : opts.tierLabel;
+    }
+    saveToken(this.authDir, acct.token);
+    return true;
+  }
+
+  /**
    * Permanently remove an account: drop from memory + delete its token file.
    * Returns true if removed, false if the email wasn't loaded.
    *
@@ -708,6 +734,8 @@ export class AccountManager {
         windowExpired,
         rateLimit: acct.rateLimit,
         disabled: acct.disabled,
+        monthlyBudgetUsd: acct.token.monthlyBudgetUsd ?? null,
+        tierLabel: acct.token.tierLabel ?? null,
       });
     }
     return snapshots;

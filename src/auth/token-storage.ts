@@ -51,6 +51,8 @@ export function tokenToStorage(data: TokenData): TokenStorage {
     cursor_client_id: data.cursorClientId,
     cursor_membership_type: data.cursorMembershipType,
     disabled: data.disabled,
+    monthly_budget_usd: data.monthlyBudgetUsd,
+    tier_label: data.tierLabel,
   };
 }
 
@@ -72,6 +74,8 @@ export function storageToToken(storage: TokenStorage): TokenData {
     cursorClientId: storage.cursor_client_id,
     cursorMembershipType: storage.cursor_membership_type,
     disabled: storage.disabled,
+    monthlyBudgetUsd: storage.monthly_budget_usd,
+    tierLabel: storage.tier_label,
   };
 }
 

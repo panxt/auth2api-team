@@ -31,6 +31,12 @@ export interface TokenData {
    *  `getNextAccount()` / `getAvailableAccount()` (no traffic, no refresh).
    *  Toggled via PATCH /admin/accounts/:provider/:email. */
   disabled?: boolean;
+  /** Display-only monthly budget (USD) for this upstream account — the
+   *  account page shows month-to-date cost against it as a progress bar.
+   *  Set via PATCH /admin/accounts/:provider/:email. */
+  monthlyBudgetUsd?: number;
+  /** Display-only tier label, e.g. "$25" / "$125" / "Max". */
+  tierLabel?: string;
 }
 
 export interface TokenStorage {
@@ -49,4 +55,6 @@ export interface TokenStorage {
   cursor_client_id?: string;
   cursor_membership_type?: string;
   disabled?: boolean;
+  monthly_budget_usd?: number;
+  tier_label?: string;
 }
