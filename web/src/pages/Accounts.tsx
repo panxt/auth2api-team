@@ -63,6 +63,47 @@ function cooldownStatus(acct: AccountSnapshot): {
   return { badge: "ok", className: "badge-ok" };
 }
 
+/**
+ * Turn a prewarm result into a short, human reason instead of dumping the raw
+ * upstream 429 JSON. Rate-limit on prewarm is expected when the 5h window is
+ * already active, so it's shown amber (informational), not red.
+ */
+function prewarmOutcome(r: { ok: boolean; error?: string; latencyMs?: number }): {
+  label: string;
+  tone: string;
+} {
+  if (r.ok) {
+    return {
+      label: r.latencyMs ? `成功 · ${r.latencyMs}ms` : "成功",
+      tone: "text-emerald-400",
+    };
+  }
+  const e = r.error || "";
+  if (/cooldown|not found/i.test(e)) {
+    return { label: "未加载 / 冷却中", tone: "text-ink-500" };
+  }
+  const status = e.match(/\b(\d{3})\b/)?.[1] ?? null;
+  if (status === "429" || /rate_limit/i.test(e)) {
+    return { label: "已限流 · 5h 窗口暂满", tone: "text-amber-400" };
+  }
+  if (status === "401" || /unauthor|invalid_token|invalid_grant/i.test(e)) {
+    return { label: "认证失效 · 需重新认证", tone: "text-rose-400" };
+  }
+  // Fallback: pull a clean message out of any embedded JSON, else truncate.
+  let msg = e;
+  const brace = e.indexOf("{");
+  if (brace >= 0) {
+    try {
+      const obj = JSON.parse(e.slice(brace));
+      msg = obj?.error?.message || obj?.message || e;
+    } catch {
+      /* keep raw */
+    }
+  }
+  if (msg.length > 80) msg = msg.slice(0, 80) + "…";
+  return { label: `${status ? status + " · " : ""}${msg || "失败"}`, tone: "text-rose-400" };
+}
+
 export function Accounts() {
   const { whoami } = useAuth();
   const isAdmin = !!whoami?.admin;
@@ -91,7 +132,7 @@ export function Accounts() {
       const [resp, stats] = await Promise.all([
         listAccounts(),
         // byAccount cost for the current month → drives the budget bars.
-        fetchStats("month").catch(() => null),
+        fetchStats({ window: "month" }).catch(() => null),
       ]);
       const byProvider: Record<string, AccountSnapshot[]> = {};
       for (const [p, info] of Object.entries(resp.providers)) {
@@ -253,28 +294,35 @@ export function Accounts() {
           <div className="text-sm text-ink-300 mb-2 font-medium">
             上次 prewarm 结果
           </div>
-          <div className="space-y-1 text-sm">
-            {lastPrewarm.providers.map((p) => (
-              <div key={p.provider}>
-                <span className="text-ink-400 mr-2">[{p.provider}]</span>
-                {p.results.map((r) => (
-                  <span key={r.email} className="mr-3">
-                    {r.ok ? (
-                      <span className="text-emerald-400">✓</span>
-                    ) : (
-                      <span className="text-rose-400">✗</span>
-                    )}{" "}
-                    {r.email}
-                    {r.latencyMs && (
-                      <span className="text-ink-500"> ({r.latencyMs}ms)</span>
-                    )}
-                    {r.error && (
-                      <span className="text-rose-400"> {r.error}</span>
-                    )}
-                  </span>
-                ))}
-              </div>
-            ))}
+          <div className="space-y-1">
+            {lastPrewarm.providers.flatMap((p) => {
+              if (p.results.length === 0) {
+                return [
+                  <div
+                    key={p.provider}
+                    className="flex items-center gap-2 text-sm"
+                  >
+                    <span className="badge-muted text-xs">{p.provider}</span>
+                    <span className="text-ink-500">
+                      {p.error ? p.error : "无可 prewarm 的账号"}
+                    </span>
+                  </div>,
+                ];
+              }
+              return p.results.map((r) => {
+                const o = prewarmOutcome(r);
+                return (
+                  <div
+                    key={`${p.provider}:${r.email}`}
+                    className="flex items-center gap-2 text-sm"
+                  >
+                    <span className="badge-muted text-xs">{p.provider}</span>
+                    <span className="font-mono text-ink-300">{r.email}</span>
+                    <span className={o.tone}>· {o.label}</span>
+                  </div>
+                );
+              });
+            })}
           </div>
         </div>
       )}

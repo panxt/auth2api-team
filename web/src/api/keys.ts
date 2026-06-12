@@ -59,6 +59,7 @@ export interface ManagedKeyView {
   quota: KeyQuota | null;
   "rate-limit": KeyRateLimit | null;
   "allowed-models": string[] | null;
+  "denied-models": string[] | null;
   source: "managed" | "config";
 }
 
@@ -72,6 +73,7 @@ export interface CreateKeyResponse {
   quota: KeyQuota | null;
   "rate-limit": KeyRateLimit | null;
   "allowed-models"?: string[] | null;
+  "denied-models"?: string[] | null;
 }
 
 export interface CreateKeyInput {
@@ -82,6 +84,7 @@ export interface CreateKeyInput {
   quota?: KeyQuota;
   "rate-limit"?: KeyRateLimit;
   "allowed-models"?: string[];
+  "denied-models"?: string[];
 }
 
 export type PatchKeyInput = CreateKeyInput;

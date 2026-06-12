@@ -67,8 +67,9 @@ export interface ClientModelBucket extends BaseBucket {
 }
 
 /** Time window for a snapshot. "all" = cumulative since recorder start;
- *  "today"/"month" = rolled up from per-day facts (UTC). */
-export type StatsWindow = "today" | "month" | "all";
+ *  "today"/"month" = rolled up from per-day facts (UTC); "range" = an explicit
+ *  [from,to] date range (see getSnapshotRange). */
+export type StatsWindow = "today" | "month" | "all" | "range";
 
 export interface StatsSnapshot {
   byClient: Record<string, ClientBucket>;
@@ -181,8 +182,11 @@ interface DayFactBucket extends BaseBucket {
   lastUa: string;
 }
 
-/** Keep this many days of per-day facts in memory (covers "today" + "month"). */
-const DAY_FACT_RETENTION = 40;
+/** Keep this many days of per-day facts in memory. Covers "today" + "month"
+ *  plus custom ranges up to ~4 months back; older ranges fall back to partial
+ *  data (the time-series line chart, backed by the unbounded `daily` map,
+ *  still covers older history). */
+const DAY_FACT_RETENTION = 120;
 
 export class StatsRecorder {
   private byClient = new Map<string, ClientBucket>();
@@ -279,18 +283,32 @@ export class StatsRecorder {
         window,
       };
     }
-    return this.rollupWindow(window);
-  }
-
-  /** Roll up byClient/byApi/byClientModel/byAccount/totals from dayFacts for
-   *  the given window ("today" | "month"), using the UTC wall clock now. */
-  private rollupWindow(window: "today" | "month"): StatsSnapshot {
     const now = new Date();
     const prefix =
       window === "today"
         ? now.toISOString().slice(0, 10) // YYYY-MM-DD
         : now.toISOString().slice(0, 7); // YYYY-MM
-    const nowIso = now.toISOString();
+    return this.rollup((date) => date.startsWith(prefix), window);
+  }
+
+  /**
+   * Snapshot for an explicit UTC date range [from, to] (inclusive,
+   * YYYY-MM-DD). Rolled up from per-day facts, so it's bounded by
+   * DAY_FACT_RETENTION — ranges older than that return partial/empty data
+   * (the time-series line chart, backed by the unbounded `daily` map, still
+   * covers older history).
+   */
+  getSnapshotRange(from: string, to: string): StatsSnapshot {
+    return this.rollup((date) => date >= from && date <= to, "range");
+  }
+
+  /** Roll up byClient/byApi/byClientModel/byAccount/totals from the per-day
+   *  facts whose date matches `inWindow`. */
+  private rollup(
+    inWindow: (date: string) => boolean,
+    window: StatsWindow,
+  ): StatsSnapshot {
+    const nowIso = new Date().toISOString();
     const byClient = new Map<string, ClientBucket>();
     const byApi = new Map<string, ApiBucket>();
     const byClientModel = new Map<string, ClientModelBucket>();
@@ -298,7 +316,7 @@ export class StatsRecorder {
     const totals = emptyBucket(nowIso);
 
     for (const f of this.dayFacts.values()) {
-      if (!f.date.startsWith(prefix)) continue;
+      if (!inWindow(f.date)) continue;
       mergeBase(totals, f);
 
       let cb = byClient.get(f.apiKeyHash);
@@ -510,6 +528,17 @@ export class StatsRecorder {
     const cutoffStr = cutoff.toISOString().slice(0, 10);
     return Array.from(this.daily.values())
       .filter((b) => b.date >= cutoffStr)
+      .sort((a, b) => a.date.localeCompare(b.date));
+  }
+
+  /**
+   * Daily buckets within an explicit UTC date range [from, to] (inclusive,
+   * YYYY-MM-DD), oldest → newest. Backed by the unbounded `daily` map, so it
+   * covers history beyond the per-day-fact retention window.
+   */
+  getTimeseriesRange(from: string, to: string): DailyBucket[] {
+    return Array.from(this.daily.values())
+      .filter((b) => b.date >= from && b.date <= to)
       .sort((a, b) => a.date.localeCompare(b.date));
   }
 }

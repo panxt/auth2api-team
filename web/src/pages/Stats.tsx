@@ -17,7 +17,6 @@ import {
   fetchStats,
   fetchTimeseries,
   StatsSnapshot,
-  StatsWindow,
   DailyBucket,
 } from "../api/stats";
 import { listUsage, UsageKey } from "../api/keys";
@@ -109,14 +108,36 @@ export function Stats() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
-  // 时间窗口:默认当月,作用全页(KPI / Top 客户端 / 模型分布 / 明细)。
-  const [window, setWindow] = useState<StatsWindow>("month");
+  // 时间窗口:预设(当天/当月/全部)或自定义区间;作用全页。
+  const [mode, setMode] = useState<"today" | "month" | "all" | "custom">("month");
+  // committed custom range (drives fetches); drafts live in the inputs below.
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [draftFrom, setDraftFrom] = useState("");
+  const [draftTo, setDraftTo] = useState("");
+
+  // Translate the current selection into the stats + timeseries fetch args.
+  const ranges = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    if (mode === "today")
+      return { stats: { window: "today" as const }, ts: { from: today, to: today } };
+    if (mode === "month") {
+      const first = today.slice(0, 8) + "01";
+      return { stats: { window: "month" as const }, ts: { from: first, to: today } };
+    }
+    if (mode === "all")
+      return { stats: { window: "all" as const }, ts: { days: 365 } };
+    // custom — fall back to month until both endpoints are set
+    if (from && to)
+      return { stats: { from, to }, ts: { from, to } };
+    return { stats: { window: "month" as const }, ts: { days: 30 } };
+  }, [mode, from, to]);
 
   const load = useCallback(async () => {
     try {
       const [s, t, u, a] = await Promise.all([
-        fetchStats(window),
-        fetchTimeseries(30),
+        fetchStats(ranges.stats),
+        fetchTimeseries(ranges.ts),
         listUsage(),
         listAccounts(),
       ]);
@@ -135,7 +156,7 @@ export function Stats() {
     } finally {
       setLoading(false);
     }
-  }, [window]);
+  }, [ranges]);
 
   useEffect(() => {
     load();
@@ -318,42 +339,78 @@ export function Stats() {
 
   return (
     <div className="space-y-6">
-      <header className="flex items-center justify-between">
+      <header className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold">用量看板</h1>
           <p className="text-sm text-ink-400 mt-1">
-            {window === "today"
+            {mode === "today"
               ? "今天(UTC)。"
-              : window === "month"
+              : mode === "month"
                 ? "本月至今(UTC)。"
-                : "全量历史(自首次启动 / 最近一次清空起)。"}
+                : mode === "all"
+                  ? "全量历史(自首次启动 / 最近一次清空起)。"
+                  : from && to
+                    ? `自定义区间 ${from} ~ ${to}(UTC)。`
+                    : "选择起止日期后点应用。"}
             每 30 秒自动刷新。
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          {/* 时间窗口段控 */}
-          <div className="inline-flex rounded-md border border-ink-700 overflow-hidden text-sm">
-            {([
-              ["today", "当天"],
-              ["month", "当月"],
-              ["all", "全部"],
-            ] as const).map(([w, txt]) => (
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex items-center gap-3">
+            {/* 时间窗口段控 */}
+            <div className="inline-flex rounded-md border border-ink-700 overflow-hidden text-sm">
+              {([
+                ["today", "当天"],
+                ["month", "当月"],
+                ["all", "全部"],
+                ["custom", "自定义"],
+              ] as const).map(([w, txt]) => (
+                <button
+                  key={w}
+                  onClick={() => setMode(w)}
+                  className={`px-3 py-1.5 ${
+                    mode === w
+                      ? "bg-emerald-600 text-white"
+                      : "text-ink-300 hover:bg-ink-800"
+                  }`}
+                >
+                  {txt}
+                </button>
+              ))}
+            </div>
+            <div className="text-xs text-ink-500">
+              最近刷新:{lastRefresh.toLocaleTimeString()}
+            </div>
+          </div>
+          {mode === "custom" && (
+            <div className="flex items-center gap-2 text-sm">
+              <input
+                type="date"
+                className="input !py-1 text-sm"
+                value={draftFrom}
+                max={draftTo || undefined}
+                onChange={(e) => setDraftFrom(e.target.value)}
+              />
+              <span className="text-ink-500">~</span>
+              <input
+                type="date"
+                className="input !py-1 text-sm"
+                value={draftTo}
+                min={draftFrom || undefined}
+                onChange={(e) => setDraftTo(e.target.value)}
+              />
               <button
-                key={w}
-                onClick={() => setWindow(w)}
-                className={`px-3 py-1.5 ${
-                  window === w
-                    ? "bg-emerald-600 text-white"
-                    : "text-ink-300 hover:bg-ink-800"
-                }`}
+                className="btn-primary text-xs"
+                disabled={!draftFrom || !draftTo}
+                onClick={() => {
+                  setFrom(draftFrom);
+                  setTo(draftTo);
+                }}
               >
-                {txt}
+                应用
               </button>
-            ))}
-          </div>
-          <div className="text-xs text-ink-500">
-            最近刷新:{lastRefresh.toLocaleTimeString()}
-          </div>
+            </div>
+          )}
         </div>
       </header>
 
@@ -402,7 +459,16 @@ export function Stats() {
       {/* Line chart: daily cost stacked by provider */}
       <section className="card">
         <h2 className="text-lg font-medium mb-3">
-          近 30 天每日成本(按 provider 分组)
+          每日成本(按 provider 分组)·{" "}
+          {mode === "today"
+            ? "今天"
+            : mode === "month"
+              ? "本月"
+              : mode === "all"
+                ? "近 365 天"
+                : from && to
+                  ? `${from} ~ ${to}`
+                  : "本月"}
         </h2>
         <div className="h-72">
           {lineData ? (

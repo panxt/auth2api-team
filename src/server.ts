@@ -18,7 +18,7 @@ import {
   secondsUntilMonthResetUTC,
   secondsUntilDayResetUTC,
 } from "./usage/quota";
-import { isModelAllowed } from "./usage/model-access";
+import { isModelAllowed, hasModelRestriction } from "./usage/model-access";
 import { resolveModel } from "./upstream/translator";
 import {
   checkKeyRpm,
@@ -306,8 +306,7 @@ export function createServer(
   // Done in middleware so every inference route is covered uniformly.
   const requireModelAccess: express.RequestHandler = (req, res, next) => {
     const entry = res.locals.apiKey as ApiKeyEntry | undefined;
-    const allow = entry?.["allowed-models"];
-    if (!allow || allow.length === 0) return next();
+    if (!hasModelRestriction(entry)) return next();
     const requested = (req.body?.model as string | undefined) || "claude-sonnet-4-6";
     if (!isModelAllowed(entry, requested)) {
       res.status(403).json({
@@ -383,13 +382,26 @@ export function createServer(
   //   byClient — keyed by sha256(api-key); show short hex prefix to operator
   //   byAccount — keyed by `${provider}:${email}` (upstream OAuth account)
   //   byApi — keyed by `${endpoint}|${model}|${provider}`
+  // YYYY-MM-DD validator for the custom date-range query params.
+  const isDateStr = (v: unknown): v is string =>
+    typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+
   app.get("/admin/stats", (req, res) => {
     if (!statsRecorder) {
       res.json({ enabled: false });
       return;
     }
-    // ?window=today|month|all — default "all" preserves the pre-2.x behavior
-    // for any caller that doesn't pass the param.
+    // ?from=YYYY-MM-DD&to=YYYY-MM-DD → explicit range; else ?window=today|
+    // month|all (default "all", preserving pre-2.x behavior).
+    const { from, to } = req.query;
+    if (isDateStr(from) && isDateStr(to)) {
+      res.json({
+        ...statsRecorder.getSnapshotRange(from, to),
+        range: { from, to },
+        generated_at: new Date().toISOString(),
+      });
+      return;
+    }
     const w = req.query.window;
     const window =
       w === "today" || w === "month" || w === "all" ? w : "all";
@@ -405,6 +417,16 @@ export function createServer(
   app.get("/admin/stats/timeseries", (req, res) => {
     if (!statsRecorder) {
       res.json({ enabled: false, days: [] });
+      return;
+    }
+    // ?from=&to= → explicit range; else ?days=N (default 30, cap 365).
+    const { from, to } = req.query;
+    if (isDateStr(from) && isDateStr(to)) {
+      res.json({
+        days: statsRecorder.getTimeseriesRange(from, to),
+        window: { from, to },
+        generated_at: new Date().toISOString(),
+      });
       return;
     }
     const requested = Number(req.query.days);

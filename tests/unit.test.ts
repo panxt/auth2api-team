@@ -59,6 +59,30 @@ test("isModelAllowed: alias in the allowlist matches canonical request", () => {
   assert.equal(isModelAllowed(k, "sonnet"), false);
 });
 
+test("isModelAllowed: denylist blocks listed models (allow others)", () => {
+  const k: ApiKeyEntry = {
+    key: "k",
+    enabled: true,
+    admin: false,
+    "denied-models": ["claude-opus-4-8"],
+  };
+  assert.equal(isModelAllowed(k, "claude-opus-4-8"), false);
+  assert.equal(isModelAllowed(k, "opus"), false); // alias resolves to denied id
+  assert.equal(isModelAllowed(k, "claude-sonnet-4-6"), true); // not denied → allowed
+});
+
+test("isModelAllowed: deny takes precedence over allow", () => {
+  const k: ApiKeyEntry = {
+    key: "k",
+    enabled: true,
+    admin: false,
+    "allowed-models": ["claude-opus-4-8", "claude-sonnet-4-6"],
+    "denied-models": ["claude-opus-4-8"],
+  };
+  assert.equal(isModelAllowed(k, "claude-opus-4-8"), false); // denied wins
+  assert.equal(isModelAllowed(k, "claude-sonnet-4-6"), true); // allowed + not denied
+});
+
 // ══════════════════════════════════════════════════
 // utils/common.ts
 // ══════════════════════════════════════════════════

@@ -20,6 +20,7 @@ interface MergedRow extends UsageKey {
   source: "managed" | "config";
   managedId: string | null;   // null = config-only key (read-only)
   allowedModels: string[] | null; // model allowlist (managed keys only)
+  deniedModels: string[] | null;  // model denylist (managed keys only)
 }
 
 function fmtUSD(n: number | undefined): string {
@@ -69,6 +70,7 @@ export function Users() {
           source: m ? "managed" : "config",
           managedId: m ? m.id : null,
           allowedModels: m ? m["allowed-models"] : null,
+          deniedModels: m ? m["denied-models"] : null,
         };
       });
       setRows(merged);
@@ -233,11 +235,21 @@ export function Users() {
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      {row.allowedModels && row.allowedModels.length > 0 ? (
-                        <div className="flex flex-wrap gap-1 max-w-[14rem]">
-                          {row.allowedModels.map((m) => (
-                            <span key={m} className="badge-muted text-xs">
+                      {(row.allowedModels && row.allowedModels.length > 0) ||
+                      (row.deniedModels && row.deniedModels.length > 0) ? (
+                        <div className="flex flex-wrap gap-1 max-w-[16rem]">
+                          {row.allowedModels?.map((m) => (
+                            <span key={`a-${m}`} className="badge-ok text-xs">
                               {m}
+                            </span>
+                          ))}
+                          {row.deniedModels?.map((m) => (
+                            <span
+                              key={`d-${m}`}
+                              className="badge-err text-xs"
+                              title="黑名单 — 禁止使用"
+                            >
+                              🚫 {m}
                             </span>
                           ))}
                         </div>
@@ -363,6 +375,7 @@ function CreateKeyModal({
   const [admin, setAdmin] = useState(false);
   const [quota, setQuota] = useState<KeyQuota>({});
   const [allowedModels, setAllowedModels] = useState<string[]>([]);
+  const [deniedModels, setDeniedModels] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -372,6 +385,7 @@ function CreateKeyModal({
     setAdmin(false);
     setQuota({});
     setAllowedModels([]);
+    setDeniedModels([]);
     setErr(null);
   }
 
@@ -384,6 +398,7 @@ function CreateKeyModal({
       const cleaned = cleanQuota(quota);
       if (cleaned) input.quota = cleaned;
       if (allowedModels.length > 0) input["allowed-models"] = allowedModels;
+      if (deniedModels.length > 0) input["denied-models"] = deniedModels;
       const resp = await createKey(input);
       reset();
       onCreated(resp.key);
@@ -443,6 +458,14 @@ function CreateKeyModal({
           selected={allowedModels}
           onChange={setAllowedModels}
         />
+        <ModelAllowlistPicker
+          models={models}
+          selected={deniedModels}
+          onChange={setDeniedModels}
+          title="禁用模型(黑名单)"
+          hint="(列出的一律 403,优先级高于白名单)"
+          accent="rose"
+        />
         {err && <div className="badge-err px-3 py-2 block">{err}</div>}
         <div className="flex justify-end gap-2 pt-2">
           <button
@@ -485,6 +508,7 @@ function EditKeyModal({
   const [admin, setAdmin] = useState(false);
   const [quota, setQuota] = useState<KeyQuota>({});
   const [allowedModels, setAllowedModels] = useState<string[]>([]);
+  const [deniedModels, setDeniedModels] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -495,6 +519,7 @@ function EditKeyModal({
       setAdmin(row.admin);
       setQuota(row.quota ?? {});
       setAllowedModels(row.allowedModels ?? []);
+      setDeniedModels(row.deniedModels ?? []);
       setErr(null);
     }
   }, [row]);
@@ -512,8 +537,9 @@ function EditKeyModal({
         admin,
         // null clears the quota; cleanQuota returns null when all caps empty.
         quota: cleanQuota(quota) ?? undefined,
-        // Always send: an empty array clears the allowlist (= all allowed).
+        // Always send: an empty array clears the list.
         "allowed-models": allowedModels,
+        "denied-models": deniedModels,
       });
       onSaved();
     } catch (e) {
@@ -558,6 +584,14 @@ function EditKeyModal({
           models={models}
           selected={allowedModels}
           onChange={setAllowedModels}
+        />
+        <ModelAllowlistPicker
+          models={models}
+          selected={deniedModels}
+          onChange={setDeniedModels}
+          title="禁用模型(黑名单)"
+          hint="(列出的一律 403,优先级高于白名单)"
+          accent="rose"
         />
         {err && <div className="badge-err px-3 py-2 block">{err}</div>}
         <div className="flex justify-end gap-2 pt-2">
@@ -760,11 +794,21 @@ function ModelAllowlistPicker({
   models,
   selected,
   onChange,
+  title = "可用模型",
+  hint = "(不选 = 允许全部;选中后仅允许这些,其余 403)",
+  accent = "emerald",
 }: {
   models: string[];
   selected: string[];
   onChange: (next: string[]) => void;
+  title?: string;
+  hint?: string;
+  accent?: "emerald" | "rose";
 }) {
+  const onCls =
+    accent === "rose"
+      ? "bg-rose-600 border-rose-500 text-white"
+      : "bg-emerald-600 border-emerald-500 text-white";
   const [custom, setCustom] = useState("");
 
   const toggle = (m: string) => {
@@ -791,10 +835,7 @@ function ModelAllowlistPicker({
   return (
     <div>
       <label className="block text-sm text-ink-400 mb-1.5">
-        可用模型{" "}
-        <span className="text-ink-500">
-          (不选 = 允许全部;选中后仅允许这些,其余 403)
-        </span>
+        {title} <span className="text-ink-500">{hint}</span>
       </label>
       {chips.length === 0 ? (
         <div className="text-xs text-ink-500 mb-2">
@@ -811,9 +852,7 @@ function ModelAllowlistPicker({
                 type="button"
                 onClick={() => toggle(m)}
                 className={`text-xs px-2 py-1 rounded-md border ${
-                  on
-                    ? "bg-emerald-600 border-emerald-500 text-white"
-                    : "border-ink-700 text-ink-300 hover:bg-ink-800"
+                  on ? onCls : "border-ink-700 text-ink-300 hover:bg-ink-800"
                 }`}
                 title={isExtra ? "手动添加 / 当前未在 /v1/models 中" : undefined}
               >

@@ -117,6 +117,12 @@ export interface ApiKeyEntry {
    * Values may be aliases ("opus") or canonical ids ("claude-opus-4-8").
    */
   "allowed-models"?: string[];
+  /**
+   * Optional model denylist (blacklist). Models here are always rejected with
+   * 403, even if the allowlist would permit them — deny takes precedence.
+   * Use this for "allow everything except X". Same alias-insensitive matching.
+   */
+  "denied-models"?: string[];
 }
 
 /** Raw object form of an api-key entry as parsed from YAML (before defaults). */
@@ -129,6 +135,7 @@ interface RawApiKeyEntry {
   quota?: ApiKeyQuota;
   "rate-limit"?: ApiKeyRateLimit;
   "allowed-models"?: string[];
+  "denied-models"?: string[];
 }
 
 export type DebugMode = "off" | "errors" | "verbose";
@@ -180,6 +187,7 @@ export function normalizeApiKeys(
         quota: item.quota,
         "rate-limit": item["rate-limit"],
         "allowed-models": item["allowed-models"],
+        "denied-models": item["denied-models"],
       });
     } else {
       // Don't silently lose a misconfigured entry — a dropped key would just

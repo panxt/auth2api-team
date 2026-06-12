@@ -52,8 +52,17 @@ export interface StatsSnapshot {
   generated_at: string;
 }
 
-export const fetchStats = (window: StatsWindow = "month") =>
-  get<StatsSnapshot>(`/admin/stats?window=${window}`);
+/** Either a preset window or an explicit UTC date range. */
+export type StatsRange = { window: StatsWindow } | { from: string; to: string };
+
+function rangeQuery(r: StatsRange): string {
+  return "from" in r
+    ? `from=${r.from}&to=${r.to}`
+    : `window=${r.window}`;
+}
+
+export const fetchStats = (range: StatsRange = { window: "month" }) =>
+  get<StatsSnapshot>(`/admin/stats?${rangeQuery(range)}`);
 
 /* ── /admin/stats/timeseries ────────────────────────────────────────── */
 
@@ -70,9 +79,16 @@ export interface DailyBucket {
 
 export interface TimeseriesResp {
   days: DailyBucket[];
-  window: { days: number };
+  window: { days: number } | { from: string; to: string };
   generated_at: string;
 }
 
-export const fetchTimeseries = (days = 30) =>
-  get<TimeseriesResp>(`/admin/stats/timeseries?days=${days}`);
+/** Fetch the daily time-series either by trailing N days or an explicit range. */
+export const fetchTimeseries = (
+  opts: { days: number } | { from: string; to: string } = { days: 30 },
+) =>
+  get<TimeseriesResp>(
+    "days" in opts
+      ? `/admin/stats/timeseries?days=${opts.days}`
+      : `/admin/stats/timeseries?from=${opts.from}&to=${opts.to}`,
+  );
