@@ -505,8 +505,9 @@ export function Stats() {
           </thead>
           <tbody className="divide-y divide-ink-800">
             {topClients.map((c, i) => {
-              const top = topClients[0]?.cost || 1;
-              const pct = (c.cost / top) * 100;
+              // 占比 = 该客户端成本 / 全部客户端总成本(本窗口)
+              const totalCost = stats.totals.totalCostUsd || 1;
+              const share = (c.cost / totalCost) * 100;
               return (
                 <tr key={c.short} className="hover:bg-ink-900/50">
                   <td className="px-4 py-2 text-ink-500">{i + 1}</td>
@@ -518,11 +519,16 @@ export function Stats() {
                   <td className="px-4 py-2 text-right text-blue-300">{fmtTokens(c.tokens)}</td>
                   <td className="px-4 py-2 text-right text-ink-400">{fmtInt(c.requests)}</td>
                   <td className="px-4 py-2">
-                    <div className="h-2 bg-ink-800 rounded-full overflow-hidden w-32">
-                      <div
-                        className="h-full bg-emerald-500"
-                        style={{ width: `${Math.min(100, pct)}%` }}
-                      />
+                    <div className="flex items-center gap-2">
+                      <div className="h-2 bg-ink-800 rounded-full overflow-hidden w-24 shrink-0">
+                        <div
+                          className="h-full bg-emerald-500"
+                          style={{ width: `${Math.min(100, share)}%` }}
+                        />
+                      </div>
+                      <span className="text-xs text-ink-400 tabular-nums w-12 text-right">
+                        {share.toFixed(1)}%
+                      </span>
                     </div>
                   </td>
                 </tr>

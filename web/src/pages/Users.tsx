@@ -765,6 +765,8 @@ function ModelAllowlistPicker({
   selected: string[];
   onChange: (next: string[]) => void;
 }) {
+  const [custom, setCustom] = useState("");
+
   const toggle = (m: string) => {
     onChange(
       selected.includes(m)
@@ -772,6 +774,20 @@ function ModelAllowlistPicker({
         : [...selected, m],
     );
   };
+
+  const addCustom = () => {
+    const m = custom.trim();
+    if (!m) return;
+    if (!selected.includes(m)) onChange([...selected, m]);
+    setCustom("");
+  };
+
+  // Show /v1/models options plus any already-selected entries that aren't in
+  // that list (e.g. models from a provider not yet authed, or manual ones).
+  const known = new Set(models);
+  const extras = selected.filter((m) => !known.has(m));
+  const chips = [...models, ...extras];
+
   return (
     <div>
       <label className="block text-sm text-ink-400 mb-1.5">
@@ -780,12 +796,15 @@ function ModelAllowlistPicker({
           (不选 = 允许全部;选中后仅允许这些,其余 403)
         </span>
       </label>
-      {models.length === 0 ? (
-        <div className="text-xs text-ink-500">模型列表加载中或不可用</div>
+      {chips.length === 0 ? (
+        <div className="text-xs text-ink-500 mb-2">
+          模型列表加载中 — 也可在下方手动输入
+        </div>
       ) : (
         <div className="flex flex-wrap gap-2 max-h-40 overflow-y-auto p-2 bg-ink-900 rounded-md">
-          {models.map((m) => {
+          {chips.map((m) => {
             const on = selected.includes(m);
+            const isExtra = !known.has(m);
             return (
               <button
                 key={m}
@@ -796,14 +815,41 @@ function ModelAllowlistPicker({
                     ? "bg-emerald-600 border-emerald-500 text-white"
                     : "border-ink-700 text-ink-300 hover:bg-ink-800"
                 }`}
+                title={isExtra ? "手动添加 / 当前未在 /v1/models 中" : undefined}
               >
                 {on ? "✓ " : ""}
                 {m}
+                {isExtra && <span className="ml-1 opacity-60">·手动</span>}
               </button>
             );
           })}
         </div>
       )}
+
+      {/* 手动输入(provider 尚未认证、或想预设别的模型时用) */}
+      <div className="flex gap-2 mt-2">
+        <input
+          className="input !py-1 text-sm flex-1"
+          placeholder="手动输入模型名,如 gpt-5.5 / claude-opus-4-8"
+          value={custom}
+          onChange={(e) => setCustom(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              addCustom();
+            }
+          }}
+        />
+        <button
+          type="button"
+          className="btn-secondary text-xs whitespace-nowrap"
+          onClick={addCustom}
+          disabled={!custom.trim()}
+        >
+          添加
+        </button>
+      </div>
+
       {selected.length > 0 && (
         <div className="text-xs text-ink-500 mt-1">
           已选 {selected.length} 个
