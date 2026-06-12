@@ -89,6 +89,43 @@ test("QuotaTracker: unknown key returns zero", () => {
   assert.deepEqual(q.consumed("nope"), { tokens: 0, costUsd: 0 });
 });
 
+test("QuotaTracker: tracks day window alongside month (today's events count for both)", () => {
+  const q = new QuotaTracker();
+  q.record(event({ apiKeyHash: "k1", usage: usage(1000, 0, 0, 0) }));
+  // a "now" event counts for both windows
+  assert.equal(q.consumed("k1", { window: "month" }).tokens, 1000);
+  assert.equal(q.consumed("k1", { window: "day" }).tokens, 1000);
+});
+
+test("QuotaTracker: earlier-this-month event counts for month but not today", () => {
+  const q = new QuotaTracker();
+  const now = new Date();
+  // pick a day earlier in the same UTC month; if today is the 1st, this is
+  // still day 1 → both windows, so guard for that edge.
+  const isFirst = now.getUTCDate() === 1;
+  const earlier = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 30),
+  ).toISOString();
+  q.record(event({ apiKeyHash: "k1", ts: earlier, usage: usage(700, 0, 0, 0) }));
+  assert.equal(q.consumed("k1", { window: "month" }).tokens, 700);
+  assert.equal(q.consumed("k1", { window: "day" }).tokens, isFirst ? 700 : 0);
+});
+
+test("QuotaTracker: per-(key,model) buckets split by model", () => {
+  const q = new QuotaTracker();
+  q.record(event({ apiKeyHash: "k1", model: "claude-opus-4-8", usage: usage(100, 0, 0, 0) }));
+  q.record(event({ apiKeyHash: "k1", model: "claude-sonnet-4-6", usage: usage(40, 0, 0, 0) }));
+  q.record(event({ apiKeyHash: "k1", model: "claude-sonnet-4-6", usage: usage(60, 0, 0, 0) }));
+  // overall = sum of both models
+  assert.equal(q.consumed("k1", { window: "month" }).tokens, 200);
+  // per-model isolates
+  assert.equal(q.consumed("k1", { window: "month", model: "claude-opus-4-8" }).tokens, 100);
+  assert.equal(q.consumed("k1", { window: "month", model: "claude-sonnet-4-6" }).tokens, 100);
+  assert.equal(q.consumed("k1", { window: "day", model: "claude-opus-4-8" }).tokens, 100);
+  // unknown model bucket → zero
+  assert.equal(q.consumed("k1", { window: "month", model: "gpt-5.5" }).tokens, 0);
+});
+
 test("QuotaTracker: start() replays current-month events from stats.jsonl", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-quota-"));
   const file = path.join(dir, "stats.jsonl");

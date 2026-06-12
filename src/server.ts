@@ -13,7 +13,11 @@ import {
   createCountTokensHandler,
 } from "./handlers/anthropic";
 import { StatsRecorder } from "./stats/recorder";
-import { QuotaTracker, secondsUntilMonthResetUTC } from "./usage/quota";
+import {
+  QuotaTracker,
+  secondsUntilMonthResetUTC,
+  secondsUntilDayResetUTC,
+} from "./usage/quota";
 import { isModelAllowed } from "./usage/model-access";
 import { resolveModel } from "./upstream/translator";
 import {
@@ -228,33 +232,70 @@ export function createServer(
     next();
   };
 
-  // Reject requests once the key's month-to-date consumption reaches its quota.
-  // No quota configured, or no tracker, → pass through. 429 + Retry-After
-  // (until the UTC month boundary) signals a temporary, time-bounded block.
+  // Reject requests once the key reaches any applicable quota cap. Four
+  // dimensions are checked: key-total and per-model, each on the month and day
+  // windows. No quota configured, or no tracker, → pass through. 429 +
+  // Retry-After (until the UTC month/day boundary) signals a time-bounded block.
   const requireQuota: express.RequestHandler = (req, res, next) => {
     const entry = res.locals.apiKey as ApiKeyEntry | undefined;
     if (!entry?.quota || !quotaTracker) return next();
-    const consumed = quotaTracker.consumed(hashApiKey(entry.key));
+    const tracker = quotaTracker;
+    const keyHash = hashApiKey(entry.key);
     const q = entry.quota;
-    const tokenCap = q["monthly-tokens"];
-    const costCap = q["monthly-cost-usd"];
-    if (tokenCap != null && consumed.tokens >= tokenCap) {
-      res.setHeader("Retry-After", String(secondsUntilMonthResetUTC()));
-      res
-        .status(429)
-        .json({
-          error: { message: "Monthly token quota exceeded", type: "quota_exceeded" },
-        });
-      return;
+
+    // Resolve the requested model the same way the handlers do, so per-model
+    // caps and the per-(key,model) consumption buckets line up.
+    const requestedModel = resolveModel(
+      (req.body?.model as string | undefined) || "claude-sonnet-4-6",
+    );
+
+    // Match a per-model cap entry by resolving its key too (so a cap keyed by
+    // "opus" applies to a request for "claude-opus-4-8").
+    let modelCaps: typeof q | undefined;
+    if (q["per-model"]) {
+      for (const [m, caps] of Object.entries(q["per-model"])) {
+        if (resolveModel(m) === requestedModel) {
+          modelCaps = caps;
+          break;
+        }
+      }
     }
-    if (costCap != null && consumed.costUsd >= costCap) {
-      res.setHeader("Retry-After", String(secondsUntilMonthResetUTC()));
-      res
-        .status(429)
-        .json({
-          error: { message: "Monthly cost budget exceeded", type: "quota_exceeded" },
-        });
-      return;
+
+    type Check = {
+      cap: number | undefined;
+      used: number;
+      window: "month" | "day";
+      msg: string;
+    };
+    const keyMonth = tracker.consumed(keyHash, { window: "month" });
+    const keyDay = tracker.consumed(keyHash, { window: "day" });
+    const mdlMonth = tracker.consumed(keyHash, { window: "month", model: requestedModel });
+    const mdlDay = tracker.consumed(keyHash, { window: "day", model: requestedModel });
+
+    const checks: Check[] = [
+      { cap: q["monthly-tokens"], used: keyMonth.tokens, window: "month", msg: "Monthly token quota exceeded" },
+      { cap: q["monthly-cost-usd"], used: keyMonth.costUsd, window: "month", msg: "Monthly cost budget exceeded" },
+      { cap: q["daily-tokens"], used: keyDay.tokens, window: "day", msg: "Daily token quota exceeded" },
+      { cap: q["daily-cost-usd"], used: keyDay.costUsd, window: "day", msg: "Daily cost budget exceeded" },
+    ];
+    if (modelCaps) {
+      checks.push(
+        { cap: modelCaps["monthly-tokens"], used: mdlMonth.tokens, window: "month", msg: `Monthly token quota exceeded for model ${requestedModel}` },
+        { cap: modelCaps["monthly-cost-usd"], used: mdlMonth.costUsd, window: "month", msg: `Monthly cost budget exceeded for model ${requestedModel}` },
+        { cap: modelCaps["daily-tokens"], used: mdlDay.tokens, window: "day", msg: `Daily token quota exceeded for model ${requestedModel}` },
+        { cap: modelCaps["daily-cost-usd"], used: mdlDay.costUsd, window: "day", msg: `Daily cost budget exceeded for model ${requestedModel}` },
+      );
+    }
+
+    for (const c of checks) {
+      if (c.cap != null && c.used >= c.cap) {
+        res.setHeader(
+          "Retry-After",
+          String(c.window === "day" ? secondsUntilDayResetUTC() : secondsUntilMonthResetUTC()),
+        );
+        res.status(429).json({ error: { message: c.msg, type: "quota_exceeded" } });
+        return;
+      }
     }
     next();
   };

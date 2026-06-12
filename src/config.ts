@@ -62,12 +62,27 @@ export interface StorageConfig {
   "sqlite-path"?: string;
 }
 
-/** Monthly budget for a single API key. Either limit (or both) may be set. */
-export interface ApiKeyQuota {
-  /** Reject once this many total tokens (input+output+cache) are used this calendar month. */
+/** Token + cost caps on one window. Any subset of fields may be set. */
+export interface ApiKeyModelQuota {
+  /** Reject once this many total tokens (input+output+cache) are used this UTC month. */
   "monthly-tokens"?: number;
-  /** Reject once this much accrued cost (USD) is reached this calendar month. */
+  /** Reject once this much accrued cost (USD) is reached this UTC month. */
   "monthly-cost-usd"?: number;
+  /** Reject once this many total tokens are used today (UTC). */
+  "daily-tokens"?: number;
+  /** Reject once this much accrued cost (USD) is reached today (UTC). */
+  "daily-cost-usd"?: number;
+}
+
+/**
+ * Usage budget for a single API key. The top-level fields cap the key's TOTAL
+ * usage; `per-model` caps usage of a specific model (keyed by alias or
+ * canonical id — resolved before comparison). Any subset may be set; a request
+ * is rejected (429) the moment any applicable cap is reached.
+ */
+export interface ApiKeyQuota extends ApiKeyModelQuota {
+  /** Per-model caps, keyed by model id/alias (e.g. "claude-opus-4-8" / "opus"). */
+  "per-model"?: Record<string, ApiKeyModelQuota>;
 }
 
 /** Per-key rate limiting, layered on top of the global per-IP limiter. */

@@ -2,9 +2,15 @@ import { get, post, patch, del } from "./client";
 
 /* ── Shapes from /admin/usage/keys ─────────────────────────────────────── */
 
-export interface KeyQuota {
+export interface KeyModelQuota {
   "monthly-tokens"?: number;
   "monthly-cost-usd"?: number;
+  "daily-tokens"?: number;
+  "daily-cost-usd"?: number;
+}
+
+export interface KeyQuota extends KeyModelQuota {
+  "per-model"?: Record<string, KeyModelQuota>;
 }
 
 export interface KeyRateLimit {

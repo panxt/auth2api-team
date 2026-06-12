@@ -127,6 +127,88 @@ test("requireQuota: over-quota key is rejected with 429 quota_exceeded", async (
   }
 });
 
+test("requireQuota: per-model daily cap rejects only the capped model", async () => {
+  _resetForTest();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-q-"));
+  const key = "sk-permodel";
+  const entry: ApiKeyEntry = {
+    key,
+    enabled: true,
+    admin: false,
+    quota: {
+      "per-model": {
+        "claude-opus-4-8": { "daily-tokens": 1000 },
+      },
+    },
+  };
+  const quota = new QuotaTracker();
+  // 1500 opus tokens today → over the opus daily cap; sonnet untouched.
+  quota.record({ ...usageEvent(hashApiKey(key), 1500), model: "claude-opus-4-8" });
+
+  const app = createServer(makeConfig(tmp, [entry]), {} as any, undefined, quota);
+  const server = app.listen(0);
+  try {
+    const port = (server.address() as any).port;
+    // opus → blocked
+    const opus = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "claude-opus-4-8", messages: [{ role: "user", content: "hi" }] }),
+    });
+    assert.equal(opus.status, 429);
+    const obody = await opus.json();
+    assert.equal(obody.error.type, "quota_exceeded");
+    assert.match(obody.error.message, /claude-opus-4-8/);
+
+    // sonnet → not blocked by the opus cap (400 = passed quota, missing messages handled later)
+    const sonnet = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6" }),
+    });
+    assert.equal(sonnet.status, 400);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("requireModelAccess: model not on allowlist → 403 model_not_allowed", async () => {
+  _resetForTest();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-q-"));
+  const key = "sk-allow";
+  const entry: ApiKeyEntry = {
+    key,
+    enabled: true,
+    admin: false,
+    "allowed-models": ["claude-sonnet-4-6"],
+  };
+  const app = createServer(makeConfig(tmp, [entry]), {} as any);
+  const server = app.listen(0);
+  try {
+    const port = (server.address() as any).port;
+    const opus = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "claude-opus-4-8", messages: [{ role: "user", content: "hi" }] }),
+    });
+    assert.equal(opus.status, 403);
+    const body = await opus.json();
+    assert.equal(body.error.type, "model_not_allowed");
+
+    // allowed model passes the gate (400 for missing messages, not 403)
+    const sonnet = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-6" }),
+    });
+    assert.equal(sonnet.status, 400);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("requireQuota: under-quota key passes through to the handler", async () => {
   _resetForTest();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-q-"));

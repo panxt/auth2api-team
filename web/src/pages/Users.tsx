@@ -9,6 +9,8 @@ import {
   UsageKey,
   ManagedKeyView,
   CreateKeyInput,
+  KeyQuota,
+  KeyModelQuota,
 } from "../api/keys";
 import { ApiError } from "../api/client";
 import { Modal } from "../components/Modal";
@@ -359,7 +361,7 @@ function CreateKeyModal({
   const [label, setLabel] = useState("");
   const [owner, setOwner] = useState("");
   const [admin, setAdmin] = useState(false);
-  const [quotaUsd, setQuotaUsd] = useState("");
+  const [quota, setQuota] = useState<KeyQuota>({});
   const [allowedModels, setAllowedModels] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -368,7 +370,7 @@ function CreateKeyModal({
     setLabel("");
     setOwner("");
     setAdmin(false);
-    setQuotaUsd("");
+    setQuota({});
     setAllowedModels([]);
     setErr(null);
   }
@@ -379,10 +381,8 @@ function CreateKeyModal({
     try {
       const input: CreateKeyInput = { label, admin, enabled: true };
       if (owner) input.owner = owner;
-      const usd = parseFloat(quotaUsd);
-      if (!isNaN(usd) && usd > 0) {
-        input.quota = { "monthly-cost-usd": usd };
-      }
+      const cleaned = cleanQuota(quota);
+      if (cleaned) input.quota = cleaned;
       if (allowedModels.length > 0) input["allowed-models"] = allowedModels;
       const resp = await createKey(input);
       reset();
@@ -437,20 +437,7 @@ function CreateKeyModal({
             Admin key(可调 /admin/* 全部接口)
           </label>
         </div>
-        <div>
-          <label className="block text-sm text-ink-400 mb-1.5">
-            月度配额(USD)<span className="text-ink-500">(可选)</span>
-          </label>
-          <input
-            className="input"
-            type="number"
-            min="0"
-            step="1"
-            placeholder="50"
-            value={quotaUsd}
-            onChange={(e) => setQuotaUsd(e.target.value)}
-          />
-        </div>
+        <QuotaEditor value={quota} onChange={setQuota} models={models} />
         <ModelAllowlistPicker
           models={models}
           selected={allowedModels}
@@ -496,7 +483,7 @@ function EditKeyModal({
   const [label, setLabel] = useState("");
   const [owner, setOwner] = useState("");
   const [admin, setAdmin] = useState(false);
-  const [quotaUsd, setQuotaUsd] = useState("");
+  const [quota, setQuota] = useState<KeyQuota>({});
   const [allowedModels, setAllowedModels] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -506,8 +493,7 @@ function EditKeyModal({
       setLabel(row.label || "");
       setOwner(row.owner || "");
       setAdmin(row.admin);
-      const q = row.quota?.["monthly-cost-usd"];
-      setQuotaUsd(q != null ? String(q) : "");
+      setQuota(row.quota ?? {});
       setAllowedModels(row.allowedModels ?? []);
       setErr(null);
     }
@@ -520,14 +506,12 @@ function EditKeyModal({
     setSubmitting(true);
     setErr(null);
     try {
-      const usd = parseFloat(quotaUsd);
-      const quota =
-        !isNaN(usd) && usd > 0 ? { "monthly-cost-usd": usd } : undefined;
       await updateKey(row.managedId, {
         label,
         owner: owner || undefined,
         admin,
-        quota,
+        // null clears the quota; cleanQuota returns null when all caps empty.
+        quota: cleanQuota(quota) ?? undefined,
         // Always send: an empty array clears the allowlist (= all allowed).
         "allowed-models": allowedModels,
       });
@@ -569,19 +553,7 @@ function EditKeyModal({
             Admin key
           </label>
         </div>
-        <div>
-          <label className="block text-sm text-ink-400 mb-1.5">
-            月度配额(USD,留空 = 无限)
-          </label>
-          <input
-            className="input"
-            type="number"
-            min="0"
-            step="1"
-            value={quotaUsd}
-            onChange={(e) => setQuotaUsd(e.target.value)}
-          />
-        </div>
+        <QuotaEditor value={quota} onChange={setQuota} models={models} />
         <ModelAllowlistPicker
           models={models}
           selected={allowedModels}
@@ -602,6 +574,183 @@ function EditKeyModal({
         </div>
       </div>
     </Modal>
+  );
+}
+
+/* ─── Quota editor (key-total + per-model, month + day) ──────── */
+
+const CAP_FIELDS: Array<{ key: keyof KeyModelQuota; label: string; unit: string }> = [
+  { key: "monthly-cost-usd", label: "月成本", unit: "$" },
+  { key: "monthly-tokens", label: "月 Token", unit: "tok" },
+  { key: "daily-cost-usd", label: "日成本", unit: "$" },
+  { key: "daily-tokens", label: "日 Token", unit: "tok" },
+];
+
+/** Strip empty caps; return null when the whole quota is empty so the caller
+ *  can omit it (or clear it on update). */
+function cleanQuota(q: KeyQuota): KeyQuota | null {
+  const out: KeyQuota = {};
+  for (const f of CAP_FIELDS) {
+    const v = q[f.key];
+    if (typeof v === "number" && v > 0) out[f.key] = v;
+  }
+  if (q["per-model"]) {
+    const pm: Record<string, KeyModelQuota> = {};
+    for (const [model, caps] of Object.entries(q["per-model"])) {
+      const c: KeyModelQuota = {};
+      for (const f of CAP_FIELDS) {
+        const v = caps[f.key];
+        if (typeof v === "number" && v > 0) c[f.key] = v;
+      }
+      if (Object.keys(c).length > 0) pm[model] = c;
+    }
+    if (Object.keys(pm).length > 0) out["per-model"] = pm;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function CapRow({
+  caps,
+  onChange,
+}: {
+  caps: KeyModelQuota;
+  onChange: (next: KeyModelQuota) => void;
+}) {
+  return (
+    <div className="grid grid-cols-4 gap-2">
+      {CAP_FIELDS.map((f) => (
+        <div key={f.key}>
+          <label className="block text-[11px] text-ink-500 mb-0.5">
+            {f.label}
+          </label>
+          <input
+            className="input !py-1 text-sm"
+            type="number"
+            min="0"
+            step={f.unit === "$" ? "1" : "1000"}
+            placeholder="∞"
+            value={caps[f.key] ?? ""}
+            onChange={(e) => {
+              const v = e.target.value === "" ? undefined : Number(e.target.value);
+              onChange({ ...caps, [f.key]: v });
+            }}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function QuotaEditor({
+  value,
+  onChange,
+  models,
+}: {
+  value: KeyQuota;
+  onChange: (next: KeyQuota) => void;
+  models: string[];
+}) {
+  const perModel = value["per-model"] ?? {};
+  const perModelKeys = Object.keys(perModel);
+
+  const setKeyTotal = (caps: KeyModelQuota) => {
+    onChange({ ...caps, "per-model": value["per-model"] });
+  };
+  const setModelCaps = (model: string, caps: KeyModelQuota) => {
+    onChange({ ...value, "per-model": { ...perModel, [model]: caps } });
+  };
+  const addModelRow = () => {
+    // pick first model not already configured
+    const candidate = models.find((m) => !(m in perModel)) ?? models[0] ?? "";
+    if (!candidate) return;
+    onChange({ ...value, "per-model": { ...perModel, [candidate]: {} } });
+  };
+  const removeModelRow = (model: string) => {
+    const next = { ...perModel };
+    delete next[model];
+    onChange({ ...value, "per-model": next });
+  };
+  const renameModelRow = (oldModel: string, newModel: string) => {
+    if (oldModel === newModel) return;
+    const next: Record<string, KeyModelQuota> = {};
+    for (const [k, v] of Object.entries(perModel)) {
+      next[k === oldModel ? newModel : k] = v;
+    }
+    onChange({ ...value, "per-model": next });
+  };
+
+  // key-total caps = value minus per-model
+  const keyTotal: KeyModelQuota = {
+    "monthly-cost-usd": value["monthly-cost-usd"],
+    "monthly-tokens": value["monthly-tokens"],
+    "daily-cost-usd": value["daily-cost-usd"],
+    "daily-tokens": value["daily-tokens"],
+  };
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <label className="block text-sm text-ink-400 mb-1.5">
+          额度 · 总额{" "}
+          <span className="text-ink-500">(留空 = 不限;到额返回 429)</span>
+        </label>
+        <CapRow caps={keyTotal} onChange={setKeyTotal} />
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <label className="text-sm text-ink-400">
+            额度 · 按模型{" "}
+            <span className="text-ink-500">(对单个模型单独限额)</span>
+          </label>
+          <button
+            type="button"
+            className="btn-ghost text-xs"
+            onClick={addModelRow}
+            disabled={models.length === 0}
+          >
+            + 添加模型
+          </button>
+        </div>
+        {perModelKeys.length === 0 ? (
+          <div className="text-xs text-ink-500">未配置按模型额度</div>
+        ) : (
+          <div className="space-y-2">
+            {perModelKeys.map((model) => (
+              <div key={model} className="bg-ink-900 rounded-md p-2 space-y-2">
+                <div className="flex items-center gap-2">
+                  <select
+                    className="input !py-1 text-sm flex-1"
+                    value={model}
+                    onChange={(e) => renameModelRow(model, e.target.value)}
+                  >
+                    {models.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                    {!models.includes(model) && (
+                      <option value={model}>{model}</option>
+                    )}
+                  </select>
+                  <button
+                    type="button"
+                    className="btn-ghost text-xs text-rose-400"
+                    onClick={() => removeModelRow(model)}
+                  >
+                    移除
+                  </button>
+                </div>
+                <CapRow
+                  caps={perModel[model]}
+                  onChange={(c) => setModelCaps(model, c)}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
