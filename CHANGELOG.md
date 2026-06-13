@@ -3,6 +3,47 @@
 本文档记录 `<your-user>/auth2api-team`(fork)在上游 `AmazingAng/auth2api` 基础上的改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.1.0] — 2026-06-13
+
+在 v2.0.0 的看板基础上补齐**用量分析、精细化限额、按模型管控、请求日志**,并修复影响 Claude 桌面 App 的 cache_control 报错。基线 = v2.0.0(`2208adf`),含 10 个 commit。**完全向后兼容,无 schema 迁移,旧 Key 无需改动。**
+
+### Added(新增)
+
+- **统计时间窗 + 自定义区间**(`src/stats/recorder.ts`)— Stats 页顶部 `当天 / 当月 / 全部 / 自定义日期区间` 段控,联动整页(KPI / Top 客户端 / 模型分布 / 明细)。recorder 新增 `dayFacts` 细粒度每日事实表(保留 120 天)+ `getSnapshot(window)` / `getSnapshotRange(from,to)`;`/admin/stats` 与 `/admin/stats/timeseries` 支持 `?window=` 或 `?from=&to=`。
+- **per-user × per-model 用量明细** — 新增 `byClientModel`(client × model 交叉维度),前端出"每人·各模型 成本/Token"表;Top 客户端表改为成本 + Token + 请求数 + 占比%。
+- **per-key 模型白名单 / 黑名单**(`src/usage/model-access.ts`)— `ApiKeyEntry` 新增 `allowed-models` / `denied-models`(deny 优先于 allow)。`requireModelAccess` 中间件在打到上游前对不允许的模型返回 `403 model_not_allowed`;别名与规范 id 经 `resolveModel` 归一比较。
+- **per-key / per-model · 日 + 月 限额**(`src/usage/quota.ts`)— `ApiKeyQuota` 扩展 `daily-tokens` / `daily-cost-usd` 及 `per-model` 子表。QuotaTracker 升级为 `{月,日} × {key 总,per-(key,model)}` 四类桶;`requireQuota` 按"key 月→key 日→模型月→模型日"顺序校验,命中返回 429 + 对应月/日边界的 `Retry-After`。
+- **上游账号自助管理**(`src/accounts/manager.ts`)— UI 内停用 / 删除 / 重新认证账号(`PATCH`/`DELETE /admin/accounts/:provider/:email`,`setDisabled` / `removeAccount` / `setBudget`);每账号可标 `monthlyBudgetUsd` + `tierLabel`($25/$125),账号页画本月利用率进度条。
+- **请求日志**(`src/logging/logger.ts` + `src/storage`)— 独立于 stats/quota 的 `RequestLogStore`(sqlite 索引表 / file 滚动 JSONL),记录每请求结果与失败原因。`GET /admin/logs`(过滤:状态/账号/模型/端点/时间区间/关键字 + 游标分页,key 脱敏为 12 位前缀)。`/ui/logs` 页(仅 admin)+ 可视化设置卡:记录范围(全部/仅失败)、错误详情(全文/片段/不记)、脱敏、request_id、保留(天数/行数/清理间隔)。配置三层合并(默认 < config.yaml < SettingsStore 持久化),UI 改完热生效;定时按保留策略清理。
+- **`PUT` HTTP helper** + 前端 `/ui` 日志页、账号预算、自定义区间等对应 UI。
+
+### Fixed(修复)
+
+- **Claude 桌面 App `cache_control` 400**(`src/upstream/cloaking.ts`)— Anthropic 要求 `ttl='1h'` 断点不能排在 `ttl='5m'` 之后(顺序 tools→system→messages)。`fixCacheControlOrder` 收集 tools/system/messages 上所有 `cache_control` 并按 TTL 降序重排(保留断点位置,仅交换 TTL 归属),在 cloaking 末尾执行(含注入的 CLI prefix 块),消除该 400。
+- **模型限制重启丢失**(Codex 复核 P1,`src/storage/types.ts`)— `normalizeKeyEntry`(file + sqlite 两后端的磁盘加载路径)漏带 `allowed-models` / `denied-models`,重启后限制被静默清除。已补字段 + 回归测试(重开 SqliteStorage 后仍在)。
+- **配额无法清空**(Codex 复核 P2,`src/keys/store.ts`)— 编辑弹窗删光配额后 `?? undefined` 把字段从 PATCH 漏掉,旧配额仍生效。现以 `null` 显式清除,`update()` 把 null 当"清除"。
+- 上游 prewarm 结果不再吐原始 429 JSON,改为「成功·Nms / 已限流 / 认证失效 / 未加载冷却」可读状态。
+
+### Changed(行为变化)
+
+- `AccountSnapshot` 增 `disabled` / `monthlyBudgetUsd` / `tierLabel`;`StatsSnapshot` 增 `byClientModel` / `window`,`/admin/stats` 默认 `window=all`(兼容旧行为)。
+- 非 admin 在 Users/Accounts 页为只读(隐藏管理按钮),被绕过的写操作后端返回 403;查看类分析对任意有效 key 开放。
+
+### Internal(开发/工程)
+
+- 两轮独立代码复核:Claude `/code-review` + OpenAI Codex CLI `codex review`,合计修复 15+ 项。
+- 新增存储抽象:`RequestLogStore` + `SettingsStore`(file + sqlite 双后端);新模块 `src/logging/logger.ts`、`src/usage/model-access.ts`。
+- 测试从 246 扩到 **264**,全绿(新增窗口 rollup、per-model/日配额、模型 allow/deny、请求日志查询/分页/清理、脱敏、配置持久化、键重启往返等用例)。
+
+### 升级注意
+
+- v2.0.0 → v2.1.0 **无 schema 迁移**;请求日志独立存储,其保留策略不影响配额重放。
+- 首次启动需 build 前端(`cd web && npm run build`),生产 tarball 已含 `web/dist/`。
+- 想用模型白/黑名单或 per-model/日限额:在 `/ui/users` 编辑对应 Key 即可,或在 config.yaml 的 `quota` / `allowed-models` / `denied-models` 配置。
+- 想开请求日志面板:默认已开(`capture: failures`),在 `/ui/logs` 设置卡按需调整。
+
+---
+
 ## [2.0.0] — 2026-06-09
 
 第二个 major,主线把 v1.0.0 的命令行管理向 **Web Dashboard + 流稳定性** 推进。基线 = v1.0.0(`e6225c5`),含 19 个 commit。
