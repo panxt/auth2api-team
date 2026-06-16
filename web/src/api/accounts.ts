@@ -36,6 +36,19 @@ export interface AccountSnapshot {
   disabled: boolean;
   monthlyBudgetUsd: number | null;
   tierLabel: string | null;
+  concurrencyWeight: number;
+  inFlight: number;
+  peakInFlight: number;
+}
+
+export interface CapacitySummary {
+  total: number;
+  usable: number;
+  soonestResetAt: string | null;
+  maxUtil5h: number | null;
+  inFlight: number;
+  saturationRejects: number;
+  level: "ok" | "info" | "warn" | "critical";
 }
 
 export interface AccountsResp {
@@ -44,6 +57,7 @@ export interface AccountsResp {
     {
       accounts: AccountSnapshot[];
       account_count: number;
+      capacity: CapacitySummary;
     }
   >;
   generated_at: string;
@@ -95,7 +109,11 @@ export const setAccountDisabled = (
 export const setAccountBudget = (
   provider: string,
   email: string,
-  body: { monthlyBudgetUsd?: number | null; tierLabel?: string | null },
+  body: {
+    monthlyBudgetUsd?: number | null;
+    tierLabel?: string | null;
+    concurrencyWeight?: number | null;
+  },
 ) =>
   patch<{ ok: true; provider: string; email: string }>(
     `/admin/accounts/${provider}/${encodeURIComponent(email)}`,

@@ -1,5 +1,7 @@
 import { get, put } from "./client";
 
+export type LogCategory = "upstream" | "service" | "policy" | "client" | "ok";
+
 export interface LogRow {
   id: number;
   ts: string;
@@ -12,6 +14,7 @@ export interface LogRow {
   status: "success" | "failure";
   statusCode: number;
   failureKind: string | null;
+  category: LogCategory;
   latencyMs: number;
   inputTokens: number | null;
   outputTokens: number | null;
@@ -29,6 +32,7 @@ export interface LogFilter {
   limit?: number;
   cursor?: number | null;
   status?: "success" | "failure" | "";
+  category?: LogCategory | "";
   apiKey?: string;
   email?: string;
   model?: string;
@@ -44,6 +48,7 @@ export function fetchLogs(f: LogFilter): Promise<LogsResp> {
   if (f.limit) p.set("limit", String(f.limit));
   if (f.cursor != null) p.set("cursor", String(f.cursor));
   if (f.status) p.set("status", f.status);
+  if (f.category) p.set("category", f.category);
   if (f.apiKey) p.set("apiKey", f.apiKey);
   if (f.email) p.set("email", f.email);
   if (f.model) p.set("model", f.model);
@@ -64,6 +69,12 @@ export interface LoggingConfig {
   "snippet-length": number;
   redact: boolean;
   "store-request-id": boolean;
+  categories: {
+    upstream: boolean;
+    service: boolean;
+    policy: boolean;
+    client: boolean;
+  };
   retention: {
     "max-age-days": number;
     "max-rows": number;
