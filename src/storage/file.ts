@@ -139,6 +139,7 @@ export class FileRequestLogStore implements RequestLogStore {
     const untilDate = filter.until?.slice(0, 10);
     const match = (r: RequestLogRecord): boolean => {
       if (filter.status && r.status !== filter.status) return false;
+      if (filter.category && r.category !== filter.category) return false;
       if (filter.email && r.accountEmail !== filter.email) return false;
       if (filter.model && r.model !== filter.model) return false;
       if (filter.endpoint && r.endpoint !== filter.endpoint) return false;

@@ -53,6 +53,7 @@ export function tokenToStorage(data: TokenData): TokenStorage {
     disabled: data.disabled,
     monthly_budget_usd: data.monthlyBudgetUsd,
     tier_label: data.tierLabel,
+    concurrency_weight: data.concurrencyWeight,
   };
 }
 
@@ -76,6 +77,7 @@ export function storageToToken(storage: TokenStorage): TokenData {
     disabled: storage.disabled,
     monthlyBudgetUsd: storage.monthly_budget_usd,
     tierLabel: storage.tier_label,
+    concurrencyWeight: storage.concurrency_weight,
   };
 }
 

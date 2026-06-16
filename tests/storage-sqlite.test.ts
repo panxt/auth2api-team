@@ -174,6 +174,7 @@ function logRec(p: Partial<RequestLogRecord>): RequestLogRecord {
     status: "failure",
     statusCode: 429,
     failureKind: "rate_limit",
+    category: "upstream",
     latencyMs: 5,
     inputTokens: null,
     outputTokens: null,
@@ -264,6 +265,79 @@ test("RequestLogger: capture=failures skips successes; snippet truncates; redact
     assert.equal(rows[0].status, "failure");
     assert.ok(!rows[0].errorDetail!.includes("sk-abcdef1234567890")); // redacted
     assert.ok(rows[0].errorDetail!.length <= 21); // snippet (20 + ellipsis)
+  } finally {
+    fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  }
+});
+
+test("RequestLogger: category gate drops policy/client, keeps upstream/service", () => {
+  const file = dbPath();
+  try {
+    const s = new SqliteStorage(file);
+    const logger = new RequestLogger(s.requestLog, s.settings, {
+      capture: "failures",
+      // defaults: upstream/service on, policy/client off
+    });
+    const base = {
+      ts: new Date().toISOString(),
+      apiKeyHash: "h".repeat(64),
+      ip: "1",
+      endpoint: "POST /v1/messages",
+      model: "m",
+      provider: "anthropic",
+      accountEmail: "a@x.com",
+      status: "failure" as const,
+      statusCode: 500,
+      failureKind: null,
+      latencyMs: 1,
+      inputTokens: null,
+      outputTokens: null,
+      errorDetail: "boom",
+      requestId: null,
+    };
+    logger.record({ ...base, category: "upstream" });
+    logger.record({ ...base, category: "service" });
+    logger.record({ ...base, category: "policy", statusCode: 429 }); // dropped
+    logger.record({ ...base, category: "client", statusCode: 499 }); // dropped
+    const rows = s.requestLog.query({ limit: 100 }).rows;
+    assert.equal(rows.length, 2);
+    const cats = rows.map((r) => r.category).sort();
+    assert.deepEqual(cats, ["service", "upstream"]);
+    // category filter works
+    assert.equal(s.requestLog.query({ limit: 100, category: "upstream" }).rows.length, 1);
+  } finally {
+    fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  }
+});
+
+test("RequestLogger: a successful request is never logged as an error category", () => {
+  const file = dbPath();
+  try {
+    const s = new SqliteStorage(file);
+    // capture=all so success would be eligible; but a stale 'upstream' tag from
+    // a recovered failover must not make it an error.
+    const logger = new RequestLogger(s.requestLog, s.settings, { capture: "all" });
+    logger.record({
+      ts: new Date().toISOString(),
+      apiKeyHash: "h".repeat(64),
+      ip: "1",
+      endpoint: "POST /v1/messages",
+      model: "m",
+      provider: "anthropic",
+      accountEmail: "a@x.com",
+      status: "success",
+      statusCode: 200,
+      failureKind: null,
+      category: "upstream", // stale tag from a failed attempt that then recovered
+      latencyMs: 1,
+      inputTokens: 5,
+      outputTokens: 5,
+      errorDetail: null,
+      requestId: null,
+    });
+    const rows = s.requestLog.query({ limit: 10 }).rows;
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].category, "ok");
   } finally {
     fs.rmSync(path.dirname(file), { recursive: true, force: true });
   }

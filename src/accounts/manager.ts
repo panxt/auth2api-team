@@ -2,6 +2,7 @@ import { ProviderId, TokenData } from "../auth/types";
 import { saveToken, loadAllTokens, deleteToken } from "../auth/token-storage";
 import { getDeviceId } from "../utils/common";
 import { RefreshTokenExhaustedError } from "../auth/refresh-errors";
+import { RoutingConfig, DEFAULT_ROUTING_CONFIG } from "../config";
 
 // Reauth-required cooldown: long enough that the account doesn't keep
 // hitting the upstream, but bounded so a re-login auto-recovers next sweep.
@@ -128,6 +129,11 @@ interface AccountState {
   /** Operator-disabled — kept loaded but skipped by account selection +
    *  auto-refresh. Persisted to token file so it survives restart. */
   disabled: boolean;
+  /** Live in-flight client requests currently routed to this account. Drives
+   *  weighted-least-inflight scheduling. acquireSlot/releaseSlot maintain it. */
+  inFlight: number;
+  /** Peak inFlight observed (for the dashboard). */
+  peakInFlight: number;
 }
 
 export interface AccountSnapshot {
@@ -167,6 +173,29 @@ export interface AccountSnapshot {
   monthlyBudgetUsd: number | null;
   /** Display-only tier label (e.g. "$25"), or null if unset. */
   tierLabel: string | null;
+  /** Load-balancing weight (default 1). */
+  concurrencyWeight: number;
+  /** Live in-flight client requests on this account. */
+  inFlight: number;
+  /** Peak in-flight observed. */
+  peakInFlight: number;
+}
+
+/** Per-provider capacity summary for the dashboard alert. */
+export interface CapacitySummary {
+  total: number;
+  /** Accounts usable right now (enabled, not cooled, under in-flight cap). */
+  usable: number;
+  /** Min cooldown-reset across non-usable accounts (ISO), or null. */
+  soonestResetAt: string | null;
+  /** Highest 5h-window utilization across accounts (0..1), or null. */
+  maxUtil5h: number | null;
+  /** Total in-flight across the pool. */
+  inFlight: number;
+  /** Saturation rejections since start (pool full → 429). */
+  saturationRejects: number;
+  /** ok | info | warn | critical */
+  level: "ok" | "info" | "warn" | "critical";
 }
 
 export interface AvailableAccount {
@@ -248,6 +277,10 @@ export class AccountManager {
   private refreshFn: RefreshFn;
   private refreshPolicy: RefreshPolicy;
   private reloadPromise: Promise<ReloadStats> | null = null;
+  /** Live load-balancing policy (hot-swappable via setRouting). */
+  private routing: RoutingConfig = DEFAULT_ROUTING_CONFIG;
+  /** Count of requests rejected because the whole pool was saturated. */
+  private saturationRejects = 0;
 
   constructor(authDir: string, opts: AccountManagerOptions) {
     this.authDir = authDir;
@@ -380,59 +413,122 @@ export class AccountManager {
     saveToken(this.authDir, token);
   }
 
+  /** Hot-swap the routing/load-balancing policy (from SettingsStore/UI). */
+  setRouting(cfg: RoutingConfig): void {
+    this.routing = cfg;
+  }
+
+  /** Effective load-balancing weight for an account (default 1). */
+  private weightOf(acct: AccountState): number {
+    const w = acct.token.concurrencyWeight;
+    return typeof w === "number" && w > 0 ? w : 1;
+  }
+
+  /** Parse 5h-window utilization (0..1) from captured rate-limit headers, or
+   *  null if unknown. Header may be a fraction (0.42) or a percent (42). */
+  private util5h(acct: AccountState): number | null {
+    const raw = acct.rateLimit?.fields?.["unified-5h-utilization"];
+    if (raw == null) return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return null;
+    return n > 1 ? n / 100 : n;
+  }
+
+  private isUsable(acct: AccountState, now: number): boolean {
+    if (acct.disabled || acct.cooldownUntil > now) return false;
+    const cap = this.routing["per-account-max-inflight"];
+    if (cap > 0 && acct.inFlight >= cap) return false;
+    return true;
+  }
+
   /**
-   * Sticky account selection. Keeps using the same account for STICKY_DURATION_MS
-   * before rotating to the next one. Rotates early only when the current account
-   * enters cooldown (e.g. rate-limited).
+   * Pick an upstream account for the next client request.
+   *
+   * Strategies (RoutingConfig):
+   *   - "sticky": legacy — one global sticky account until cooldown/expiry.
+   *   - "weighted-least-inflight": always pick min `inFlight/weight`
+   *     (+ 5h-utilization penalty), no stickiness — maximal concurrency spread.
+   *   - "adaptive" (default): keep the affinity (last-used) account while its
+   *     inFlight < `stick-while-inflight-below` (cache-warm at low load), else
+   *     fall back to weighted-least-inflight (spread under pressure).
+   *
+   * Pure selector: it does NOT increment inFlight — callers handling live
+   * client traffic must call acquireSlot()/releaseSlot() around the request.
    */
   getNextAccount(): AccountResult {
     const count = this.accountOrder.length;
     if (count === 0) {
       return { account: null, failureKind: null, retryAfterMs: null };
     }
-
     const now = Date.now();
+    const ok = (idx: number, email: string, acct: AccountState): AccountResult => {
+      this.lastUsedIndex = idx;
+      this.stickyUntil = now + randomStickyDuration();
+      return {
+        account: buildAvailableAccount(this.authDir, email, acct.token, this.provider),
+      };
+    };
 
-    // Try to keep using the current sticky account
-    if (this.lastUsedIndex >= 0 && now < this.stickyUntil) {
+    // ── sticky (legacy) ──
+    if (this.routing.strategy === "sticky") {
+      if (this.lastUsedIndex >= 0 && now < this.stickyUntil) {
+        const email = this.accountOrder[this.lastUsedIndex];
+        const acct = this.accounts.get(email)!;
+        if (this.isUsable(acct, now)) return ok(this.lastUsedIndex, email, acct);
+      }
+      const startIdx = this.lastUsedIndex >= 0 ? this.lastUsedIndex + 1 : 0;
+      for (let i = 0; i < count; i++) {
+        const idx = (startIdx + i) % count;
+        const email = this.accountOrder[idx];
+        const acct = this.accounts.get(email)!;
+        if (this.isUsable(acct, now)) return ok(idx, email, acct);
+      }
+      return this.noUsableAccount(now);
+    }
+
+    // ── adaptive: keep affinity account if lightly loaded ──
+    if (this.routing.strategy === "adaptive" && this.lastUsedIndex >= 0) {
       const email = this.accountOrder[this.lastUsedIndex];
-      const acct = this.accounts.get(email)!;
-      if (!acct.disabled && acct.cooldownUntil <= now) {
-        return {
-          account: buildAvailableAccount(
-            this.authDir,
-            email,
-            acct.token,
-            this.provider,
-          ),
-        };
+      const acct = this.accounts.get(email);
+      if (
+        acct &&
+        this.isUsable(acct, now) &&
+        acct.inFlight < this.routing["stick-while-inflight-below"]
+      ) {
+        return ok(this.lastUsedIndex, email, acct);
       }
     }
 
-    // Pick the next available account
-    const startIdx = this.lastUsedIndex >= 0 ? this.lastUsedIndex + 1 : 0;
-    for (let i = 0; i < count; i++) {
-      const idx = (startIdx + i) % count;
+    // ── weighted least-in-flight (+ optional 5h-utilization penalty) ──
+    let bestIdx = -1;
+    let bestLoad = Infinity;
+    for (let idx = 0; idx < count; idx++) {
       const email = this.accountOrder[idx];
       const acct = this.accounts.get(email)!;
-      if (!acct.disabled && acct.cooldownUntil <= now) {
-        this.lastUsedIndex = idx;
-        this.stickyUntil = now + randomStickyDuration();
-        return {
-          account: buildAvailableAccount(
-            this.authDir,
-            email,
-            acct.token,
-            this.provider,
-          ),
-        };
+      if (!this.isUsable(acct, now)) continue;
+      let load = acct.inFlight / this.weightOf(acct);
+      if (this.routing["use-5h-utilization"]) {
+        const u = this.util5h(acct);
+        if (u != null) load += u;
+      }
+      if (load < bestLoad) {
+        bestLoad = load;
+        bestIdx = idx;
       }
     }
+    if (bestIdx >= 0) {
+      const email = this.accountOrder[bestIdx];
+      return ok(bestIdx, email, this.accounts.get(email)!);
+    }
+    return this.noUsableAccount(now);
+  }
 
-    // No usable account — either in cooldown or operator-disabled. Find the
-    // most recoverable non-disabled one for the error response; if everything
-    // is disabled, surface that as a non-recoverable auth-like state so the
-    // caller doesn't keep retrying.
+  /**
+   * No account usable right now (all disabled / cooled / saturated). Returns
+   * the most-recoverable failure kind + retry-after for the error response.
+   */
+  private noUsableAccount(now: number): AccountResult {
+    this.saturationRejects++;
     const nonDisabled = this.accountOrder.filter(
       (e) => !this.accounts.get(e)!.disabled,
     );
@@ -455,12 +551,59 @@ export class AccountManager {
         bestRemainingMs = remainingMs;
       }
     }
-
     const isRecoverable = bestKind !== "auth" && bestKind !== "forbidden";
     return {
       account: null,
       failureKind: bestKind,
       retryAfterMs: isRecoverable ? bestRemainingMs : null,
+    };
+  }
+
+  /** Increment in-flight for an account (call when a request starts using it). */
+  acquireSlot(email: string): void {
+    const acct = this.accounts.get(email);
+    if (!acct) return;
+    acct.inFlight++;
+    if (acct.inFlight > acct.peakInFlight) acct.peakInFlight = acct.inFlight;
+  }
+
+  /** Decrement in-flight (call exactly once per acquireSlot, on request end). */
+  releaseSlot(email: string): void {
+    const acct = this.accounts.get(email);
+    if (!acct) return;
+    if (acct.inFlight > 0) acct.inFlight--;
+  }
+
+  /** Per-provider capacity summary for the dashboard alert. */
+  capacitySummary(): CapacitySummary {
+    const now = Date.now();
+    let usable = 0;
+    let inFlight = 0;
+    let soonest = Infinity;
+    let maxUtil: number | null = null;
+    for (const acct of this.accounts.values()) {
+      inFlight += acct.inFlight;
+      if (this.isUsable(acct, now)) usable++;
+      else if (!acct.disabled && acct.cooldownUntil > now) {
+        soonest = Math.min(soonest, acct.cooldownUntil);
+      }
+      const u = this.util5h(acct);
+      if (u != null) maxUtil = maxUtil == null ? u : Math.max(maxUtil, u);
+    }
+    const total = this.accountOrder.length;
+    let level: CapacitySummary["level"] = "ok";
+    if (total > 0 && usable === 0) level = "critical";
+    else if (usable === 0) level = "critical";
+    else if (maxUtil != null && maxUtil >= 0.9) level = "warn";
+    else if (maxUtil != null && maxUtil >= 0.75) level = "info";
+    return {
+      total,
+      usable,
+      soonestResetAt: soonest === Infinity ? null : new Date(soonest).toISOString(),
+      maxUtil5h: maxUtil,
+      inFlight,
+      saturationRejects: this.saturationRejects,
+      level,
     };
   }
 
@@ -653,7 +796,11 @@ export class AccountManager {
    */
   setBudget(
     email: string,
-    opts: { monthlyBudgetUsd?: number | null; tierLabel?: string | null },
+    opts: {
+      monthlyBudgetUsd?: number | null;
+      tierLabel?: string | null;
+      concurrencyWeight?: number | null;
+    },
   ): boolean {
     const acct = this.accounts.get(email);
     if (!acct) return false;
@@ -663,6 +810,10 @@ export class AccountManager {
     }
     if (opts.tierLabel !== undefined) {
       acct.token.tierLabel = opts.tierLabel === null ? undefined : opts.tierLabel;
+    }
+    if (opts.concurrencyWeight !== undefined) {
+      acct.token.concurrencyWeight =
+        opts.concurrencyWeight === null ? undefined : opts.concurrencyWeight;
     }
     saveToken(this.authDir, acct.token);
     return true;
@@ -736,6 +887,9 @@ export class AccountManager {
         disabled: acct.disabled,
         monthlyBudgetUsd: acct.token.monthlyBudgetUsd ?? null,
         tierLabel: acct.token.tierLabel ?? null,
+        concurrencyWeight: this.weightOf(acct),
+        inFlight: acct.inFlight,
+        peakInFlight: acct.peakInFlight,
       });
     }
     return snapshots;
@@ -923,6 +1077,8 @@ export class AccountManager {
       windowStartedAt: null,
       rateLimit: null,
       disabled: token.disabled === true,
+      inFlight: 0,
+      peakInFlight: 0,
     };
   }
 }
