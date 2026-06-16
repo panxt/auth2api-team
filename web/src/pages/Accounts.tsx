@@ -13,7 +13,7 @@ import { fetchStats } from "../api/stats";
 import { fetchRoutingConfig, updateRoutingConfig, RoutingConfig } from "../api/routing";
 import { ApiError } from "../api/client";
 import { AddAccountModal } from "../components/AddAccountModal";
-import { AccountQuotaPanel } from "../components/AccountQuotaPanel";
+import { AccountQuotaPanel, InfoTip } from "../components/AccountQuotaPanel";
 import { Modal } from "../components/Modal";
 import { useAuth } from "../lib/auth";
 import { SupportedProvider } from "../api/oauth";
@@ -503,13 +503,13 @@ export function Accounts() {
                     </div>
                   </div>
 
-                  {/* 实时并发(在飞 / 峰值) */}
+                  {/* 实时并发(处理中 / 峰值) */}
                   <div className="mb-3">
                     <div className="flex justify-between text-xs mb-1">
-                      <span className="text-ink-400">实时并发(在飞)</span>
+                      <span className="text-ink-400">实时并发(处理中)</span>
                       <span className="text-ink-300">
                         {a.inFlight}
-                        <span className="text-ink-500"> · 峰值 {a.peakInFlight}</span>
+                        <span className="text-ink-500"> · 峰值并发 {a.peakInFlight}</span>
                       </span>
                     </div>
                     <div className="h-2 bg-ink-800 rounded-full overflow-hidden">
@@ -691,7 +691,7 @@ function ConcurrencyBar({ accounts }: { accounts: AccountSnapshot[] }) {
     <div className="mb-3">
       <div className="flex justify-between text-xs text-ink-400 mb-1">
         <span>实时并发分布</span>
-        <span>{total} 个在飞</span>
+        <span>{total} 个处理中</span>
       </div>
       <div className="flex h-3 rounded-full overflow-hidden bg-ink-800">
         {accounts.map((a, i) =>
@@ -839,13 +839,14 @@ function RoutingCard() {
               onChange={(e) => patch({ strategy: e.target.value as any })}
             >
               <option value="adaptive">自适应(低并发粘账号,高并发分摊)</option>
-              <option value="weighted-least-inflight">加权最少在飞(始终分摊)</option>
+              <option value="weighted-least-inflight">加权最少处理中(始终分摊)</option>
               <option value="sticky">粘性(旧行为,挤一个)</option>
             </select>
           </div>
           <div>
-            <label className="block text-xs text-ink-500 mb-1">
-              粘性阈值(在飞 &lt; 此值才粘)
+            <label className="block text-xs text-ink-500 mb-1 inline-flex items-center">
+              粘性阈值(处理中 &lt; 此值才粘账号)
+              <InfoTip text={"账号当前『处理中』请求数低于此值时,新请求继续打到同一账号,以命中 Anthropic 的 prompt 缓存、降低延迟与成本;超过此值即视为该账号拥堵,调度器把请求溢出分摊到其他账号。\n\n调大 = 更省:更黏一个账号、缓存命中高,但单账号易先打满限流。\n调小 = 更稳:更早分摊、并发更均衡,但缓存命中率下降。\n\n默认 4 适合多数场景;压测/批量可调到 1~2 尽快摊开。仅对『自适应』策略生效。"} />
             </label>
             <input
               className="input !py-1"
@@ -858,8 +859,9 @@ function RoutingCard() {
             />
           </div>
           <div>
-            <label className="block text-xs text-ink-500 mb-1">
-              每账号在飞上限(0 = 不限)
+            <label className="block text-xs text-ink-500 mb-1 inline-flex items-center">
+              每账号并发上限(0 = 不限)
+              <InfoTip text="单个账号同时『处理中』的请求数硬上限。达到后该账号不再接新请求,溢出请求改派其他账号;全部账号都满则快速返回 429(带 Retry-After),避免把请求堆在某个账号上拖垮它、触发上游限流冷却。0 表示不设上限。" />
             </label>
             <input
               className="input !py-1"
@@ -877,7 +879,10 @@ function RoutingCard() {
               checked={cfg["use-5h-utilization"]}
               onChange={(e) => patch({ "use-5h-utilization": e.target.checked })}
             />
-            纳入 5h 窗口利用率打分
+            <span className="inline-flex items-center">
+              纳入 5 小时窗口利用率打分
+              <InfoTip text={"开启后,选账号不只看『处理中』请求数,还把各账号上游 5 小时滚动窗口的已用额度计入打分:剩余额度越少的账号越不优先,从而提前避开快打满限流的账号、让用量在账号间更均衡。\n\n数据来自上游返回的 unified-5h-utilization,仅 Anthropic 订阅账号有;无此数据的账号(Codex/Cursor)按纯并发分摊,不受影响。\n\n关闭则只按加权处理中数分摊。"} />
+            </span>
           </label>
           <div className="md:col-span-2 flex items-center gap-3">
             <button className="btn-primary text-sm" onClick={save} disabled={saving}>
