@@ -577,3 +577,13 @@ export function tagStatsRequestId(res: ResLike, requestId: string): void {
   if (!res.locals.stats) return;
   res.locals.stats.requestId = requestId;
 }
+
+/** Tag the error source/category for the request log (upstream/service/
+ *  policy/client). Lets the dashboard separate real errors from benign noise. */
+export function tagStatsErrorSource(
+  res: ResLike,
+  category: "upstream" | "service" | "policy" | "client",
+): void {
+  if (!res.locals.stats) return;
+  res.locals.stats.category = category;
+}

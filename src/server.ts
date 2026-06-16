@@ -30,7 +30,8 @@ import { ManagedKeyStore, ManagedKeyError } from "./keys/store";
 import { startOAuth, exchangeOAuth } from "./admin/oauth";
 import { ProviderId } from "./auth/types";
 import { RequestLogger } from "./logging/logger";
-import { LoggingConfig } from "./config";
+import { RoutingController } from "./accounts/routing";
+import { LoggingConfig, RoutingConfig } from "./config";
 
 // Simple in-memory rate limiter per IP
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -81,12 +82,22 @@ export function createServer(
   quotaTracker?: QuotaTracker,
   keyStore?: ManagedKeyStore,
   requestLogger?: RequestLogger,
+  routingController?: RoutingController,
 ): express.Application {
   const app = express();
   // Stats slots are seeded whenever any subsystem needs them: the recorder
   // for reporting, the quota tracker for live consumption feed, or the
   // request logger for diagnostics.
   const wantStatsSlot = !!statsRecorder || !!quotaTracker || !!requestLogger;
+
+  // Tag the error source on the per-request stats slot (for the request log's
+  // category). No-op if the slot wasn't seeded.
+  const markCategory = (
+    res: express.Response,
+    category: "upstream" | "service" | "policy" | "client",
+  ) => {
+    if (res.locals.stats) (res.locals.stats as any).category = category;
+  };
 
   app.use(express.json({ limit: config["body-limit"] }));
 
@@ -167,6 +178,7 @@ export function createServer(
         failureKind: null,
         errorDetail: null,
         requestId: null,
+        category: null,
       };
     }
     next();
@@ -263,6 +275,7 @@ export function createServer(
           status,
           statusCode: input.statusCode,
           failureKind: input.failureKind,
+          category: c?.category ?? null,
           latencyMs: input.latencyMs,
           inputTokens: input.usage?.inputTokens ?? null,
           outputTokens: input.usage?.outputTokens ?? null,
@@ -345,6 +358,7 @@ export function createServer(
           "Retry-After",
           String(c.window === "day" ? secondsUntilDayResetUTC() : secondsUntilMonthResetUTC()),
         );
+        markCategory(res, "policy");
         res.status(429).json({ error: { message: c.msg, type: "quota_exceeded" } });
         return;
       }
@@ -361,6 +375,7 @@ export function createServer(
     if (!hasModelRestriction(entry)) return next();
     const requested = (req.body?.model as string | undefined) || "claude-sonnet-4-6";
     if (!isModelAllowed(entry, requested)) {
+      markCategory(res, "policy");
       res.status(403).json({
         error: {
           message: `Model '${resolveModel(requested)}' is not allowed for this API key`,
@@ -382,6 +397,7 @@ export function createServer(
     const keyId = hashApiKey(entry!.key);
     if (rl.rpm != null && !checkKeyRpm(keyId, rl.rpm)) {
       res.setHeader("Retry-After", "60");
+      markCategory(res, "policy");
       res
         .status(429)
         .json({
@@ -391,6 +407,7 @@ export function createServer(
     }
     if (rl.concurrency != null) {
       if (!acquireConcurrency(keyId, rl.concurrency)) {
+        markCategory(res, "policy");
         res
           .status(429)
           .json({
@@ -504,10 +521,12 @@ export function createServer(
       const cursor = Number.isFinite(cursorRaw) ? cursorRaw : undefined;
       const str = (v: unknown) =>
         typeof v === "string" && v.length ? v : undefined;
+      const validCats = ["upstream", "service", "policy", "client", "ok"];
       const page = requestLogger.query({
         limit,
         cursor,
         status: q.status === "failure" || q.status === "success" ? q.status : undefined,
+        category: validCats.includes(q.category as string) ? (q.category as any) : undefined,
         apiKeyPrefix: str(q.apiKey),
         email: str(q.email),
         model: str(q.model),
@@ -533,6 +552,23 @@ export function createServer(
     app.put("/admin/logging/config", requireAdmin, (req, res) => {
       try {
         const next = requestLogger.updateConfig((req.body || {}) as Partial<LoggingConfig>);
+        res.json(next);
+      } catch (err: any) {
+        res.status(400).json({ error: { message: err?.message || String(err) } });
+      }
+    });
+  }
+
+  // ── Routing / load-balancing policy (admin-only) ──
+  if (routingController) {
+    app.get("/admin/routing/config", requireAdmin, (_req, res) => {
+      res.json(routingController.getConfig());
+    });
+    app.put("/admin/routing/config", requireAdmin, (req, res) => {
+      try {
+        const next = routingController.updateConfig(
+          (req.body || {}) as Partial<RoutingConfig>,
+        );
         res.json(next);
       } catch (err: any) {
         res.status(400).json({ error: { message: err?.message || String(err) } });
@@ -676,13 +712,15 @@ export function createServer(
         disabled?: unknown;
         monthlyBudgetUsd?: unknown;
         tierLabel?: unknown;
+        concurrencyWeight?: unknown;
       };
 
-      // Budget / tier annotations (display-only). Accept number|null and
-      // string|null; undefined means "leave unchanged".
+      // Budget / tier / weight annotations. Accept number|null / string|null;
+      // undefined (absent) means "leave unchanged".
       const hasBudget = "monthlyBudgetUsd" in body;
       const hasTier = "tierLabel" in body;
-      if (hasBudget || hasTier) {
+      const hasWeight = "concurrencyWeight" in body;
+      if (hasBudget || hasTier || hasWeight) {
         if (
           hasBudget &&
           body.monthlyBudgetUsd !== null &&
@@ -695,11 +733,22 @@ export function createServer(
           res.status(400).json({ error: { message: "tierLabel must be a string or null" } });
           return;
         }
+        if (
+          hasWeight &&
+          body.concurrencyWeight !== null &&
+          (typeof body.concurrencyWeight !== "number" || body.concurrencyWeight <= 0)
+        ) {
+          res.status(400).json({ error: { message: "concurrencyWeight must be a positive number or null" } });
+          return;
+        }
         const ok = provider.manager.setBudget(email, {
           monthlyBudgetUsd: hasBudget
             ? (body.monthlyBudgetUsd as number | null)
             : undefined,
           tierLabel: hasTier ? (body.tierLabel as string | null) : undefined,
+          concurrencyWeight: hasWeight
+            ? (body.concurrencyWeight as number | null)
+            : undefined,
         });
         if (!ok) {
           res.status(404).json({ error: { message: `no account ${email} loaded for ${provider.id}` } });
@@ -722,9 +771,12 @@ export function createServer(
         disabled = next;
       }
 
-      if (!hasBudget && !hasTier && disabled === undefined) {
+      if (!hasBudget && !hasTier && !hasWeight && disabled === undefined) {
         res.status(400).json({
-          error: { message: "body must set at least one of { disabled, monthlyBudgetUsd, tierLabel }" },
+          error: {
+            message:
+              "body must set at least one of { disabled, monthlyBudgetUsd, tierLabel, concurrencyWeight }",
+          },
         });
         return;
       }
@@ -735,12 +787,14 @@ export function createServer(
   app.get("/admin/accounts", (_req, res) => {
     const providers: Record<
       string,
-      { accounts: unknown[]; account_count: number }
+      { accounts: unknown[]; account_count: number; capacity: unknown }
     > = {};
     for (const p of registry.all()) {
       providers[p.id] = {
         accounts: p.manager.getSnapshots(),
         account_count: p.manager.accountCount,
+        // Pool capacity summary → drives the dashboard's "上游已打满" alert.
+        capacity: p.manager.capacitySummary(),
       };
     }
     res.json({

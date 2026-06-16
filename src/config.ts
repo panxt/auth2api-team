@@ -160,6 +160,21 @@ export interface LoggingConfig {
   redact: boolean;
   /** Persist the upstream request_id (handy for support tickets). */
   "store-request-id": boolean;
+  /**
+   * Which error categories to record. Lets you keep real problems
+   * (upstream/service) and drop benign noise (policy rejections, client
+   * disconnects). Applied on top of `capture`.
+   */
+  categories: {
+    /** 模型/上游报错 */
+    upstream: boolean;
+    /** 本服务报错 */
+    service: boolean;
+    /** 策略拒绝(配额/白名单/限流)— 默认不记 */
+    policy: boolean;
+    /** 客户端断开/坏请求 — 默认不记 */
+    client: boolean;
+  };
   retention: {
     /** Delete records older than this many days (0 = no age limit). */
     "max-age-days": number;
@@ -177,6 +192,12 @@ export const DEFAULT_LOGGING_CONFIG: LoggingConfig = {
   "snippet-length": 500,
   redact: true,
   "store-request-id": true,
+  categories: {
+    upstream: true, // 模型/上游报错 — 记
+    service: true, // 本服务报错 — 记
+    policy: false, // 策略拒绝 — 默认不记(非真错)
+    client: false, // 客户端断开/坏请求 — 默认不记(非真错)
+  },
   retention: {
     "max-age-days": 14,
     "max-rows": 200000,
@@ -195,17 +216,61 @@ export function resolveLoggingConfig(
 ): LoggingConfig {
   const out: LoggingConfig = {
     ...DEFAULT_LOGGING_CONFIG,
+    categories: { ...DEFAULT_LOGGING_CONFIG.categories },
     retention: { ...DEFAULT_LOGGING_CONFIG.retention },
   };
   for (const layer of layers) {
     if (!layer) continue;
     for (const [k, v] of Object.entries(layer)) {
       if (v === undefined) continue;
-      if (k === "retention" && v && typeof v === "object") {
-        out.retention = { ...out.retention, ...(v as object) };
+      if ((k === "retention" || k === "categories") && v && typeof v === "object") {
+        (out as any)[k] = { ...(out as any)[k], ...(v as object) };
       } else {
         (out as any)[k] = v;
       }
+    }
+  }
+  return out;
+}
+
+/**
+ * Account-selection / load-balancing policy. Controls how concurrent client
+ * traffic is spread across the upstream account pool. Admin-editable at
+ * runtime via /admin/routing/config (persisted to the SettingsStore); the
+ * config.yaml `routing:` block, if present, only seeds the initial defaults.
+ */
+export interface RoutingConfig {
+  /**
+   * - "adaptive"(默认):偏好账号在飞数低于阈值时保持粘住(缓存友好),否则
+   *   按 `inFlight/weight`(可选叠加 5h 利用率)选最小,实现并发分摊。
+   * - "weighted-least-inflight":始终按 `inFlight/weight` 选最小,无粘性。
+   * - "sticky":旧行为 —— 一个全局粘性账号直到冷却/到期。
+   */
+  strategy: "adaptive" | "weighted-least-inflight" | "sticky";
+  /** adaptive:偏好(上次/亲和)账号在飞数 < 此值时保持粘住。 */
+  "stick-while-inflight-below": number;
+  /** 每账号在飞软上限;0 = 不限。满载账号在选择时被跳过,全满则 429。 */
+  "per-account-max-inflight": number;
+  /** 把上游 5h 窗口利用率(unified-5h-utilization)纳入打分。 */
+  "use-5h-utilization": boolean;
+}
+
+export const DEFAULT_ROUTING_CONFIG: RoutingConfig = {
+  strategy: "adaptive",
+  "stick-while-inflight-below": 4,
+  "per-account-max-inflight": 0,
+  "use-5h-utilization": true,
+};
+
+/** Merge routing config: 默认 < config.yaml < 持久化(UI)覆盖。 */
+export function resolveRoutingConfig(
+  ...layers: (Partial<RoutingConfig> | undefined | null)[]
+): RoutingConfig {
+  const out: RoutingConfig = { ...DEFAULT_ROUTING_CONFIG };
+  for (const layer of layers) {
+    if (!layer) continue;
+    for (const [k, v] of Object.entries(layer)) {
+      if (v !== undefined) (out as any)[k] = v;
     }
   }
   return out;
@@ -228,6 +293,8 @@ export interface Config {
   pricing?: Record<string, ModelPrice>;
   /** Optional seed for the per-request logging config (UI overrides win). */
   logging?: Partial<LoggingConfig>;
+  /** Optional seed for the account-selection / load-balancing policy. */
+  routing?: Partial<RoutingConfig>;
   debug: DebugMode;
 }
 

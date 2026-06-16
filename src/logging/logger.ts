@@ -9,6 +9,7 @@ import type {
   RequestLogFilter,
   RequestLogPage,
   SettingsStore,
+  LogCategory,
 } from "../storage/types";
 
 const SETTINGS_KEY = "logging";
@@ -25,11 +26,32 @@ export interface RequestLogInput {
   status: "success" | "failure";
   statusCode: number;
   failureKind: string | null;
+  /** Explicit error source if the request pipeline tagged one; else derived. */
+  category?: LogCategory | null;
   latencyMs: number;
   inputTokens: number | null;
   outputTokens: number | null;
   errorDetail?: string | null;
   requestId?: string | null;
+}
+
+/**
+ * Derive an error category when the pipeline didn't tag one explicitly.
+ * Conservative: an untagged failure is "service" (our problem until proven
+ * otherwise) so real bugs stay visible; benign cases are matched by signal.
+ */
+export function deriveCategory(
+  status: "success" | "failure",
+  statusCode: number,
+  failureKind: string | null,
+): LogCategory {
+  if (status === "success") return "ok";
+  if (failureKind === "client_disconnect" || statusCode === 499) return "client";
+  if (statusCode >= 400 && statusCode < 500 && statusCode !== 429) {
+    // 400/404/422 from a bad client request (not our fault, not upstream)
+    if (failureKind === "client_error") return "client";
+  }
+  return "service";
 }
 
 /**
@@ -86,11 +108,22 @@ export class RequestLogger {
     return this.getConfig();
   }
 
-  /** Apply capture/detail/redact policy and write one record (best effort). */
+  /** Apply capture/category/detail/redact policy and write one record. */
   record(input: RequestLogInput): void {
     const cfg = this.config;
     if (!cfg.enabled) return;
     if (cfg.capture === "failures" && input.status !== "failure") return;
+
+    // A successful request is never an error, even if an earlier failover
+    // attempt tagged a category. Otherwise honor the explicit tag, else derive.
+    const category: LogCategory =
+      input.status === "success"
+        ? "ok"
+        : (input.category ??
+          deriveCategory(input.status, input.statusCode, input.failureKind));
+    // Category gate (benign noise like policy/client off by default). "ok" only
+    // appears under capture=all and is always allowed through.
+    if (category !== "ok" && !cfg.categories[category]) return;
 
     let errorDetail: string | null = null;
     if (cfg["error-detail"] !== "off" && input.errorDetail) {
@@ -114,6 +147,7 @@ export class RequestLogger {
       status: input.status,
       statusCode: input.statusCode,
       failureKind: input.failureKind,
+      category,
       latencyMs: input.latencyMs,
       inputTokens: input.inputTokens,
       outputTokens: input.outputTokens,

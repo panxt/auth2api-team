@@ -60,6 +60,7 @@ export class SqliteStorage implements Storage {
         status TEXT,
         status_code INTEGER,
         failure_kind TEXT,
+        category TEXT,
         latency_ms INTEGER,
         input_tokens INTEGER,
         output_tokens INTEGER,
@@ -72,6 +73,20 @@ export class SqliteStorage implements Storage {
       CREATE INDEX IF NOT EXISTS idx_rl_key ON request_logs(api_key_hash);
       CREATE INDEX IF NOT EXISTS idx_rl_model ON request_logs(model);
     `);
+    // Migration: add `category` to a pre-existing request_logs table (older
+    // installs created before the column existed). CREATE TABLE IF NOT EXISTS
+    // won't alter an existing table, so add the column when missing.
+    {
+      const cols = this.db
+        .prepare("PRAGMA table_info(request_logs)")
+        .all() as { name: string }[];
+      if (!cols.some((c) => c.name === "category")) {
+        this.db.exec("ALTER TABLE request_logs ADD COLUMN category TEXT");
+      }
+    }
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_rl_category ON request_logs(category)",
+    );
     // The DB file itself holds secrets (managed keys) — lock it down.
     try {
       fs.chmodSync(dbPath, 0o600);
@@ -169,10 +184,10 @@ export class SqliteStorage implements Storage {
     const insertLog = this.db.prepare(
       `INSERT INTO request_logs
         (ts, api_key_hash, ip, endpoint, model, provider, account_email,
-         status, status_code, failure_kind, latency_ms, input_tokens,
+         status, status_code, failure_kind, category, latency_ms, input_tokens,
          output_tokens, error_detail, request_id)
        VALUES (@ts, @apiKeyHash, @ip, @endpoint, @model, @provider,
-         @accountEmail, @status, @statusCode, @failureKind, @latencyMs,
+         @accountEmail, @status, @statusCode, @failureKind, @category, @latencyMs,
          @inputTokens, @outputTokens, @errorDetail, @requestId)`,
     );
     this.requestLog = {
@@ -189,6 +204,10 @@ export class SqliteStorage implements Storage {
         if (filter.status) {
           where.push("status = ?");
           params.push(filter.status);
+        }
+        if (filter.category) {
+          where.push("category = ?");
+          params.push(filter.category);
         }
         if (filter.email) {
           where.push("account_email = ?");
@@ -244,6 +263,7 @@ export class SqliteStorage implements Storage {
             status: r.status,
             statusCode: r.status_code,
             failureKind: r.failure_kind,
+            category: r.category ?? "service",
             latencyMs: r.latency_ms,
             inputTokens: r.input_tokens,
             outputTokens: r.output_tokens,

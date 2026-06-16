@@ -552,11 +552,25 @@ export async function proxyStreamingWithFailover(
   const onClientClose = () => abort.abort();
   resp.once("close", onClientClose);
 
+  // In-flight slot accounting (weighted-least-inflight scheduling). Released on
+  // failover (next loop) and once at request end.
+  let heldEmail: string | null = null;
+  const releaseHeld = () => {
+    if (heldEmail) {
+      manager.releaseSlot?.(heldEmail);
+      heldEmail = null;
+    }
+  };
+
   try {
     while (attempts < maxAttempts) {
       attempts++;
+      releaseHeld();
       const result = manager.getNextAccount();
       if (!result.account) {
+        // All accounts cooled by upstream throttling = upstream; none loaded = service.
+        const sc = (resp.locals as any)?.stats;
+        if (sc) sc.category = result.failureKind ? "upstream" : "service";
         // No more healthy accounts. If we've already committed, the client
         // has a partial stream — just end. Otherwise return a structured
         // 503-style error to the client. We can't do that easily here
@@ -583,6 +597,8 @@ export async function proxyStreamingWithFailover(
         };
       }
       const account = result.account;
+      manager.acquireSlot?.(account.token.email);
+      heldEmail = account.token.email;
       manager.recordAttempt(account.token.email);
 
       // Surface upstream account attribution to the per-request stats slot
@@ -600,6 +616,7 @@ export async function proxyStreamingWithFailover(
         upstream = await options.upstream(account, abort.signal);
       } catch (err: any) {
         manager.recordFailure(account.token.email, "network", err?.message);
+        if (statsCtx) statsCtx.category = "upstream"; // couldn't reach the model
         lastFailoverDetail = err?.message || String(err);
         if (isDebugLevel(config.debug, "errors")) {
           console.error(
@@ -623,6 +640,7 @@ export async function proxyStreamingWithFailover(
       //   - 403 / 429 / 5xx / extra-usage-400: account-scoped failure → cool down + try next.
       //   - other 4xx: client request error → surface to client immediately.
       if (!upstream.ok) {
+        if (statsCtx) statsCtx.category = "upstream"; // model/provider returned error
         const errBody = await upstream.text().catch(() => "");
         if (isDebugLevel(config.debug, "errors")) {
           console.error(
@@ -792,6 +810,7 @@ export async function proxyStreamingWithFailover(
       accountUsed: null,
     };
   } finally {
+    releaseHeld();
     resp.removeListener("close", onClientClose);
   }
 }

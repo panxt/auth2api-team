@@ -37,6 +37,10 @@ export interface TokenData {
   monthlyBudgetUsd?: number;
   /** Display-only tier label, e.g. "$25" / "$125" / "Max". */
   tierLabel?: string;
+  /** Load-balancing weight (default 1). Higher = takes proportionally more
+   *  concurrent traffic under weighted-least-inflight scheduling. Lets a
+   *  bigger-tier account ($125) carry more than a smaller one ($25). */
+  concurrencyWeight?: number;
 }
 
 export interface TokenStorage {
@@ -57,4 +61,5 @@ export interface TokenStorage {
   disabled?: boolean;
   monthly_budget_usd?: number;
   tier_label?: string;
+  concurrency_weight?: number;
 }

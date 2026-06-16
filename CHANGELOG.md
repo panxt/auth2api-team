@@ -3,6 +3,28 @@
 本文档记录 `<your-user>/auth2api-team`(fork)在上游 `AmazingAng/auth2api` 基础上的改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.2.0] — 2026-06-16
+
+在 v2.1.0 基础上引入**自适应加权并发调度**(让多账号在瞬时高并发下真正并行分摊,而非全挤一个),**日志按来源分类降噪**(区分模型/上游报错 vs 本服务报错,默认隐藏非真错噪音),以及**上游容量告警**(打满时管理页主动提示并给出解决办法)。基线 = v2.1.0,含 3 个 commit。**完全向后兼容,无破坏性 schema 迁移**(request_logs 自动加 `category` 列;账号 `concurrencyWeight` 可选)。
+
+### Added(新增)
+
+- **自适应加权并发调度**(`src/accounts/manager.ts` + `src/accounts/routing.ts`)— 取代原全局 sticky 指针。单一打分函数 `load = 处理中数 / 权重 (+ 可选 5h 利用率)`,三种策略只是旋钮:`adaptive`(默认,低并发粘账号保 prompt 缓存、高并发自动溢出分摊)、`weighted-least-inflight`(始终按权重分摊)、`sticky`(旧行为)。每账号可标 `concurrencyWeight`(异构 $25/$125 档位按容量加权);`acquireSlot`/`releaseSlot` 一次性句柄配对杜绝 in-flight 泄漏。配置三层合并(默认 < config.yaml < SettingsStore)+ `GET/PUT /admin/routing/config` 热生效。
+- **日志来源分类**(`src/logging/logger.ts` + `src/storage`)— 每条日志打 `category`:`upstream`(模型/上游报错)、`service`(本服务报错)、`policy`(配额/白名单/限流拒绝)、`client`(客户端断开/坏请求)、`ok`(成功)。**默认只记 upstream+service**,policy/client 噪音默认不记;四类开关在设置卡可调。`GET /admin/logs` 支持 `?category=` 过滤;`request_logs` 经 `PRAGMA table_info` 轻量迁移加 `category` 列 + 索引。
+- **上游容量告警**(`src/server.ts` `capacitySummary` + `web/src/pages/Accounts.tsx`)— `/admin/accounts` 派生每 provider 容量摘要(可用账号数、最早恢复时间、最高 5h 利用率、饱和拒绝数、分级 level)。账号页顶部分级告警条:🔴 全部不可用 / 🟠 接近打满 / 🟡 5h 窗口将尽,每条附最早恢复时间 + 三步解决办法(等窗口重置 / 加账号 / 降并发)。
+- **并发可视化 + 设置卡**(`web/src/pages/Accounts.tsx`)— 实时并发分布堆叠条、每账号处理中/峰值 gauge + 权重 + 5h 利用率%、负载均衡设置卡(策略/粘性阈值/并发上限/5h 打分热调)、可选 2s 实时轮询;窗口面板术语专业化(5 小时/7 天滚动窗口)+ ⓘ 悬浮提示解释滚动窗口与各路由旋钮。
+
+### Fixed(修复)
+
+- **瞬时高并发全挤一个账号**(`src/utils/http.ts` + `src/upstream/streaming-failover.ts`)— 原全局 sticky 指针使 ~100 并发压在单账号 → 撞 429 → 冷却 → 才轮下一个,呈串行退化。改为加权最少处理中分摊,N 账号真正并行;故障转移先释放槽再选账号。
+- **非真错污染日志**— 客户端断开(499)、配额 429、模型白名单 403、per-key 限流 429 等过去都按失败记录,混入大量噪音;现归入 policy/client 类别默认不记。失败转移后最终成功的请求强制记为 `ok`,不再误判为错误。
+
+### Changed(行为变化)
+
+- `AccountSnapshot` 增 `concurrencyWeight` / `inFlight` / `peakInFlight`;`/admin/accounts` 响应增 `capacity` 摘要;`PATCH /admin/accounts/:provider/:email` 接受 `concurrencyWeight`。
+- `LoggingConfig` 增 `categories` 开关;`RequestLogRecord` / `RequestLogFilter` 增 `category`。
+- UI 术语统一:`在飞` → `处理中`,`5h/7 天窗口` → `5 小时/7 天滚动窗口`。
+
 ## [2.1.0] — 2026-06-13
 
 在 v2.0.0 的看板基础上补齐**用量分析、精细化限额、按模型管控、请求日志**,并修复影响 Claude 桌面 App 的 cache_control 报错。基线 = v2.0.0(`2208adf`),含 10 个 commit。**完全向后兼容,无 schema 迁移,旧 Key 无需改动。**

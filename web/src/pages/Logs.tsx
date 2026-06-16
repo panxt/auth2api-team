@@ -5,6 +5,7 @@ import {
   updateLoggingConfig,
   LogRow,
   LogFilter,
+  LogCategory,
   LoggingConfig,
 } from "../api/logs";
 import { ApiError } from "../api/client";
@@ -19,6 +20,14 @@ function statusTone(r: LogRow): string {
   return "text-rose-400";
 }
 
+const CAT_META: Record<LogCategory, { label: string; cls: string }> = {
+  upstream: { label: "模型", cls: "badge-err" },
+  service: { label: "服务", cls: "badge-warn" },
+  policy: { label: "策略", cls: "badge-muted" },
+  client: { label: "客户端", cls: "badge-muted" },
+  ok: { label: "成功", cls: "badge-ok" },
+};
+
 export function Logs() {
   const { whoami } = useAuth();
   const isAdmin = !!whoami?.admin;
@@ -32,6 +41,7 @@ export function Logs() {
 
   // filters (draft) — applied on 查询
   const [status, setStatus] = useState<"" | "failure" | "success">("failure");
+  const [category, setCategory] = useState<LogCategory | "">("");
   const [email, setEmail] = useState("");
   const [model, setModel] = useState("");
   const [q, setQ] = useState("");
@@ -90,6 +100,7 @@ export function Logs() {
   function applyFilters() {
     setApplied({
       status: status || undefined,
+      category: category || undefined,
       email: email.trim() || undefined,
       model: model.trim() || undefined,
       q: q.trim() || undefined,
@@ -132,6 +143,20 @@ export function Logs() {
             <option value="">全部</option>
             <option value="failure">仅失败</option>
             <option value="success">仅成功</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-ink-500 mb-1">类别</label>
+          <select
+            className="input !py-1 text-sm"
+            value={category}
+            onChange={(e) => setCategory(e.target.value as any)}
+          >
+            <option value="">全部</option>
+            <option value="upstream">模型/上游</option>
+            <option value="service">本服务</option>
+            <option value="policy">策略</option>
+            <option value="client">客户端</option>
           </select>
         </div>
         <div>
@@ -200,6 +225,7 @@ export function Logs() {
           <thead className="bg-ink-900 text-ink-400">
             <tr className="text-left">
               <th className="px-3 py-2 font-medium">时间</th>
+              <th className="px-3 py-2 font-medium">类别</th>
               <th className="px-3 py-2 font-medium">客户端</th>
               <th className="px-3 py-2 font-medium">端点</th>
               <th className="px-3 py-2 font-medium">模型</th>
@@ -218,6 +244,11 @@ export function Logs() {
                 >
                   <td className="px-3 py-2 text-ink-400 whitespace-nowrap">
                     {new Date(r.ts).toLocaleString()}
+                  </td>
+                  <td className="px-3 py-2">
+                    <span className={`${CAT_META[r.category]?.cls ?? "badge-muted"} text-xs`}>
+                      {CAT_META[r.category]?.label ?? r.category}
+                    </span>
                   </td>
                   <td className="px-3 py-2 font-mono text-xs">{r.apiKeyShort}</td>
                   <td className="px-3 py-2 text-ink-300">
@@ -238,7 +269,7 @@ export function Logs() {
                 </tr>
                 {expanded === r.id && (
                   <tr className="bg-ink-900/40">
-                    <td colSpan={8} className="px-4 py-3 text-xs space-y-1">
+                    <td colSpan={9} className="px-4 py-3 text-xs space-y-1">
                       {r.errorDetail && (
                         <div className="font-mono whitespace-pre-wrap text-rose-300">
                           {r.errorDetail}
@@ -256,7 +287,7 @@ export function Logs() {
             ))}
             {!loading && rows.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-4 py-8 text-center text-ink-500">
+                <td colSpan={9} className="px-4 py-8 text-center text-ink-500">
                   没有匹配的日志(若只看失败,说明这段时间没有失败请求)
                 </td>
               </tr>
@@ -293,6 +324,9 @@ function SettingsCard() {
   }
   function patchRetention(p: Partial<LoggingConfig["retention"]>) {
     setCfg((c) => (c ? { ...c, retention: { ...c.retention, ...p } } : c));
+  }
+  function patchCategories(p: Partial<LoggingConfig["categories"]>) {
+    setCfg((c) => (c ? { ...c, categories: { ...c.categories, ...p } } : c));
   }
 
   async function save() {
@@ -379,6 +413,31 @@ function SettingsCard() {
             />
             存 request_id
           </label>
+
+          {/* 记录哪些类别(区分模型报错 vs 本服务报错 vs 噪音) */}
+          <div className="md:col-span-2">
+            <label className="block text-xs text-ink-500 mb-1">
+              记录类别(关掉的不入库 — 默认只记真错)
+            </label>
+            <div className="flex flex-wrap gap-3">
+              {([
+                ["upstream", "模型/上游报错"],
+                ["service", "本服务报错"],
+                ["policy", "策略拒绝(配额/白名单/限流)"],
+                ["client", "客户端断开/坏请求"],
+              ] as const).map(([k, txt]) => (
+                <label key={k} className="flex items-center gap-1.5">
+                  <input
+                    type="checkbox"
+                    checked={cfg.categories[k]}
+                    onChange={(e) => patchCategories({ [k]: e.target.checked })}
+                  />
+                  {txt}
+                </label>
+              ))}
+            </div>
+          </div>
+
           <div>
             <label className="block text-xs text-ink-500 mb-1">保留天数</label>
             <input

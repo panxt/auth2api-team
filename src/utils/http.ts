@@ -58,6 +58,15 @@ function tagStatsFailure(
   if (provider) ctx.provider = provider;
 }
 
+/** Tag the request-log error source: model/upstream vs our own service. */
+function tagCategory(
+  resp: ExpressResponse,
+  category: "upstream" | "service",
+): void {
+  const ctx = statsContext(resp);
+  if (ctx) ctx.category = category;
+}
+
 export function accountUnavailable(
   resp: ExpressResponse,
   result: Extract<AccountResult, { account: null }>,
@@ -65,6 +74,8 @@ export function accountUnavailable(
 ): void {
   const { failureKind, retryAfterMs } = result;
   tagStatsFailure(resp, failureKind || "no_account", provider);
+  // Accounts all cooled by upstream throttling = upstream; nothing loaded = service.
+  tagCategory(resp, failureKind ? "upstream" : "service");
 
   // No accounts at all for this provider.
   if (!failureKind) {
@@ -150,8 +161,22 @@ export async function proxyWithRetry(
   };
   resp.on("close", abortRequest);
 
+  // Track the account whose in-flight slot we currently hold, so concurrent
+  // requests spread across the pool (weighted-least-inflight) and the slot is
+  // released exactly once — on failover (next iteration) and at request end.
+  let heldEmail: string | null = null;
+  const releaseHeld = () => {
+    if (heldEmail) {
+      manager.releaseSlot?.(heldEmail);
+      heldEmail = null;
+    }
+  };
+
   try {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
+      // Failing over → free the previous account's slot first so selection
+      // sees it available again.
+      releaseHeld();
       const result = manager.getNextAccount();
       if (!result.account) {
         // If a prior attempt already produced a real upstream error (e.g. we
@@ -163,6 +188,8 @@ export async function proxyWithRetry(
         return accountUnavailable(resp, result, manager.provider);
       }
       const account = result.account;
+      manager.acquireSlot?.(account.token.email);
+      heldEmail = account.token.email;
       manager.recordAttempt(account.token.email);
       // Surface upstream account attribution to the per-request stats slot
       // (set by server.ts requireApiKey middleware). Done here so failure
@@ -180,6 +207,7 @@ export async function proxyWithRetry(
       } catch (err: any) {
         if (requestController.signal.aborted) return;
         tagStatsFailure(resp, "network", manager.provider);
+        tagCategory(resp, "upstream"); // couldn't reach the model
         manager.recordFailure(account.token.email, "network", err.message);
         if (isDebugLevel(config.debug, "errors")) {
           console.error(
@@ -211,6 +239,7 @@ export async function proxyWithRetry(
         } catch (err: any) {
           if (requestController.signal.aborted || resp.destroyed) return;
           tagStatsFailure(resp, "handler_error", manager.provider);
+          tagCategory(resp, "service"); // our success handler threw
           const message = err?.message || String(err);
           if (isDebugLevel(config.debug, "errors")) {
             console.error(`${tag} success handler failed: ${message}`);
@@ -228,6 +257,7 @@ export async function proxyWithRetry(
 
       lastStatus = upstream.status;
       sawUpstreamError = true;
+      tagCategory(resp, "upstream"); // the model/provider returned an error
       lastRetryAfter = upstream.headers.get("retry-after");
       try {
         lastErrBody = await upstream.text();
@@ -313,6 +343,7 @@ export async function proxyWithRetry(
       }
     }
   } finally {
+    releaseHeld();
     resp.off("close", abortRequest);
   }
 

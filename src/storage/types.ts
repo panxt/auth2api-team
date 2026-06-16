@@ -30,6 +30,17 @@ export interface KeyRepository {
  * separately from the usage EventLog so retention can be pruned freely.
  * `errorDetail`/`requestId` are optional and governed by LoggingConfig.
  */
+/**
+ * Where a failure originated — lets the dashboard separate real problems from
+ * benign noise:
+ *   - "upstream": the model/provider returned an error (Anthropic/Codex 4xx/5xx).
+ *   - "service": auth2api's own fault (no account, handler threw, our 5xx).
+ *   - "policy":  a deliberate rejection (quota, model allow/deny, per-key rate).
+ *   - "client":  client side (disconnect, bad request).
+ *   - "ok":      success (only logged when capture=all).
+ */
+export type LogCategory = "upstream" | "service" | "policy" | "client" | "ok";
+
 export interface RequestLogRecord {
   ts: string; // ISO8601 UTC
   apiKeyHash: string; // full hash; redacted to a prefix at the API layer
@@ -41,6 +52,7 @@ export interface RequestLogRecord {
   status: "success" | "failure";
   statusCode: number;
   failureKind: string | null;
+  category: LogCategory;
   latencyMs: number;
   inputTokens: number | null;
   outputTokens: number | null;
@@ -53,6 +65,7 @@ export interface RequestLogFilter {
   limit: number; // capped by the caller
   cursor?: number | null; // return rows strictly older than this opaque cursor
   status?: "success" | "failure";
+  category?: LogCategory;
   apiKeyPrefix?: string;
   email?: string;
   model?: string;

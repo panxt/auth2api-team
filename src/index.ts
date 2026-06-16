@@ -15,6 +15,7 @@ import { computeCost } from "./usage/pricing";
 import { ManagedKeyStore } from "./keys/store";
 import { openStorage } from "./storage";
 import { RequestLogger } from "./logging/logger";
+import { RoutingController } from "./accounts/routing";
 
 function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
@@ -228,6 +229,16 @@ async function startServer(): Promise<void> {
   );
   requestLogger.startCleanup();
 
+  // Account-selection / load-balancing policy. Resolves defaults < yaml <
+  // persisted, and pushes it into every provider's manager (hot-swappable).
+  const routingController = new RoutingController(
+    storage.settings,
+    (cfg) => {
+      for (const p of registry.all()) p.manager.setRouting(cfg);
+    },
+    config.routing,
+  );
+
   const app = createServer(
     config,
     registry,
@@ -235,6 +246,7 @@ async function startServer(): Promise<void> {
     quotaTracker,
     keyStore,
     requestLogger,
+    routingController,
   );
   const host = config.host || "127.0.0.1";
   const port = config.port;

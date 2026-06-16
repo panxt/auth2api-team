@@ -6,12 +6,14 @@ import {
   setAccountDisabled,
   setAccountBudget,
   AccountSnapshot,
+  CapacitySummary,
   PrewarmResp,
 } from "../api/accounts";
 import { fetchStats } from "../api/stats";
+import { fetchRoutingConfig, updateRoutingConfig, RoutingConfig } from "../api/routing";
 import { ApiError } from "../api/client";
 import { AddAccountModal } from "../components/AddAccountModal";
-import { AccountQuotaPanel } from "../components/AccountQuotaPanel";
+import { AccountQuotaPanel, InfoTip } from "../components/AccountQuotaPanel";
 import { Modal } from "../components/Modal";
 import { useAuth } from "../lib/auth";
 import { SupportedProvider } from "../api/oauth";
@@ -124,9 +126,13 @@ export function Accounts() {
   } | null>(null);
   // Month-to-date cost per account, keyed by "provider:email" (from stats).
   const [monthCost, setMonthCost] = useState<Record<string, number>>({});
+  // Per-provider capacity summary → drives the "上游已打满" alert.
+  const [capacity, setCapacity] = useState<Record<string, CapacitySummary>>({});
+  // "实时" — poll every 2s instead of 30s to watch concurrency spread live.
+  const [realtime, setRealtime] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (initial = false) => {
+    if (initial) setLoading(true);
     setErr(null);
     try {
       const [resp, stats] = await Promise.all([
@@ -135,10 +141,13 @@ export function Accounts() {
         fetchStats({ window: "month" }).catch(() => null),
       ]);
       const byProvider: Record<string, AccountSnapshot[]> = {};
+      const caps: Record<string, CapacitySummary> = {};
       for (const [p, info] of Object.entries(resp.providers)) {
         if (info.account_count > 0) byProvider[p] = info.accounts;
+        if (info.capacity) caps[p] = info.capacity;
       }
       setData(byProvider);
+      setCapacity(caps);
       if (stats) {
         const costs: Record<string, number> = {};
         for (const [k, b] of Object.entries(stats.byAccount)) {
@@ -149,16 +158,16 @@ export function Accounts() {
     } catch (e) {
       setErr((e as ApiError).message);
     } finally {
-      setLoading(false);
+      if (initial) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    load();
-    // poll every 30s so cooldown counters stay fresh
-    const t = setInterval(load, 30_000);
+    load(true);
+    // poll for fresh cooldown / in-flight counters; faster in realtime mode.
+    const t = setInterval(() => load(false), realtime ? 2000 : 30_000);
     return () => clearInterval(t);
-  }, [load]);
+  }, [load, realtime]);
 
   async function onPrewarm() {
     setPrewarming(true);
@@ -216,11 +225,16 @@ export function Accounts() {
     email: string,
     monthlyBudgetUsd: number | null,
     tierLabel: string | null,
+    concurrencyWeight: number | null,
   ) {
     try {
-      await setAccountBudget(provider, email, { monthlyBudgetUsd, tierLabel });
+      await setAccountBudget(provider, email, {
+        monthlyBudgetUsd,
+        tierLabel,
+        concurrencyWeight,
+      });
       setBudgetEdit(null);
-      setTimeout(load, 300);
+      setTimeout(() => load(false), 300);
     } catch (e) {
       alert(`保存失败: ${(e as ApiError).message}`);
     }
@@ -242,6 +256,15 @@ export function Accounts() {
               : "每个 OAuth 账号当前状态 + 累计统计。新增账号 / Prewarm 需 admin 权限,请联系管理员。"}
           </p>
         </div>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 text-sm text-ink-400">
+            <input
+              type="checkbox"
+              checked={realtime}
+              onChange={(e) => setRealtime(e.target.checked)}
+            />
+            实时(2s)
+          </label>
         {isAdmin && (
           <div className="flex gap-2">
             <button
@@ -259,7 +282,13 @@ export function Accounts() {
             </button>
           </div>
         )}
+        </div>
       </header>
+
+      {/* 上游容量告警 + 解决办法 */}
+      <CapacityAlerts capacity={capacity} onAdd={() => setShowAdd(true)} isAdmin={isAdmin} />
+
+      {isAdmin && <RoutingCard />}
 
       {isAdmin && (
         <>
@@ -268,7 +297,7 @@ export function Accounts() {
             onClose={() => setShowAdd(false)}
             onAdded={() => {
               // Refresh after a moment so the new account appears.
-              setTimeout(load, 500);
+              setTimeout(() => load(false), 500);
             }}
           />
           <AddAccountModal
@@ -338,6 +367,7 @@ export function Accounts() {
               ({accounts.length} 账号)
             </span>
           </h2>
+          <ConcurrencyBar accounts={accounts} />
           <div className="card overflow-x-auto p-0">
             <table className="w-full text-sm">
               <thead className="bg-ink-900 text-ink-400">
@@ -462,9 +492,34 @@ export function Accounts() {
                         <span className="ml-2 badge-ok">{a.tierLabel}</span>
                       )}
                     </div>
-                    {a.planType && (
-                      <span className="badge-muted">{a.planType}</span>
-                    )}
+                    <div className="flex items-center gap-2 text-xs text-ink-400">
+                      <span title="负载均衡权重">w={a.concurrencyWeight}</span>
+                      {a.rateLimit?.fields?.["unified-5h-utilization"] && (
+                        <span title="5h 窗口利用率">
+                          5h {Math.round(Number(a.rateLimit.fields["unified-5h-utilization"]) * (Number(a.rateLimit.fields["unified-5h-utilization"]) <= 1 ? 100 : 1))}%
+                        </span>
+                      )}
+                      {a.planType && <span className="badge-muted">{a.planType}</span>}
+                    </div>
+                  </div>
+
+                  {/* 实时并发(处理中 / 峰值) */}
+                  <div className="mb-3">
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-ink-400">实时并发(处理中)</span>
+                      <span className="text-ink-300">
+                        {a.inFlight}
+                        <span className="text-ink-500"> · 峰值并发 {a.peakInFlight}</span>
+                      </span>
+                    </div>
+                    <div className="h-2 bg-ink-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-blue-500 transition-all"
+                        style={{
+                          width: `${Math.min(100, a.peakInFlight > 0 ? (a.inFlight / a.peakInFlight) * 100 : a.inFlight > 0 ? 100 : 0)}%`,
+                        }}
+                      />
+                    </div>
                   </div>
 
                   {/* Monthly budget utilization (display-only) */}
@@ -527,10 +582,12 @@ function BudgetModal({
     email: string,
     monthlyBudgetUsd: number | null,
     tierLabel: string | null,
+    concurrencyWeight: number | null,
   ) => void;
 }) {
   const [budget, setBudget] = useState("");
   const [tier, setTier] = useState("");
+  const [weight, setWeight] = useState("");
 
   useEffect(() => {
     if (edit) {
@@ -540,13 +597,18 @@ function BudgetModal({
           : "",
       );
       setTier(edit.acct.tierLabel ?? "");
+      setWeight(
+        edit.acct.concurrencyWeight && edit.acct.concurrencyWeight !== 1
+          ? String(edit.acct.concurrencyWeight)
+          : "",
+      );
     }
   }, [edit]);
 
   if (!edit) return null;
 
   return (
-    <Modal open={!!edit} onClose={onClose} title={`预算 / 档位 — ${edit.acct.email}`}>
+    <Modal open={!!edit} onClose={onClose} title={`预算 / 档位 / 权重 — ${edit.acct.email}`}>
       <div className="space-y-4">
         <div>
           <label className="block text-sm text-ink-400 mb-1.5">
@@ -576,6 +638,23 @@ function BudgetModal({
             onChange={(e) => setTier(e.target.value)}
           />
         </div>
+        <div>
+          <label className="block text-sm text-ink-400 mb-1.5">
+            负载均衡权重 <span className="text-ink-500">(留空 = 1;大档位账号设大些)</span>
+          </label>
+          <input
+            className="input"
+            type="number"
+            min="0"
+            step="1"
+            placeholder="1"
+            value={weight}
+            onChange={(e) => setWeight(e.target.value)}
+          />
+          <p className="text-xs text-ink-500 mt-1">
+            权重越大,高并发时分到越多请求(weighted-least-inflight 策略下)。
+          </p>
+        </div>
         <div className="flex justify-end gap-2 pt-2">
           <button className="btn-secondary" onClick={onClose}>
             取消
@@ -584,11 +663,13 @@ function BudgetModal({
             className="btn-primary"
             onClick={() => {
               const b = budget.trim() === "" ? null : Number(budget);
+              const w = weight.trim() === "" ? null : Number(weight);
               onSave(
                 edit.provider,
                 edit.acct.email,
                 b != null && !isNaN(b) && b > 0 ? b : null,
                 tier.trim() === "" ? null : tier.trim(),
+                w != null && !isNaN(w) && w > 0 ? w : null,
               );
             }}
           >
@@ -597,5 +678,220 @@ function BudgetModal({
         </div>
       </div>
     </Modal>
+  );
+}
+
+/* ─── Concurrency distribution bar ───────────────────────────── */
+
+function ConcurrencyBar({ accounts }: { accounts: AccountSnapshot[] }) {
+  const total = accounts.reduce((s, a) => s + a.inFlight, 0);
+  if (total === 0) return null;
+  const palette = ["#3b82f6", "#10b981", "#a855f7", "#f59e0b", "#ef4444", "#06b6d4"];
+  return (
+    <div className="mb-3">
+      <div className="flex justify-between text-xs text-ink-400 mb-1">
+        <span>实时并发分布</span>
+        <span>{total} 个处理中</span>
+      </div>
+      <div className="flex h-3 rounded-full overflow-hidden bg-ink-800">
+        {accounts.map((a, i) =>
+          a.inFlight > 0 ? (
+            <div
+              key={a.email}
+              style={{
+                width: `${(a.inFlight / total) * 100}%`,
+                background: palette[i % palette.length],
+              }}
+              title={`${a.email}: ${a.inFlight}`}
+            />
+          ) : null,
+        )}
+      </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1 text-xs text-ink-500">
+        {accounts.map((a, i) => (
+          <span key={a.email} className="flex items-center gap-1">
+            <span
+              className="inline-block w-2 h-2 rounded-full"
+              style={{ background: palette[i % palette.length] }}
+            />
+            {a.email.split("@")[0]}: {a.inFlight}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ─── Capacity alert (上游打满 → 提示 + 解决办法) ───────────── */
+
+function CapacityAlerts({
+  capacity,
+  onAdd,
+  isAdmin,
+}: {
+  capacity: Record<string, CapacitySummary>;
+  onAdd: () => void;
+  isAdmin: boolean;
+}) {
+  const alerts = Object.entries(capacity).filter(
+    ([, c]) => c.total > 0 && c.level !== "ok",
+  );
+  if (alerts.length === 0) return null;
+
+  const fmtReset = (iso: string | null) =>
+    iso ? new Date(iso).toLocaleString() : "—";
+
+  return (
+    <div className="space-y-2 mb-4">
+      {alerts.map(([provider, c]) => {
+        const tone =
+          c.level === "critical"
+            ? "border-rose-600 bg-rose-950/40"
+            : c.level === "warn"
+              ? "border-amber-600 bg-amber-950/30"
+              : "border-blue-600 bg-blue-950/20";
+        const title =
+          c.level === "critical"
+            ? `🔴 ${provider}:所有账号当前不可用,新请求会被 429`
+            : c.level === "warn"
+              ? `🟠 ${provider}:账号池接近打满(${c.usable}/${c.total} 可用)`
+              : `🟡 ${provider}:有账号 5h 窗口将用尽(利用率 ${Math.round((c.maxUtil5h ?? 0) * 100)}%)`;
+        return (
+          <div key={provider} className={`card border ${tone}`}>
+            <div className="font-medium">{title}</div>
+            <div className="text-sm text-ink-300 mt-1">
+              最早恢复:{fmtReset(c.soonestResetAt)}
+              {c.saturationRejects > 0 && (
+                <span className="text-ink-500"> · 已拒绝 {c.saturationRejects} 次</span>
+              )}
+            </div>
+            <div className="text-sm text-ink-400 mt-2">
+              解决办法:
+              <ol className="list-decimal list-inside mt-1 space-y-0.5">
+                <li>等最近的窗口重置(见上方时间)</li>
+                <li>
+                  加上游账号
+                  {isAdmin && (
+                    <button className="ml-2 btn-ghost text-xs" onClick={onAdd}>
+                      + 新增账号
+                    </button>
+                  )}
+                  {!isAdmin && "(联系管理员)"}
+                </li>
+                <li>临时降低并发 / 错峰重试</li>
+              </ol>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ─── Routing settings card (admin) ──────────────────────────── */
+
+function RoutingCard() {
+  const [open, setOpen] = useState(false);
+  const [cfg, setCfg] = useState<RoutingConfig | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchRoutingConfig().then(setCfg).catch(() => setCfg(null));
+  }, []);
+
+  function patch(p: Partial<RoutingConfig>) {
+    setCfg((c) => (c ? { ...c, ...p } : c));
+  }
+
+  async function save() {
+    if (!cfg) return;
+    setSaving(true);
+    setMsg(null);
+    try {
+      const next = await updateRoutingConfig(cfg);
+      setCfg(next);
+      setMsg("已保存");
+      setTimeout(() => setMsg(null), 2000);
+    } catch (e) {
+      setMsg(`保存失败: ${(e as ApiError).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="card mb-4">
+      <button
+        className="flex items-center justify-between w-full text-left"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="font-medium">⚙️ 负载均衡设置</span>
+        <span className="text-ink-500 text-sm">{open ? "收起" : "展开"}</span>
+      </button>
+      {open && cfg && (
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+          <div>
+            <label className="block text-xs text-ink-500 mb-1">调度策略</label>
+            <select
+              className="input !py-1"
+              value={cfg.strategy}
+              onChange={(e) => patch({ strategy: e.target.value as any })}
+            >
+              <option value="adaptive">自适应(低并发粘账号,高并发分摊)</option>
+              <option value="weighted-least-inflight">加权最少处理中(始终分摊)</option>
+              <option value="sticky">粘性(旧行为,挤一个)</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-ink-500 mb-1 inline-flex items-center">
+              粘性阈值(处理中 &lt; 此值才粘账号)
+              <InfoTip text={"账号当前『处理中』请求数低于此值时,新请求继续打到同一账号,以命中 Anthropic 的 prompt 缓存、降低延迟与成本;超过此值即视为该账号拥堵,调度器把请求溢出分摊到其他账号。\n\n调大 = 更省:更黏一个账号、缓存命中高,但单账号易先打满限流。\n调小 = 更稳:更早分摊、并发更均衡,但缓存命中率下降。\n\n默认 4 适合多数场景;压测/批量可调到 1~2 尽快摊开。仅对『自适应』策略生效。"} />
+            </label>
+            <input
+              className="input !py-1"
+              type="number"
+              min="1"
+              value={cfg["stick-while-inflight-below"]}
+              onChange={(e) =>
+                patch({ "stick-while-inflight-below": Number(e.target.value) })
+              }
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-ink-500 mb-1 inline-flex items-center">
+              每账号并发上限(0 = 不限)
+              <InfoTip text="单个账号同时『处理中』的请求数硬上限。达到后该账号不再接新请求,溢出请求改派其他账号;全部账号都满则快速返回 429(带 Retry-After),避免把请求堆在某个账号上拖垮它、触发上游限流冷却。0 表示不设上限。" />
+            </label>
+            <input
+              className="input !py-1"
+              type="number"
+              min="0"
+              value={cfg["per-account-max-inflight"]}
+              onChange={(e) =>
+                patch({ "per-account-max-inflight": Number(e.target.value) })
+              }
+            />
+          </div>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={cfg["use-5h-utilization"]}
+              onChange={(e) => patch({ "use-5h-utilization": e.target.checked })}
+            />
+            <span className="inline-flex items-center">
+              纳入 5 小时窗口利用率打分
+              <InfoTip text={"开启后,选账号不只看『处理中』请求数,还把各账号上游 5 小时滚动窗口的已用额度计入打分:剩余额度越少的账号越不优先,从而提前避开快打满限流的账号、让用量在账号间更均衡。\n\n数据来自上游返回的 unified-5h-utilization,仅 Anthropic 订阅账号有;无此数据的账号(Codex/Cursor)按纯并发分摊,不受影响。\n\n关闭则只按加权处理中数分摊。"} />
+            </span>
+          </label>
+          <div className="md:col-span-2 flex items-center gap-3">
+            <button className="btn-primary text-sm" onClick={save} disabled={saving}>
+              {saving ? "保存中..." : "保存设置"}
+            </button>
+            {msg && <span className="text-ink-400 text-sm">{msg}</span>}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
