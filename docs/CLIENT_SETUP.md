@@ -113,7 +113,9 @@ npm install -g @openai/codex
 | 变量 | 值 |
 |---|---|
 | `ANTHROPIC_BASE_URL` | `<BASE_URL>` |
-| `ANTHROPIC_API_KEY` | `<API_KEY>` |
+| `ANTHROPIC_AUTH_TOKEN` | `<API_KEY>` |
+
+> **关于 token 变量名**:较新版本的 Claude Code 对自定义网关用 `ANTHROPIC_AUTH_TOKEN`(以 `Authorization: Bearer` 头发送);旧版本用 `ANTHROPIC_API_KEY`(以 `x-api-key` 头发送)。auth2api 两种头都接受,**两个变量都能用**——本文档统一用新的 `ANTHROPIC_AUTH_TOKEN`。若你之前设过旧的 `ANTHROPIC_API_KEY`,建议 `unset ANTHROPIC_API_KEY`(Windows:删除该用户环境变量)后改用新变量,避免两个同时设置时的歧义。
 
 ### 1.1 macOS — 永久写入(推荐)
 
@@ -123,7 +125,7 @@ cat >> ~/.zshrc <<'EOF'
 
 # auth2api proxy
 export ANTHROPIC_BASE_URL="<BASE_URL>"
-export ANTHROPIC_API_KEY="<API_KEY>"
+export ANTHROPIC_AUTH_TOKEN="<API_KEY>"
 EOF
 
 source ~/.zshrc      # 立即生效
@@ -136,7 +138,7 @@ claude               # 启动
 
 ```bash
 ANTHROPIC_BASE_URL=<BASE_URL> \
-ANTHROPIC_API_KEY=<API_KEY> \
+ANTHROPIC_AUTH_TOKEN=<API_KEY> \
 claude
 ```
 
@@ -144,7 +146,7 @@ claude
 
 ```powershell
 [Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", "<BASE_URL>", "User")
-[Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY",  "<API_KEY>",  "User")
+[Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN",  "<API_KEY>",  "User")
 
 # 关掉这个 PowerShell 窗口,重开一个新窗口,然后:
 claude
@@ -154,7 +156,7 @@ claude
 
 ```cmd
 set ANTHROPIC_BASE_URL=<BASE_URL>
-set ANTHROPIC_API_KEY=<API_KEY>
+set ANTHROPIC_AUTH_TOKEN=<API_KEY>
 claude
 ```
 
@@ -186,10 +188,10 @@ Select login method:
 | 选项 | 适用场景 | 你的情况 |
 |---|---|---|
 | 1. Claude account with subscription | 直连 claude.ai,用个人 Pro/Max 订阅 | ❌ 我们走代理,不走 claude.ai |
-| **2. Anthropic Console account · API usage billing** | 用 `ANTHROPIC_API_KEY` 走 Anthropic API(或兼容代理) | ✅ **就选这个** |
+| **2. Anthropic Console account · API usage billing** | 用 `ANTHROPIC_AUTH_TOKEN` 走 Anthropic API(或兼容代理) | ✅ **就选这个** |
 | 3. 3rd-party platform | AWS Bedrock / GCP Vertex / Azure | ❌ 完全不同的协议 |
 
-代理 auth2api 暴露的 `/v1/messages` 与 Anthropic API 同协议,Claude Code 把 `ANTHROPIC_BASE_URL` 改向代理 + `ANTHROPIC_API_KEY` 当 token 就直接通。
+代理 auth2api 暴露的 `/v1/messages` 与 Anthropic API 同协议,Claude Code 把 `ANTHROPIC_BASE_URL` 改向代理 + `ANTHROPIC_AUTH_TOKEN` 当 token 就直接通。
 
 **理论上**:只要环境变量正确设置好,Claude Code 应该**跳过这个界面直接进对话**。看到这个界面通常说明环境变量没生效,先按下面排查再选 2。
 
@@ -198,13 +200,13 @@ Select login method:
 **Windows PowerShell**:
 ```powershell
 echo $env:ANTHROPIC_BASE_URL
-echo $env:ANTHROPIC_API_KEY
+echo $env:ANTHROPIC_AUTH_TOKEN
 ```
 
 **macOS / Linux**:
 ```bash
 echo $ANTHROPIC_BASE_URL
-echo $ANTHROPIC_API_KEY
+echo $ANTHROPIC_AUTH_TOKEN
 ```
 
 两条都该回显刚才设置的值。如果是空 → 进排查 2。
@@ -259,11 +261,11 @@ echo $ANTHROPIC_API_KEY
 | CLI 里 `claude logout` | 插件下次起来也变成未登录态 |
 | CLI 里走订阅 OAuth 登录(选 1)| 插件下次也用这个订阅账号 |
 | 插件里点订阅登录 | CLI 下次也用这个订阅账号 |
-| 环境变量 `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` | 两边都看,只要进程能读到 |
+| 环境变量 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` | 两边都看,只要进程能读到 |
 
 #### 同样的优先级陷阱:OAuth 缓存高于环境变量
 
-如果 `~/.claude/.credentials.json` 里有有效的 OAuth 凭据,Claude Code 会**优先用它,忽略 `ANTHROPIC_API_KEY` 环境变量,直连 `api.anthropic.com`** —— 体现为"环境变量明明对,请求却没走代理"。
+如果 `~/.claude/.credentials.json` 里有有效的 OAuth 凭据,Claude Code 会**优先用它,忽略 `ANTHROPIC_AUTH_TOKEN` 环境变量,直连 `api.anthropic.com`** —— 体现为"环境变量明明对,请求却没走代理"。
 
 **检查是否有 OAuth 缓存:**
 
@@ -304,7 +306,7 @@ Remove-Item "$env:USERPROFILE\.claude\.credentials.json" -ErrorAction SilentlyCo
 
 1. **环境变量写到系统级**(GUI 启动的 IDE 才读得到):
    - Win:`[Environment]::SetEnvironmentVariable(..., "User")`
-   - macOS:写 `~/.zshrc`(CLI 用) **加上** `launchctl setenv ANTHROPIC_BASE_URL "..."` / `launchctl setenv ANTHROPIC_API_KEY "..."`(IDE GUI 启动用)
+   - macOS:写 `~/.zshrc`(CLI 用) **加上** `launchctl setenv ANTHROPIC_BASE_URL "..."` / `launchctl setenv ANTHROPIC_AUTH_TOKEN "..."`(IDE GUI 启动用)
 2. **永远不点订阅登录**(不管是 CLI 的选项 1 还是插件里同样的按钮)
 3. **任何配置大改之后** `claude logout` 兜底
 4. 首次启动遇到登录界面 → **选 2(API usage)**,绝不选 1

@@ -277,11 +277,13 @@ Set `ANTHROPIC_BASE_URL` to point Claude Code at auth2api:
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8317 \
-ANTHROPIC_API_KEY=<your-api-key> \
+ANTHROPIC_AUTH_TOKEN=<your-api-key> \
 claude
 ```
 
-Claude Code uses the native `/v1/messages` endpoint which auth2api passes through directly. Both `Authorization: Bearer` and `x-api-key` authentication headers are supported.
+Recent Claude Code versions use `ANTHROPIC_AUTH_TOKEN` (sent as `Authorization: Bearer`) for custom gateways; older versions used `ANTHROPIC_API_KEY` (sent as `x-api-key`). auth2api accepts both header styles, so either variable works.
+
+Claude Code uses the native `/v1/messages` endpoint which auth2api passes through directly.
 
 ## Multi-account
 

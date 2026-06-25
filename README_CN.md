@@ -288,11 +288,13 @@ docker-compose up -d
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8317 \
-ANTHROPIC_API_KEY=<your-api-key> \
+ANTHROPIC_AUTH_TOKEN=<your-api-key> \
 claude
 ```
 
-Claude Code 使用的是原生 `/v1/messages` 接口，auth2api 会直接透传。`Authorization: Bearer` 与 `x-api-key` 两种认证头都支持。
+较新版本的 Claude Code 对自定义网关使用 `ANTHROPIC_AUTH_TOKEN`（以 `Authorization: Bearer` 发送）；旧版本用 `ANTHROPIC_API_KEY`（以 `x-api-key` 发送）。auth2api 两种认证头都支持，因此两个变量都能用。
+
+Claude Code 使用的是原生 `/v1/messages` 接口，auth2api 会直接透传。
 
 ## 多账号
 

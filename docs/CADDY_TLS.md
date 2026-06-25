@@ -253,13 +253,13 @@ Claude Code 之前接的是 `http://172.16.13.203:8318`,可以平滑切到 https
 ```bash
 # ~/.zshrc
 export ANTHROPIC_BASE_URL="https://auth2api.team:8443"
-export ANTHROPIC_API_KEY="sk-..."
+export ANTHROPIC_AUTH_TOKEN="sk-..."
 ```
 
 **Windows PowerShell**:
 ```powershell
 [Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", "https://auth2api.team:8443", "User")
-[Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY",  "sk-...", "User")
+[Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN",  "sk-...", "User")
 ```
 
 只要 root CA 装好,Claude Code 也认这个 https。

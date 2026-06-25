@@ -653,13 +653,15 @@ curl -s -H "Authorization: Bearer $key" $chosen_url/v1/models
 \`\`\`bash
 # macOS — 写入 ~/.zshrc 然后 source
 export ANTHROPIC_BASE_URL="$chosen_url"
-export ANTHROPIC_API_KEY="$key"
+export ANTHROPIC_AUTH_TOKEN="$key"
 \`\`\`
 \`\`\`powershell
 # Windows PowerShell — User 级别
 [Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", "$chosen_url", "User")
-[Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY",  "$key", "User")
+[Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN",  "$key", "User")
 \`\`\`
+
+> 新版 Claude Code 用 \`ANTHROPIC_AUTH_TOKEN\`;旧版用 \`ANTHROPIC_API_KEY\`,本服务两者都收。若之前设过旧的,建议 \`unset ANTHROPIC_API_KEY\` 后改用新变量。
 
 启动 \`claude\` 后若弹登录菜单,**选第 2 项** \`Anthropic Console account · API usage billing\`。
 **绝对不要选 1**(订阅登录),会绕过代理。
