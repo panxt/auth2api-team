@@ -28,7 +28,8 @@ import {
 } from "./ratelimit/per-key";
 import { ManagedKeyStore, ManagedKeyError } from "./keys/store";
 import { startOAuth, exchangeOAuth } from "./admin/oauth";
-import { ProviderId } from "./auth/types";
+import { ProviderId, TokenData } from "./auth/types";
+import { loadAllTokens, saveToken } from "./auth/token-storage";
 import { RequestLogger } from "./logging/logger";
 import { RoutingController } from "./accounts/routing";
 import { PrewarmScheduler } from "./accounts/prewarm";
@@ -874,6 +875,97 @@ export function createServer(
       }
     },
   );
+
+  // GET /admin/accounts/:provider/:email/export — export one account's full
+  // credential bundle (access+refresh token, uuid, annotations) so it can be
+  // moved to another auth2api instance. ⚠ Contains live OAuth credentials —
+  // admin-only; the response is a secret. The receiving instance imports it via
+  // POST /admin/accounts/import.
+  app.get(
+    "/admin/accounts/:provider/:email/export",
+    requireAdmin,
+    (req, res) => {
+      const provider = registry.get(req.params.provider as ProviderId);
+      if (!provider) {
+        res.status(404).json({ error: { message: `unknown provider ${req.params.provider}` } });
+        return;
+      }
+      const email = decodeURIComponent(req.params.email);
+      const token = loadAllTokens(config["auth-dir"], provider.id).find(
+        (t) => t.email === email,
+      );
+      if (!token) {
+        res.status(404).json({ error: { message: `no account ${email} loaded for ${provider.id}` } });
+        return;
+      }
+      res.json({
+        kind: "auth2api-account-export",
+        version: 1,
+        exported_at: new Date().toISOString(),
+        account: token,
+      });
+    },
+  );
+
+  // POST /admin/accounts/import — import one or more account bundles produced by
+  // the export endpoint (single {account} or {accounts:[...]} or a bare bundle).
+  // Writes the token file + loads it live. Existing same-email accounts are
+  // overwritten (re-auth semantics). Admin-only.
+  app.post("/admin/accounts/import", requireAdmin, async (req, res) => {
+    const body = (req.body || {}) as any;
+    // Accept: {accounts:[...]}, {account:{...}}, a single bundle {kind, account},
+    // or a bare TokenData.
+    let bundles: any[] = [];
+    if (Array.isArray(body.accounts)) bundles = body.accounts;
+    else if (body.account) bundles = [body.account];
+    else if (body.accessToken || body.refreshToken) bundles = [body];
+    else {
+      res.status(400).json({ error: { message: "no account(s) in body — expected { account } or { accounts: [...] }" } });
+      return;
+    }
+
+    const imported: { provider: string; email: string }[] = [];
+    const errors: { email?: string; error: string }[] = [];
+    for (const raw of bundles) {
+      try {
+        const t = raw as Partial<TokenData>;
+        if (!t || typeof t.email !== "string" || !t.refreshToken) {
+          errors.push({ email: t?.email, error: "missing email or refreshToken" });
+          continue;
+        }
+        const providerId = (t.provider ?? "anthropic") as ProviderId;
+        const provider = registry.get(providerId);
+        if (!provider) {
+          errors.push({ email: t.email, error: `unknown provider ${providerId}` });
+          continue;
+        }
+        const token: TokenData = {
+          accessToken: t.accessToken ?? "",
+          refreshToken: t.refreshToken,
+          email: t.email,
+          expiresAt: t.expiresAt ?? new Date(0).toISOString(),
+          accountUuid: t.accountUuid ?? "",
+          provider: providerId,
+          idToken: t.idToken,
+          planType: t.planType,
+          cursorServiceMachineId: t.cursorServiceMachineId,
+          cursorClientVersion: t.cursorClientVersion,
+          cursorConfigVersion: t.cursorConfigVersion,
+          cursorClientId: t.cursorClientId,
+          cursorMembershipType: t.cursorMembershipType,
+          monthlyBudgetUsd: t.monthlyBudgetUsd,
+          tierLabel: t.tierLabel,
+          concurrencyWeight: t.concurrencyWeight,
+        };
+        saveToken(config["auth-dir"], token);
+        provider.manager.addAccount(token);
+        imported.push({ provider: providerId, email: token.email });
+      } catch (err: any) {
+        errors.push({ email: raw?.email, error: err?.message || String(err) });
+      }
+    }
+    res.json({ imported, errors, generated_at: new Date().toISOString() });
+  });
 
   app.get("/admin/accounts", (_req, res) => {
     const providers: Record<

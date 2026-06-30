@@ -3,6 +3,8 @@ import {
   listAccounts,
   reload,
   refreshAccount,
+  exportAccount,
+  importAccounts,
   deleteAccount,
   setAccountDisabled,
   setAccountBudget,
@@ -113,6 +115,8 @@ export function Accounts() {
   // 全局「刷新状态」按钮 in-flight, and per-account refresh ("provider:email").
   const [reloading, setReloading] = useState(false);
   const [refreshingOne, setRefreshingOne] = useState<string | null>(null);
+  // 跨实例账号转移:导入弹窗。
+  const [showImport, setShowImport] = useState(false);
   // "实时" — poll every 2s instead of 30s to watch concurrency spread live.
   const [realtime, setRealtime] = useState(false);
 
@@ -216,6 +220,24 @@ export function Accounts() {
     }
   }
 
+  // 导出该账号的凭据 bundle → 下载 JSON,可导入到另一台 auth2api。
+  async function onExport(providerId: string, email: string) {
+    try {
+      const bundle = await exportAccount(providerId, email);
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `auth2api-account-${providerId}-${email.replace(/[^a-zA-Z0-9@._-]/g, "_")}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(`导出失败: ${(e as ApiError).message}`);
+    }
+  }
+
   function onReauth(providerId: string, acct: AccountSnapshot) {
     if (providerId !== "anthropic" && providerId !== "codex") {
       alert(
@@ -283,6 +305,13 @@ export function Accounts() {
           <div className="flex gap-2">
             <button
               className="btn-secondary"
+              onClick={() => setShowImport(true)}
+              title="从另一台 auth2api 导出的 JSON 导入账号"
+            >
+              ⇄ 导入账号
+            </button>
+            <button
+              className="btn-secondary"
               onClick={() => setShowAdd(true)}
             >
               + 新增账号
@@ -322,6 +351,14 @@ export function Accounts() {
             edit={budgetEdit}
             onClose={() => setBudgetEdit(null)}
             onSave={onSaveBudget}
+          />
+          <ImportAccountsModal
+            open={showImport}
+            onClose={() => setShowImport(false)}
+            onImported={() => {
+              setShowImport(false);
+              setTimeout(() => load(false), 300);
+            }}
           />
         </>
       )}
@@ -435,6 +472,13 @@ export function Accounts() {
                             title="OAuth 重新登录 — 用相同 email 登录会刷新 token"
                           >
                             重新认证
+                          </button>
+                          <button
+                            className="btn-ghost text-xs"
+                            onClick={() => onExport(providerId, a.email)}
+                            title="导出凭据 JSON,可导入到另一台 auth2api(含 token,妥善保管)"
+                          >
+                            导出
                           </button>
                           <button
                             className="btn-ghost text-xs"
@@ -769,6 +813,88 @@ function CapacityAlerts({
         );
       })}
     </div>
+  );
+}
+
+/* ─── Import accounts modal (cross-instance transfer) ─────────── */
+
+function ImportAccountsModal({
+  open,
+  onClose,
+  onImported,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onImported: () => void;
+}) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    file.text().then(setText);
+  }
+
+  async function doImport() {
+    setBusy(true);
+    setMsg(null);
+    let payload: unknown;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      setMsg("JSON 解析失败,请检查粘贴内容");
+      setBusy(false);
+      return;
+    }
+    try {
+      const r = await importAccounts(payload);
+      const okN = r.imported.length;
+      const errN = r.errors.length;
+      if (errN === 0) {
+        setMsg(`已导入 ${okN} 个账号 ✓`);
+        setTimeout(onImported, 800);
+      } else {
+        setMsg(
+          `导入 ${okN} 个,失败 ${errN} 个:${r.errors
+            .map((e) => `${e.email ?? "?"}(${e.error})`)
+            .join("; ")}`,
+        );
+        if (okN > 0) setTimeout(onImported, 1500);
+      }
+    } catch (e) {
+      setMsg(`导入失败: ${(e as ApiError).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="导入账号(跨实例转移)">
+      <div className="space-y-3 text-sm">
+        <p className="text-ink-400">
+          粘贴(或上传)另一台 auth2api 用「导出」生成的 JSON。支持单个或
+          <code className="mx-1">{"{ accounts: [...] }"}</code>批量。
+          <span className="text-amber-400">
+            ⚠ 文件含真实 OAuth 凭据,导入即等于把上游账号迁到本实例。
+          </span>
+        </p>
+        <input type="file" accept="application/json,.json" onChange={onFile} className="text-xs" />
+        <textarea
+          className="input w-full font-mono text-xs h-40"
+          placeholder='{"kind":"auth2api-account-export", "account": { ... }}'
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+        <div className="flex items-center gap-3">
+          <button className="btn-primary text-sm" onClick={doImport} disabled={busy || !text.trim()}>
+            {busy ? "导入中..." : "导入"}
+          </button>
+          {msg && <span className="text-ink-300 text-xs">{msg}</span>}
+        </div>
+      </div>
+    </Modal>
   );
 }
 

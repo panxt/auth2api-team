@@ -117,6 +117,21 @@ export const refreshAccount = (provider: string, email: string) =>
     `/admin/accounts/${provider}/${encodeURIComponent(email)}/refresh`,
   );
 
+/** Export one account's full credential bundle (for moving to another
+ *  auth2api instance). ⚠ Contains live OAuth tokens. */
+export const exportAccount = (provider: string, email: string) =>
+  get<{ kind: string; version: number; exported_at: string; account: unknown }>(
+    `/admin/accounts/${provider}/${encodeURIComponent(email)}/export`,
+  );
+
+/** Import account bundle(s) produced by exportAccount on another instance. */
+export const importAccounts = (payload: unknown) =>
+  post<{
+    imported: { provider: string; email: string }[];
+    errors: { email?: string; error: string }[];
+    generated_at: string;
+  }>("/admin/accounts/import", payload);
+
 export const deleteAccount = (provider: string, email: string) =>
   del<{ ok: true; provider: string; email: string }>(
     `/admin/accounts/${provider}/${encodeURIComponent(email)}`,
