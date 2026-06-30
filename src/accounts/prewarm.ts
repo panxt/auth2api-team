@@ -1,13 +1,19 @@
 import { PrewarmConfig, resolvePrewarmConfig } from "../config";
-import type { SettingsStore } from "../storage/types";
+import type {
+  SettingsStore,
+  PrewarmRunStore,
+  PrewarmRunPage,
+} from "../storage/types";
 import type { PrewarmResult } from "../providers/types";
 
 const SETTINGS_KEY = "prewarm";
 /** Timer granularity. Trigger points have minute resolution, so a 30s tick
  *  guarantees each configured "HH:MM" is observed within its minute. */
 const TICK_MS = 30_000;
-/** How many recent runs to keep in memory for the dashboard. */
+/** How many recent runs to keep in memory (fallback when no store is wired). */
 const HISTORY_LIMIT = 20;
+/** Hard cap on persisted runs — pruned after each append. */
+const STORE_MAX_ROWS = 2000;
 
 /** One recorded prewarm run (scheduled, manual, or startup). */
 export interface PrewarmRun {
@@ -48,6 +54,9 @@ export class PrewarmScheduler {
     /** Sends the actual pings; returns one result per warmed provider. */
     private runPrewarm: () => Promise<PrewarmResult[]>,
     private yamlSeed?: Partial<PrewarmConfig>,
+    /** Optional durable store for run history (survives restarts). When
+     *  absent, history is in-memory only (e.g. in tests). */
+    private store?: PrewarmRunStore,
   ) {
     const persisted = settings.get<Partial<PrewarmConfig>>(SETTINGS_KEY);
     this.config = resolvePrewarmConfig(yamlSeed, persisted);
@@ -61,8 +70,31 @@ export class PrewarmScheduler {
     };
   }
 
+  /** Recent in-memory runs (newest first). Fallback view; prefer historyPage()
+   *  which reads the durable store when one is wired. */
   getHistory(): PrewarmRun[] {
     return this.history.map((r) => ({ ...r }));
+  }
+
+  /** Paginated run history. Reads the durable store when present (cross-restart,
+   *  unbounded), else falls back to the in-memory ring with an offset cursor. */
+  historyPage(opts: { limit: number; cursor?: number | null }): PrewarmRunPage {
+    if (this.store) return this.store.list(opts);
+    const start = opts.cursor != null ? opts.cursor : 0;
+    const slice = this.history.slice(start, start + opts.limit + 1);
+    const hasMore = slice.length > opts.limit;
+    const page = slice.slice(0, opts.limit);
+    return {
+      rows: page.map((r, i) => ({
+        id: start + i,
+        at: r.at,
+        trigger: r.trigger,
+        ok: r.ok,
+        total: r.total,
+        providers: r.providers,
+      })),
+      nextCursor: hasMore ? start + opts.limit : null,
+    };
   }
 
   /** Persist + hot-apply a config patch. Validates `times` so a typo surfaces
@@ -142,6 +174,21 @@ export class PrewarmScheduler {
     this.history.unshift(run);
     if (this.history.length > HISTORY_LIMIT)
       this.history.length = HISTORY_LIMIT;
+    // Durable record (survives restart) + keep the table bounded.
+    if (this.store) {
+      try {
+        this.store.append({
+          at: run.at,
+          trigger: run.trigger,
+          ok: run.ok,
+          total: run.total,
+          providers: run.providers,
+        });
+        this.store.prune({ maxRows: STORE_MAX_ROWS });
+      } catch (err: any) {
+        console.error("[prewarm] failed to persist run:", err?.message || err);
+      }
+    }
     return run;
   }
 }

@@ -15,6 +15,9 @@ import {
   RequestLogRecord,
   RequestLogFilter,
   RequestLogPage,
+  PrewarmRunStore,
+  PrewarmRunRecord,
+  PrewarmRunPage,
   SettingsStore,
 } from "./types";
 
@@ -146,6 +149,8 @@ export class FileRequestLogStore implements RequestLogStore {
       if (filter.provider && r.provider !== filter.provider) return false;
       if (filter.apiKeyPrefix && !r.apiKeyHash.startsWith(filter.apiKeyPrefix))
         return false;
+      if (filter.apiKeyHashes && !filter.apiKeyHashes.includes(r.apiKeyHash))
+        return false;
       if (filter.since && r.ts < filter.since) return false;
       if (filter.until && r.ts > filter.until) return false;
       if (filter.q && !(r.errorDetail ?? "").toLowerCase().includes(filter.q.toLowerCase()))
@@ -207,5 +212,65 @@ export class FileRequestLogStore implements RequestLogStore {
       }
     }
     return removed; // count of files removed (not rows) for the file backend
+  }
+}
+
+/**
+ * PrewarmRunStore backed by a single append-only JSONL file. Prewarm volume is
+ * tiny (a handful of runs/day), so a flat file with a newest-first read + an
+ * offset cursor is plenty.
+ */
+export class FilePrewarmRunStore implements PrewarmRunStore {
+  private filePath: string;
+  constructor(authDir: string) {
+    this.filePath = path.join(authDir, "prewarm-runs.jsonl");
+  }
+  private readAll(): PrewarmRunRecord[] {
+    if (!fs.existsSync(this.filePath)) return [];
+    const out: PrewarmRunRecord[] = [];
+    for (const line of fs.readFileSync(this.filePath, "utf-8").split("\n")) {
+      if (!line) continue;
+      try {
+        out.push(JSON.parse(line));
+      } catch {
+        /* skip corrupt line */
+      }
+    }
+    return out;
+  }
+
+  append(rec: PrewarmRunRecord): void {
+    fs.mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
+    fs.appendFileSync(this.filePath, JSON.stringify(rec) + "\n", { mode: 0o600 });
+  }
+
+  list({ limit, cursor }: { limit: number; cursor?: number | null }): PrewarmRunPage {
+    // id = index in insertion order; newest-first uses a reversed view.
+    const all = this.readAll();
+    const total = all.length;
+    const reversed = all
+      .map((r, i) => ({ ...r, id: i }))
+      .reverse(); // newest first
+    const start = cursor != null ? total - cursor : 0; // rows older than cursor
+    const slice = reversed.slice(start, start + limit + 1);
+    const hasMore = slice.length > limit;
+    const page = slice.slice(0, limit);
+    return {
+      rows: page,
+      nextCursor: hasMore ? page[page.length - 1].id : null,
+    };
+  }
+
+  prune({ maxRows }: { maxRows?: number }): number {
+    if (!maxRows || maxRows <= 0) return 0;
+    const all = this.readAll();
+    if (all.length <= maxRows) return 0;
+    const kept = all.slice(all.length - maxRows);
+    fs.writeFileSync(
+      this.filePath,
+      kept.map((r) => JSON.stringify(r)).join("\n") + "\n",
+      { mode: 0o600 },
+    );
+    return all.length - maxRows;
   }
 }

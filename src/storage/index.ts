@@ -6,6 +6,7 @@ import {
   FileEventLog,
   FileKeyRepository,
   FileRequestLogStore,
+  FilePrewarmRunStore,
   FileSettingsStore,
 } from "./file";
 
@@ -15,8 +16,16 @@ function fileStorage(authDir: string): Storage {
   const eventLog = new FileEventLog(authDir);
   const keyRepo = new FileKeyRepository(authDir);
   const requestLog = new FileRequestLogStore(authDir);
+  const prewarmLog = new FilePrewarmRunStore(authDir);
   const settings = new FileSettingsStore(authDir);
-  return { eventLog, keyRepo, requestLog, settings, close: () => eventLog.close() };
+  return {
+    eventLog,
+    keyRepo,
+    requestLog,
+    prewarmLog,
+    settings,
+    close: () => eventLog.close(),
+  };
 }
 
 /** Expand ~ and resolve a relative sqlite-path against authDir (not cwd). */

@@ -11,6 +11,7 @@ export interface PrewarmConfig {
 }
 
 export interface PrewarmRun {
+  id?: number;
   trigger: "schedule" | "manual";
   at: string;
   providers: Array<{
@@ -29,5 +30,14 @@ export const fetchPrewarmConfig = () =>
 export const updatePrewarmConfig = (patch: Partial<PrewarmConfig>) =>
   put<PrewarmConfig>("/admin/prewarm/config", patch);
 
-export const fetchPrewarmHistory = () =>
-  get<{ runs: PrewarmRun[] }>("/admin/prewarm/history");
+export const fetchPrewarmHistory = (opts?: {
+  limit?: number;
+  cursor?: number | null;
+}) => {
+  const params = new URLSearchParams();
+  params.set("limit", String(opts?.limit ?? 20));
+  if (opts?.cursor != null) params.set("cursor", String(opts.cursor));
+  return get<{ runs: PrewarmRun[]; nextCursor: number | null }>(
+    `/admin/prewarm/history?${params.toString()}`,
+  );
+};

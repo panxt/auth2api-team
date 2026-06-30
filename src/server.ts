@@ -514,7 +514,10 @@ export function createServer(
   // are never returned (only a hash prefix). GET/PUT /admin/logging/config —
   // read / live-update the logging policy (persisted to the SettingsStore).
   if (requestLogger) {
-    app.get("/admin/logs", requireAdmin, (req, res) => {
+    // Readable by any valid key (not admin-only): everyone can view the logs.
+    // Key hashes are resolved to human names (label/owner) and never exposed
+    // beyond a 12-char prefix.
+    app.get("/admin/logs", (req, res) => {
       const q = req.query;
       const limRaw = Number(q.limit);
       const limit =
@@ -524,12 +527,34 @@ export function createServer(
       const str = (v: unknown) =>
         typeof v === "string" && v.length ? v : undefined;
       const validCats = ["upstream", "service", "policy", "client", "ok"];
+
+      // hash → human name (label || owner). Keys are few; rebuild per request
+      // so renames/new keys reflect immediately.
+      const nameByHash = new Map<string, string>();
+      for (const entry of config["api-keys"].values()) {
+        const name = entry.label || entry.owner;
+        if (name) nameByHash.set(hashApiKey(entry.key), name);
+      }
+
+      // Resolve a name search to the set of matching key hashes. No match →
+      // empty array → zero results (rather than ignoring the filter).
+      const keyName = str(q.keyName);
+      let apiKeyHashes: string[] | undefined;
+      if (keyName) {
+        const needle = keyName.toLowerCase();
+        apiKeyHashes = [];
+        for (const [hash, name] of nameByHash) {
+          if (name.toLowerCase().includes(needle)) apiKeyHashes.push(hash);
+        }
+      }
+
       const page = requestLogger.query({
         limit,
         cursor,
         status: q.status === "failure" || q.status === "success" ? q.status : undefined,
         category: validCats.includes(q.category as string) ? (q.category as any) : undefined,
         apiKeyPrefix: str(q.apiKey),
+        apiKeyHashes,
         email: str(q.email),
         model: str(q.model),
         endpoint: str(q.endpoint),
@@ -539,9 +564,11 @@ export function createServer(
         q: str(q.q),
       });
       // Redact: only expose the 12-char hash prefix, never the full hash.
+      // keyName falls back to the prefix when the key is unknown (e.g. deleted).
       const rows = page.rows.map((r) => ({
         ...r,
         apiKeyShort: r.apiKeyHash.slice(0, 12),
+        keyName: nameByHash.get(r.apiKeyHash) ?? null,
         apiKeyHash: undefined,
       }));
       res.json({ logs: rows, nextCursor: page.nextCursor, generated_at: new Date().toISOString() });
@@ -593,9 +620,20 @@ export function createServer(
         res.status(400).json({ error: { message: err?.message || String(err) } });
       }
     });
-    // Recent run history (scheduled + manual), newest first, for the dashboard.
-    app.get("/admin/prewarm/history", requireAdmin, (_req, res) => {
-      res.json({ runs: prewarmScheduler.getHistory() });
+    // Run history (scheduled + manual), newest first, persisted across
+    // restarts. Paginated: ?limit=&cursor= (cursor from previous nextCursor).
+    app.get("/admin/prewarm/history", requireAdmin, (req, res) => {
+      const limit = Math.min(
+        Math.max(Number(req.query.limit) || 20, 1),
+        100,
+      );
+      const cursor =
+        req.query.cursor != null ? Number(req.query.cursor) : null;
+      const page = prewarmScheduler.historyPage({
+        limit,
+        cursor: Number.isFinite(cursor as number) ? cursor : null,
+      });
+      res.json({ runs: page.rows, nextCursor: page.nextCursor });
     });
   }
 

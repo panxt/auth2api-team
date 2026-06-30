@@ -6,8 +6,39 @@ import {
   DEFAULT_PREWARM_CONFIG,
 } from "../src/config";
 import { PrewarmScheduler } from "../src/accounts/prewarm";
-import type { SettingsStore } from "../src/storage/types";
+import type {
+  SettingsStore,
+  PrewarmRunStore,
+  PrewarmRunRecord,
+  PrewarmRunPage,
+} from "../src/storage/types";
 import type { PrewarmResult } from "../src/providers/types";
+
+/** In-memory PrewarmRunStore for tests (newest-first, id = insertion order). */
+function memPrewarmStore(): PrewarmRunStore & { rows: PrewarmRunRecord[] } {
+  const rows: PrewarmRunRecord[] = [];
+  return {
+    rows,
+    append(rec) {
+      rows.push(rec);
+    },
+    list({ limit, cursor }): PrewarmRunPage {
+      const total = rows.length;
+      const reversed = rows.map((r, i) => ({ ...r, id: i })).reverse();
+      const start = cursor != null ? total - cursor : 0;
+      const slice = reversed.slice(start, start + limit + 1);
+      const hasMore = slice.length > limit;
+      const page = slice.slice(0, limit);
+      return { rows: page, nextCursor: hasMore ? page[page.length - 1].id : null };
+    },
+    prune({ maxRows }) {
+      if (!maxRows || rows.length <= maxRows) return 0;
+      const removed = rows.length - maxRows;
+      rows.splice(0, removed);
+      return removed;
+    },
+  };
+}
 
 /** In-memory SettingsStore for tests. */
 function memSettings(): SettingsStore & { data: Map<string, unknown> } {
@@ -90,6 +121,31 @@ test("trigger() runs prewarm and records a roll-up in history", async () => {
   assert.equal(hist.length, 1);
   assert.equal(hist[0].ok, 1);
   assert.equal(hist[0].total, 2);
+});
+
+test("store-backed history persists across a restart and paginates", async () => {
+  const settings = memSettings();
+  const store = memPrewarmStore();
+  const run = async (): Promise<PrewarmResult[]> => [
+    { provider: "anthropic", results: [{ email: "a@x.com", ok: true }], generated_at: "" },
+  ];
+
+  const s1 = new PrewarmScheduler(settings, run, undefined, store);
+  for (let i = 0; i < 5; i++) await s1.trigger(i % 2 ? "manual" : "schedule");
+  assert.equal(store.rows.length, 5);
+
+  // Simulate a restart: a brand-new scheduler with no in-memory history still
+  // serves the persisted runs from the store.
+  const s2 = new PrewarmScheduler(settings, run, undefined, store);
+  assert.equal(s2.getHistory().length, 0, "in-memory ring is empty after restart");
+
+  const page1 = s2.historyPage({ limit: 2 });
+  assert.equal(page1.rows.length, 2);
+  assert.notEqual(page1.nextCursor, null);
+  const page2 = s2.historyPage({ limit: 2, cursor: page1.nextCursor });
+  assert.equal(page2.rows.length, 2);
+  // Newest-first: page1[0] is the most recent run.
+  assert.ok(page1.rows[0].id > page2.rows[0].id);
 });
 
 test("history is newest-first and capped", async () => {

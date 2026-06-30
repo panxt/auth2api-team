@@ -268,6 +268,7 @@ async function startServer(): Promise<void> {
     storage.settings,
     runPrewarm,
     config.prewarm,
+    storage.prewarmLog,
   );
   prewarmScheduler.start();
 
