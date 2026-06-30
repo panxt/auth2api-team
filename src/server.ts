@@ -845,6 +845,36 @@ export function createServer(
     },
   );
 
+  // POST /admin/accounts/:provider/:email/refresh — actively renew this one
+  // account's OAuth token now (instead of waiting for the auto-refresh loop).
+  // On success the token's expiry is bumped and an auth-failure cooldown is
+  // cleared; on failure (e.g. refresh token expired) ok=false and the snapshot
+  // shows the account still needs re-auth. Admin-only.
+  app.post(
+    "/admin/accounts/:provider/:email/refresh",
+    requireAdmin,
+    async (req, res) => {
+      const provider = registry.get(req.params.provider as ProviderId);
+      if (!provider) {
+        res.status(404).json({ error: { message: `unknown provider ${req.params.provider}` } });
+        return;
+      }
+      const email = decodeURIComponent(req.params.email);
+      try {
+        const ok = await provider.manager.refreshAccount(email);
+        const snapshot =
+          provider.manager.getSnapshots().find((s) => s.email === email) ?? null;
+        if (!snapshot) {
+          res.status(404).json({ error: { message: `no account ${email} loaded for ${provider.id}` } });
+          return;
+        }
+        res.json({ ok, provider: provider.id, email, account: snapshot });
+      } catch (err: any) {
+        res.status(500).json({ error: { message: err?.message || String(err) } });
+      }
+    },
+  );
+
   app.get("/admin/accounts", (_req, res) => {
     const providers: Record<
       string,

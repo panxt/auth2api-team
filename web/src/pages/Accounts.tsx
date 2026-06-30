@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
 import {
   listAccounts,
+  reload,
+  refreshAccount,
   deleteAccount,
   setAccountDisabled,
   setAccountBudget,
@@ -108,6 +110,9 @@ export function Accounts() {
   const [capacity, setCapacity] = useState<Record<string, CapacitySummary>>({});
   // Per-provider aggregated 5h/7d quota pool → drives the "额度池" summary.
   const [pools, setPools] = useState<Record<string, QuotaPool>>({});
+  // 全局「刷新状态」按钮 in-flight, and per-account refresh ("provider:email").
+  const [reloading, setReloading] = useState(false);
+  const [refreshingOne, setRefreshingOne] = useState<string | null>(null);
   // "实时" — poll every 2s instead of 30s to watch concurrency spread live.
   const [realtime, setRealtime] = useState(false);
 
@@ -179,6 +184,38 @@ export function Accounts() {
     }
   }
 
+  // 全局刷新:重读 token 文件 + 和解整池(捡起 CLI/UI 新登录),再拉快照。
+  async function onReloadAll() {
+    setReloading(true);
+    try {
+      await reload();
+      await load(false);
+    } catch (e) {
+      alert(`刷新失败: ${(e as ApiError).message}`);
+    } finally {
+      setReloading(false);
+    }
+  }
+
+  // 单账号刷新:主动续该账号的 OAuth token,成功可清认证冷却。
+  async function onRefreshOne(providerId: string, email: string) {
+    const key = `${providerId}:${email}`;
+    setRefreshingOne(key);
+    try {
+      const r = await refreshAccount(providerId, email);
+      await load(false);
+      if (!r.ok) {
+        alert(
+          `账号 ${email} 续期失败 —— 多半是 refresh token 已过期,需重新登录(点该账号的「重新认证」)。`,
+        );
+      }
+    } catch (e) {
+      alert(`刷新失败: ${(e as ApiError).message}`);
+    } finally {
+      setRefreshingOne(null);
+    }
+  }
+
   function onReauth(providerId: string, acct: AccountSnapshot) {
     if (providerId !== "anthropic" && providerId !== "codex") {
       alert(
@@ -234,6 +271,14 @@ export function Accounts() {
             />
             实时(2s)
           </label>
+          <button
+            className="btn-secondary"
+            onClick={onReloadAll}
+            disabled={reloading}
+            title="重读 token 文件并和解整池(捡起新登录的账号)"
+          >
+            {reloading ? "刷新中..." : "↻ 刷新状态"}
+          </button>
         {isAdmin && (
           <div className="flex gap-2">
             <button
@@ -364,6 +409,19 @@ export function Accounts() {
                       </td>
                       {isAdmin && (
                         <td className="px-4 py-3 text-right whitespace-nowrap space-x-1">
+                          <button
+                            className="btn-ghost text-xs"
+                            onClick={() => onRefreshOne(providerId, a.email)}
+                            disabled={
+                              refreshingOne === `${providerId}:${a.email}` ||
+                              a.refreshing
+                            }
+                            title="主动续期该账号的 OAuth token(成功可清认证冷却)"
+                          >
+                            {refreshingOne === `${providerId}:${a.email}`
+                              ? "刷新中..."
+                              : "↻ 刷新"}
+                          </button>
                           <button
                             className="btn-ghost text-xs"
                             onClick={() => onToggleDisabled(providerId, a)}

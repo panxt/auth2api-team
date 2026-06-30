@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { ApiError } from "../api/client";
 import { InfoTip } from "../components/AccountQuotaPanel";
 import { fetchRoutingConfig, updateRoutingConfig, RoutingConfig } from "../api/routing";
@@ -66,6 +66,21 @@ function prewarmOutcome(r: { ok: boolean; error?: string; latencyMs?: number }):
   }
   if (msg.length > 80) msg = msg.slice(0, 80) + "…";
   return { label: `${status ? status + " · " : ""}${msg || "失败"}`, tone: "text-rose-400" };
+}
+
+/** Local YYYY-MM-DD for a run timestamp. */
+function localDate(at: string): string {
+  const d = new Date(at);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+/** Local HH:MM:SS for a run's actual fire time. */
+function localClock(at: string): string {
+  const d = new Date(at);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+}
+/** Whether a planned (date, "HH:MM") slot is already in the past (local). */
+function isPastSlot(date: string, time: string): boolean {
+  return new Date(`${date}T${time}`).getTime() < Date.now();
 }
 
 const PREWARM_ALGO_TIP =
@@ -287,6 +302,33 @@ function PrewarmCard() {
 
   const lastRun = runs[0];
 
+  // ── 执行情况表(按天 × 计划时刻)──
+  const scheduledRuns = useMemo(
+    () => runs.filter((r) => r.trigger === "schedule" && r.scheduledTime),
+    [runs],
+  );
+  const manualRuns = useMemo(
+    () => runs.filter((r) => r.trigger === "manual"),
+    [runs],
+  );
+  // Columns = configured times ∪ any scheduledTime seen in history (so renamed
+  // schedules still show their past runs).
+  const cols = useMemo(() => {
+    const s = new Set<string>(cfg?.times ?? []);
+    for (const r of scheduledRuns) if (r.scheduledTime) s.add(r.scheduledTime);
+    return [...s].sort();
+  }, [cfg?.times, scheduledRuns]);
+  // Rows = days seen in history + today, newest first.
+  const days = useMemo(() => {
+    const s = new Set<string>(scheduledRuns.map((r) => localDate(r.at)));
+    s.add(localDate(new Date().toISOString()));
+    return [...s].sort().reverse();
+  }, [scheduledRuns]);
+  const cellRun = (day: string, time: string) =>
+    scheduledRuns.find(
+      (r) => localDate(r.at) === day && r.scheduledTime === time,
+    );
+
   return (
     <div className="card">
       <button
@@ -376,10 +418,13 @@ function PrewarmCard() {
             {msg && <span className="text-ink-400 text-sm">{msg}</span>}
           </div>
 
-          {/* 实际暖机结果 / 历史 */}
+          {/* 暖机执行审计:定时任务到点跑没跑 + 结果 */}
           <div className="border-t border-ink-800 pt-3">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-ink-300 font-medium">暖机日志(历史持久化)</span>
+              <span className="text-ink-300 font-medium inline-flex items-center">
+                定时执行情况
+                <InfoTip text={"按『日期 × 计划时刻』核对定时任务有没有按时跑。\n\n✓ 按时执行(显示成功/总数)· ⚠ 部分成功 · ✗ 失败 · ✗漏跑 = 到点了却没有任何记录(进程当时未运行/未触发)· · 待跑(今天尚未到的时刻)。\n\n手动触发单列在下方,不计入按时考核。记录持久化,跨重启保留。"} />
+              </span>
               <button
                 className="text-ink-500 hover:text-ink-300 text-xs"
                 onClick={() => loadHistory(true)}
@@ -394,8 +439,75 @@ function PrewarmCard() {
               </div>
             )}
 
+            {/* 执行情况表 */}
+            {cols.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="text-sm">
+                  <thead className="text-ink-500 text-xs">
+                    <tr>
+                      <th className="text-left font-medium px-2 py-1">日期</th>
+                      {cols.map((t) => (
+                        <th key={t} className="font-medium px-2 py-1">
+                          {t}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {days.map((day) => (
+                      <tr key={day} className="border-t border-ink-800/60">
+                        <td className="px-2 py-1 text-ink-400 whitespace-nowrap">
+                          {day}
+                        </td>
+                        {cols.map((t) => {
+                          const run = cellRun(day, t);
+                          if (run) {
+                            const full = run.total > 0 && run.ok === run.total;
+                            const none = run.ok === 0;
+                            const cls = full
+                              ? "text-emerald-400"
+                              : none
+                                ? "text-rose-400"
+                                : "text-amber-400";
+                            const mark = full ? "✓" : none ? "✗" : "⚠";
+                            return (
+                              <td
+                                key={t}
+                                className={`px-2 py-1 text-center ${cls}`}
+                                title={`实际 ${localClock(run.at)} · ${run.ok}/${run.total} 成功`}
+                              >
+                                {run.total === 0 ? "⚠ 无账号" : `${mark} ${run.ok}/${run.total}`}
+                              </td>
+                            );
+                          }
+                          // no run for this slot
+                          if (isPastSlot(day, t)) {
+                            return (
+                              <td
+                                key={t}
+                                className="px-2 py-1 text-center text-rose-400/80"
+                                title="到点未见任何记录(进程当时未运行或未触发)"
+                              >
+                                ✗ 漏跑
+                              </td>
+                            );
+                          }
+                          return (
+                            <td key={t} className="px-2 py-1 text-center text-ink-600">
+                              ·
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* 最近一次的逐账号结果详情 */}
             {lastRun && (
-              <div className="mb-3">
+              <div className="mt-3">
                 <div className="text-xs text-ink-400 mb-1.5">
                   最近一次 ·{" "}
                   <span
@@ -405,9 +517,12 @@ function PrewarmCard() {
                         : "badge-muted text-xs"
                     }
                   >
-                    {lastRun.trigger === "schedule" ? "定时" : "手动"}
+                    {lastRun.trigger === "schedule"
+                      ? `定时 ${lastRun.scheduledTime ?? ""}`
+                      : "手动"}
                   </span>{" "}
-                  · {fmtRelative(lastRun.at)} · 成功 {lastRun.ok}/{lastRun.total}
+                  · {fmtRelative(lastRun.at)}({localClock(lastRun.at)}) · 成功{" "}
+                  {lastRun.ok}/{lastRun.total}
                 </div>
                 <div className="space-y-1">
                   {lastRun.providers.flatMap((p) => {
@@ -442,16 +557,16 @@ function PrewarmCard() {
               </div>
             )}
 
-            {runs.length > 1 && (
-              <div className="text-xs text-ink-500">
-                <div className="text-ink-400 mb-1">历史记录:</div>
+            {/* 手动触发(不计入按时考核)*/}
+            {manualRuns.length > 0 && (
+              <div className="mt-3 text-xs text-ink-500">
+                <div className="text-ink-400 mb-1">手动触发:</div>
                 <div className="space-y-0.5">
-                  {runs.slice(1).map((r) => (
+                  {manualRuns.slice(0, 8).map((r) => (
                     <div key={r.id ?? r.at} className="flex items-center gap-2">
-                      <span className="w-10">
-                        {r.trigger === "schedule" ? "定时" : "手动"}
+                      <span className="text-ink-400">
+                        {localDate(r.at)} {localClock(r.at)}
                       </span>
-                      <span className="text-ink-400">{fmtRelative(r.at)}</span>
                       <span
                         className={
                           r.ok === r.total ? "text-emerald-400" : "text-amber-400"
@@ -462,15 +577,16 @@ function PrewarmCard() {
                     </div>
                   ))}
                 </div>
-                {hasMore && (
-                  <button
-                    className="mt-2 text-ink-400 hover:text-ink-200"
-                    onClick={() => loadHistory(false)}
-                  >
-                    加载更多 ↓
-                  </button>
-                )}
               </div>
+            )}
+
+            {hasMore && (
+              <button
+                className="mt-2 text-ink-400 hover:text-ink-200 text-xs"
+                onClick={() => loadHistory(false)}
+              >
+                加载更多历史 ↓
+              </button>
             )}
           </div>
         </div>

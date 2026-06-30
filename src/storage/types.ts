@@ -104,8 +104,11 @@ export interface SettingsStore {
  * `providers` is the opaque per-provider result payload (PrewarmResult[]).
  */
 export interface PrewarmRunRecord {
-  at: string; // ISO8601 UTC
+  at: string; // ISO8601 UTC — when the run actually fired
   trigger: "schedule" | "manual";
+  /** For scheduled runs: the configured "HH:MM" plan this run satisfies.
+   *  null for manual runs. Lets the dashboard audit on-time vs missed. */
+  scheduledTime: string | null;
   ok: number;
   total: number;
   providers: unknown;

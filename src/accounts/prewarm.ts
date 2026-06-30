@@ -15,12 +15,15 @@ const HISTORY_LIMIT = 20;
 /** Hard cap on persisted runs — pruned after each append. */
 const STORE_MAX_ROWS = 2000;
 
-/** One recorded prewarm run (scheduled, manual, or startup). */
+/** One recorded prewarm run (scheduled or manual). */
 export interface PrewarmRun {
   /** What triggered this run. */
   trigger: "schedule" | "manual";
   /** ISO timestamp when the run finished. */
   at: string;
+  /** For scheduled runs: the configured "HH:MM" plan this run satisfies;
+   *  null for manual runs. Used to audit on-time vs missed schedules. */
+  scheduledTime: string | null;
   /** Per-provider ping results. */
   providers: PrewarmResult[];
   /** Accounts successfully warmed across all providers. */
@@ -89,6 +92,7 @@ export class PrewarmScheduler {
         id: start + i,
         at: r.at,
         trigger: r.trigger,
+        scheduledTime: r.scheduledTime,
         ok: r.ok,
         total: r.total,
         providers: r.providers,
@@ -147,14 +151,18 @@ export class PrewarmScheduler {
       // Keep only the most-recent keys to stay bounded.
       this.firedKeys = new Set(Array.from(this.firedKeys).slice(-32));
     }
-    void this.trigger("schedule").catch((err) =>
+    void this.trigger("schedule", hhmm).catch((err) =>
       console.error("[prewarm] scheduled run failed:", err?.message || err),
     );
   }
 
   /** Run prewarm now and record the result in history. Used by the timer and
-   *  by the manual POST /admin/prewarm endpoint. */
-  async trigger(triggerKind: PrewarmRun["trigger"]): Promise<PrewarmRun> {
+   *  by the manual POST /admin/prewarm endpoint. `scheduledTime` is the matched
+   *  "HH:MM" plan for scheduled runs, omitted for manual runs. */
+  async trigger(
+    triggerKind: PrewarmRun["trigger"],
+    scheduledTime: string | null = null,
+  ): Promise<PrewarmRun> {
     const providers = await this.runPrewarm();
     let ok = 0;
     let total = 0;
@@ -167,6 +175,7 @@ export class PrewarmScheduler {
     const run: PrewarmRun = {
       trigger: triggerKind,
       at: new Date().toISOString(),
+      scheduledTime,
       providers,
       ok,
       total,
@@ -180,6 +189,7 @@ export class PrewarmScheduler {
         this.store.append({
           at: run.at,
           trigger: run.trigger,
+          scheduledTime: run.scheduledTime,
           ok: run.ok,
           total: run.total,
           providers: run.providers,

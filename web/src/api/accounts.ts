@@ -110,6 +110,13 @@ export const reload = () =>
     "/admin/reload",
   );
 
+/** Actively renew one account's OAuth token now. Returns ok=false (not an
+ *  error) when the refresh token itself is expired → needs re-auth. */
+export const refreshAccount = (provider: string, email: string) =>
+  post<{ ok: boolean; provider: string; email: string; account: AccountSnapshot }>(
+    `/admin/accounts/${provider}/${encodeURIComponent(email)}/refresh`,
+  );
+
 export const deleteAccount = (provider: string, email: string) =>
   del<{ ok: true; provider: string; email: string }>(
     `/admin/accounts/${provider}/${encodeURIComponent(email)}`,

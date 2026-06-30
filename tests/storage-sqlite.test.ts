@@ -244,6 +244,7 @@ test("PrewarmRunStore: append + newest-first list + cursor + prune", () => {
       s.prewarmLog.append({
         at: new Date(Date.now() + i * 1000).toISOString(),
         trigger: i % 2 ? "manual" : "schedule",
+        scheduledTime: i % 2 ? null : "08:00",
         ok: i,
         total: 5,
         providers: [{ provider: "anthropic", results: [] }],
@@ -252,6 +253,7 @@ test("PrewarmRunStore: append + newest-first list + cursor + prune", () => {
     const p1 = s.prewarmLog.list({ limit: 2 });
     assert.equal(p1.rows.length, 2);
     assert.equal(p1.rows[0].ok, 4); // newest first
+    assert.equal(p1.rows[0].scheduledTime, "08:00"); // schedule plan round-trips
     assert.ok(p1.nextCursor != null);
     const p2 = s.prewarmLog.list({ limit: 2, cursor: p1.nextCursor });
     assert.equal(p2.rows.length, 2);

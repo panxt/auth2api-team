@@ -80,12 +80,22 @@ export class SqliteStorage implements Storage {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         at TEXT NOT NULL,
         trigger TEXT,
+        scheduled_time TEXT,
         ok INTEGER,
         total INTEGER,
         providers TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_pw_at ON prewarm_runs(at);
     `);
+    // Migration: add `scheduled_time` to a pre-existing prewarm_runs table.
+    {
+      const cols = this.db
+        .prepare("PRAGMA table_info(prewarm_runs)")
+        .all() as { name: string }[];
+      if (!cols.some((c) => c.name === "scheduled_time")) {
+        this.db.exec("ALTER TABLE prewarm_runs ADD COLUMN scheduled_time TEXT");
+      }
+    }
     // Migration: add `category` to a pre-existing request_logs table (older
     // installs created before the column existed). CREATE TABLE IF NOT EXISTS
     // won't alter an existing table, so add the column when missing.
@@ -323,14 +333,15 @@ export class SqliteStorage implements Storage {
 
     // ── Prewarm run history ──
     const insertPrewarm = this.db.prepare(
-      `INSERT INTO prewarm_runs (at, trigger, ok, total, providers)
-       VALUES (@at, @trigger, @ok, @total, @providers)`,
+      `INSERT INTO prewarm_runs (at, trigger, scheduled_time, ok, total, providers)
+       VALUES (@at, @trigger, @scheduledTime, @ok, @total, @providers)`,
     );
     this.prewarmLog = {
       append: (rec: PrewarmRunRecord) => {
         insertPrewarm.run({
           at: rec.at,
           trigger: rec.trigger,
+          scheduledTime: rec.scheduledTime ?? null,
           ok: rec.ok,
           total: rec.total,
           providers: JSON.stringify(rec.providers ?? []),
@@ -351,6 +362,7 @@ export class SqliteStorage implements Storage {
             id: r.id,
             at: r.at,
             trigger: r.trigger,
+            scheduledTime: r.scheduled_time ?? null,
             ok: r.ok,
             total: r.total,
             providers: safeParse(r.providers),

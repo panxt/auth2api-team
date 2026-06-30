@@ -14,6 +14,7 @@ export interface PrewarmRun {
   id?: number;
   trigger: "schedule" | "manual";
   at: string;
+  scheduledTime: string | null;
   providers: Array<{
     provider: string;
     results: PrewarmRecord[];
