@@ -9,6 +9,7 @@ import {
   UsageKey,
   ManagedKeyView,
   CreateKeyInput,
+  CreateKeyResponse,
   KeyQuota,
   KeyModelQuota,
 } from "../api/keys";
@@ -21,6 +22,59 @@ interface MergedRow extends UsageKey {
   managedId: string | null;   // null = config-only key (read-only)
   allowedModels: string[] | null; // model allowlist (managed keys only)
   deniedModels: string[] | null;  // model denylist (managed keys only)
+}
+
+/** Build a ready-to-send personal access doc (markdown) for a freshly created
+ *  key. Base URL is the dashboard origin (= the proxy's address). */
+function buildAccessDoc(key: string, label: string | null): string {
+  const base = window.location.origin;
+  const who = label ? ` —— ${label}` : "";
+  return `# auth2api 接入手册${who}
+
+> 含你的专属 API key,请勿外发 / 提交到 Git。key 仅此一次明文可见。
+
+| 项 | 值 |
+|---|---|
+| Base URL | ${base} |
+| API 前缀 | ${base}/v1 |
+| API Key | ${key} |
+| 用量看板 | ${base}/ui |
+
+## 1. Claude Code
+\`\`\`bash
+export ANTHROPIC_BASE_URL="${base}"
+export ANTHROPIC_AUTH_TOKEN="${key}"
+\`\`\`
+\`\`\`powershell
+[Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", "${base}", "User")
+[Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", "${key}", "User")
+\`\`\`
+> 新版 Claude Code 用 ANTHROPIC_AUTH_TOKEN;旧版用 ANTHROPIC_API_KEY,本服务两者都收。
+> 启动 claude 若弹登录菜单,选「Anthropic Console account · API usage billing」,切勿选订阅登录(会绕过代理)。
+
+## 2. OpenAI Codex CLI(~/.codex/config.toml)
+\`\`\`toml
+model_provider = "auth2api"
+model = "gpt-5.5"
+[model_providers.auth2api]
+name = "auth2api"
+base_url = "${base}/v1"
+wire_api = "responses"
+env_key = "OPENAI_API_KEY"
+\`\`\`
+\`export OPENAI_API_KEY="${key}"\`,启动后选「Provide your own API key」。
+
+## 3. 第三方 GUI / SDK(OpenAI 兼容)
+- Base URL:\`${base}/v1\`
+- API Key:\`${key}\`
+- 模型:claude-sonnet-4-6 / claude-opus-4-8 / gpt-5.5(以 /v1/models 为准)
+
+## 4. 烟测
+\`\`\`bash
+curl -s ${base}/health
+curl -s -H "Authorization: Bearer ${key}" ${base}/v1/models
+\`\`\`
+`;
 }
 
 function fmtUSD(n: number | undefined): string {
@@ -45,7 +99,7 @@ export function Users() {
 
   const [showCreate, setShowCreate] = useState(false);
   const [editing, setEditing] = useState<MergedRow | null>(null);
-  const [createdKey, setCreatedKey] = useState<string | null>(null); // raw key shown once
+  const [createdKey, setCreatedKey] = useState<CreateKeyResponse | null>(null); // raw key + meta, shown once
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -304,9 +358,9 @@ export function Users() {
         open={showCreate}
         models={models}
         onClose={() => setShowCreate(false)}
-        onCreated={(rawKey) => {
+        onCreated={(resp) => {
           setShowCreate(false);
-          setCreatedKey(rawKey);
+          setCreatedKey(resp);
           load();
         }}
       />
@@ -326,22 +380,47 @@ export function Users() {
           open
           onClose={() => setCreatedKey(null)}
           title="✓ Key 已创建 — 这是唯一一次能看到明文"
+          size="lg"
         >
           <div className="space-y-3">
             <p className="text-sm text-ink-300">
               立即复制保存,关掉这个对话框后**就再也看不到了**(后端只存 hash)。
+              下方是为该用户生成的专属接入文档,可直接复制 / 下载发给成员。
             </p>
             <div className="bg-ink-800 p-3 rounded-md break-all font-mono text-sm">
-              {createdKey}
+              {createdKey.key}
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <button
                 className="btn-primary"
+                onClick={() => navigator.clipboard.writeText(createdKey.key)}
+              >
+                复制 key
+              </button>
+              <button
+                className="btn-secondary"
+                onClick={() =>
+                  navigator.clipboard.writeText(
+                    buildAccessDoc(createdKey.key, createdKey.label),
+                  )
+                }
+              >
+                复制接入文档
+              </button>
+              <button
+                className="btn-secondary"
                 onClick={() => {
-                  navigator.clipboard.writeText(createdKey);
+                  const md = buildAccessDoc(createdKey.key, createdKey.label);
+                  const blob = new Blob([md], { type: "text/markdown" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `auth2api-接入手册-${(createdKey.label || createdKey.id).replace(/[^a-zA-Z0-9@._-]/g, "_")}.md`;
+                  a.click();
+                  URL.revokeObjectURL(url);
                 }}
               >
-                复制
+                下载文档 (.md)
               </button>
               <button
                 className="btn-secondary"
@@ -350,6 +429,14 @@ export function Users() {
                 我保存好了
               </button>
             </div>
+            <details className="text-sm">
+              <summary className="cursor-pointer text-ink-400 hover:text-ink-200">
+                预览接入文档
+              </summary>
+              <pre className="mt-2 bg-ink-800 p-3 rounded-md text-xs whitespace-pre-wrap max-h-72 overflow-auto">
+                {buildAccessDoc(createdKey.key, createdKey.label)}
+              </pre>
+            </details>
           </div>
         </Modal>
       )}
@@ -368,7 +455,7 @@ function CreateKeyModal({
   open: boolean;
   models: string[];
   onClose: () => void;
-  onCreated: (rawKey: string) => void;
+  onCreated: (resp: CreateKeyResponse) => void;
 }) {
   const [label, setLabel] = useState("");
   const [owner, setOwner] = useState("");
@@ -401,7 +488,7 @@ function CreateKeyModal({
       if (deniedModels.length > 0) input["denied-models"] = deniedModels;
       const resp = await createKey(input);
       reset();
-      onCreated(resp.key);
+      onCreated(resp);
     } catch (e) {
       setErr((e as ApiError).message);
     } finally {
