@@ -66,6 +66,17 @@ function fmtUnixClock(s: string | null): string {
   return new Date(n * 1000).toLocaleString();
 }
 
+/** True when an account is down because its OAuth credential is dead (refresh
+ *  token expired / revoked / auth error) — a token refresh won't fix it; only
+ *  re-auth (or importing a fresh bundle) will. Drives the re-auth surfacing. */
+function needsReauth(acct: AccountSnapshot): boolean {
+  if (acct.disabled || acct.available) return false;
+  const e = (acct.lastError || "").toLowerCase();
+  return /invalid_grant|refresh token|revoked|unauthor|invalid_token|re-?auth|401/.test(
+    e,
+  );
+}
+
 function cooldownStatus(acct: AccountSnapshot): {
   badge: string;
   className: string;
@@ -327,6 +338,45 @@ export function Accounts() {
       {/* 额度池汇总:全部账号 5h / 7d 加权等效窗口 */}
       <QuotaPoolSummary pools={pools} />
 
+      {/* 需重新认证提醒 */}
+      {isAdmin &&
+        (() => {
+          const stale = Object.entries(data).flatMap(([p, accts]) =>
+            accts.filter(needsReauth).map((a) => ({ provider: p, acct: a })),
+          );
+          if (stale.length === 0) return null;
+          return (
+            <div className="card mb-6 border-rose-500/40">
+              <div className="text-sm font-medium text-rose-300 mb-2">
+                ⚠ {stale.length} 个账号凭据失效,需重新认证
+              </div>
+              <div className="space-y-1.5">
+                {stale.map(({ provider, acct }) => (
+                  <div
+                    key={`${provider}:${acct.email}`}
+                    className="flex items-center gap-3 text-sm"
+                  >
+                    <span className="badge-muted text-xs">{provider}</span>
+                    <span className="font-mono text-ink-300">{acct.email}</span>
+                    <span className="text-ink-500 truncate max-w-[20rem]">
+                      {acct.lastError || "认证失效"}
+                    </span>
+                    <button
+                      className="btn-primary text-xs ml-auto"
+                      onClick={() => onReauth(provider, acct)}
+                    >
+                      重新认证
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="text-xs text-ink-500 mt-2">
+                提示:也可在另一台已认证的实例「导出」该账号,在此「⇄ 导入账号」无缝迁入。
+              </div>
+            </div>
+          );
+        })()}
+
       {isAdmin && (
         <>
           <AddAccountModal
@@ -411,6 +461,9 @@ export function Accounts() {
                       </td>
                       <td className="px-4 py-3">
                         <div className={cd.className}>{cd.badge}</div>
+                        {needsReauth(a) && (
+                          <div className="badge-err text-xs mt-0.5">需重新认证</div>
+                        )}
                         {cd.detail && (
                           <div
                             className="text-xs text-ink-500 mt-0.5 truncate max-w-[16rem]"
@@ -467,7 +520,11 @@ export function Accounts() {
                             {a.disabled ? "启用" : "停用"}
                           </button>
                           <button
-                            className="btn-ghost text-xs"
+                            className={
+                              needsReauth(a)
+                                ? "btn-primary text-xs"
+                                : "btn-ghost text-xs"
+                            }
                             onClick={() => onReauth(providerId, a)}
                             title="OAuth 重新登录 — 用相同 email 登录会刷新 token"
                           >
