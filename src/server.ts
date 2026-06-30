@@ -31,7 +31,8 @@ import { startOAuth, exchangeOAuth } from "./admin/oauth";
 import { ProviderId } from "./auth/types";
 import { RequestLogger } from "./logging/logger";
 import { RoutingController } from "./accounts/routing";
-import { LoggingConfig, RoutingConfig } from "./config";
+import { PrewarmScheduler } from "./accounts/prewarm";
+import { LoggingConfig, RoutingConfig, PrewarmConfig } from "./config";
 
 // Simple in-memory rate limiter per IP
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -83,6 +84,7 @@ export function createServer(
   keyStore?: ManagedKeyStore,
   requestLogger?: RequestLogger,
   routingController?: RoutingController,
+  prewarmScheduler?: PrewarmScheduler,
 ): express.Application {
   const app = express();
   // Stats slots are seeded whenever any subsystem needs them: the recorder
@@ -576,6 +578,27 @@ export function createServer(
     });
   }
 
+  // ── Window-prewarm scheduler (admin-only) ──
+  if (prewarmScheduler) {
+    app.get("/admin/prewarm/config", requireAdmin, (_req, res) => {
+      res.json(prewarmScheduler.getConfig());
+    });
+    app.put("/admin/prewarm/config", requireAdmin, (req, res) => {
+      try {
+        const next = prewarmScheduler.updateConfig(
+          (req.body || {}) as Partial<PrewarmConfig>,
+        );
+        res.json(next);
+      } catch (err: any) {
+        res.status(400).json({ error: { message: err?.message || String(err) } });
+      }
+    });
+    // Recent run history (scheduled + manual), newest first, for the dashboard.
+    app.get("/admin/prewarm/history", requireAdmin, (_req, res) => {
+      res.json({ runs: prewarmScheduler.getHistory() });
+    });
+  }
+
   // GET /admin/usage/keys — month-to-date consumption per API key vs its
   // quota. An admin key sees every key; a non-admin key sees only itself.
   // Raw keys are never returned — only the sha256 short prefix, plus the
@@ -879,6 +902,25 @@ export function createServer(
   });
 
   app.post("/admin/prewarm", requireAdmin, async (_req, res) => {
+    // Prefer the scheduler so the manual run is recorded in history and honors
+    // the configured provider filter. Fall back to a direct registry sweep if
+    // no scheduler is wired (e.g. in tests).
+    if (prewarmScheduler) {
+      try {
+        const run = await prewarmScheduler.trigger("manual");
+        res.json({
+          providers: run.providers,
+          ok: run.ok,
+          total: run.total,
+          generated_at: run.at,
+        });
+      } catch (err: any) {
+        res
+          .status(500)
+          .json({ error: { message: err?.message || String(err) } });
+      }
+      return;
+    }
     const providers: unknown[] = [];
     for (const p of registry.all()) {
       if (!p.prewarm) continue;

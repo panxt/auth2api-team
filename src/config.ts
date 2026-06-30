@@ -276,6 +276,72 @@ export function resolveRoutingConfig(
   return out;
 }
 
+/**
+ * Window-prewarm policy. Anthropic's 5h rate-limit window is "first-message
+ * anchored", so sending one cheap ping at a fixed local time each day anchors
+ * the window to working hours instead of to whenever the first real request
+ * lands. Admin-editable at runtime via /admin/prewarm/config (persisted to the
+ * SettingsStore); the config.yaml `prewarm:` block, if present, only seeds the
+ * initial defaults. Replaces the external launchd cron with an in-process,
+ * UI-configurable scheduler.
+ */
+export interface PrewarmConfig {
+  /** Master switch for the in-process scheduler. */
+  enabled: boolean;
+  /** Local-time trigger points, "HH:MM" (24h). Each fires once per day. */
+  times: string[];
+  /** Provider ids to prewarm; empty = every provider that supports it. */
+  providers: string[];
+}
+
+export const DEFAULT_PREWARM_CONFIG: PrewarmConfig = {
+  enabled: true,
+  times: ["08:00"],
+  providers: [],
+};
+
+/** Validate & canonicalize "HH:MM" entries; drops blanks/dupes, sorts. */
+export function normalizePrewarmTimes(times: unknown): string[] {
+  if (!Array.isArray(times)) return [...DEFAULT_PREWARM_CONFIG.times];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of times) {
+    if (typeof t !== "string") continue;
+    const m = /^(\d{1,2}):(\d{2})$/.exec(t.trim());
+    if (!m) continue;
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    if (h > 23 || min > 59) continue;
+    const norm = `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+    if (!seen.has(norm)) {
+      seen.add(norm);
+      out.push(norm);
+    }
+  }
+  out.sort();
+  return out;
+}
+
+/** Merge prewarm config: 默认 < config.yaml < 持久化(UI)覆盖。 */
+export function resolvePrewarmConfig(
+  ...layers: (Partial<PrewarmConfig> | undefined | null)[]
+): PrewarmConfig {
+  const out: PrewarmConfig = {
+    ...DEFAULT_PREWARM_CONFIG,
+    times: [...DEFAULT_PREWARM_CONFIG.times],
+    providers: [...DEFAULT_PREWARM_CONFIG.providers],
+  };
+  for (const layer of layers) {
+    if (!layer) continue;
+    for (const [k, v] of Object.entries(layer)) {
+      if (v !== undefined) (out as any)[k] = v;
+    }
+  }
+  out.times = normalizePrewarmTimes(out.times);
+  if (!Array.isArray(out.providers)) out.providers = [];
+  return out;
+}
+
 export interface Config {
   host: string;
   port: number;
@@ -295,6 +361,8 @@ export interface Config {
   logging?: Partial<LoggingConfig>;
   /** Optional seed for the account-selection / load-balancing policy. */
   routing?: Partial<RoutingConfig>;
+  /** Optional seed for the daily window-prewarm scheduler. */
+  prewarm?: Partial<PrewarmConfig>;
   debug: DebugMode;
 }
 
