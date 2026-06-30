@@ -453,6 +453,10 @@ Anthropic Pro/Max 订阅的 5h 速率限制窗口**不是定时滚动**,而是**
 
 也就是说:**可以人为提前发 ping 把窗口重置点挪到工作时段中间**,让工作时段跨越 2 个完整窗口,理论上限 +80% 配额。
 
+> **✅ 推荐方式(v2.3+):页面内置调度器。** 暖机已内建到服务进程,可在管理页 **账号 → ⚡ 窗口暖机调度 (Prewarm)** 卡片里直接配置:开关、触发时间(可多点)、套用推荐、立即暖机,并实时显示每次暖机结果(哪些账号成功/失败、延迟)。配置经 SettingsStore 持久化、热生效、跨平台,**无需 launchd / cron**。
+>
+> 下面的 launchd / crontab 方式(§5.8.2–§5.8.6)是旧部署的备选;**已用 launchd 的实例升级后请按 §5.8.8 卸载,避免与内置调度重复触发。**
+
 #### 5.8.1 数学
 
 工作时段 `[start, end]`(长度 W 小时)、ping 时刻 P,Anthropic 窗口长度 5h:
@@ -572,7 +576,26 @@ powershell.exe -Command "Invoke-RestMethod -Method POST -Uri http://127.0.0.1:83
 
 - ping 失败**不进 cooldown**(best-effort,失败只是当天少跨一个窗口)
 - **周配额**也是 Anthropic 的硬限,prewarm 不能突破。但每天 1 个 ping × 9 tokens × 7 天 ≈ 63 tokens / 周,几乎零成本
-- 服务必须在 8:00 时处于 healthy 状态;launchd 的 `KeepAlive=true` 已保证
+- 服务必须在触发时刻处于 healthy 状态;内置调度器随主进程运行,主进程 healthy 即可(launchd 守护已保证常驻)
+
+#### 5.8.8 从 launchd 迁移到内置调度器(v2.3+)
+
+升级到含内置调度器的版本后,内置调度器默认即 **启用、08:00**(等同原 launchd 配置)。此时旧的 launchd prewarm 任务会**重复触发**——无害(多发一次 ≈9 token 的 ping),但应卸载以免混淆:
+
+```bash
+# 1) 卸载并删除旧的 prewarm launchd 任务(注意:是 prewarm 那个,不是主服务 plist)
+launchctl unload ~/Library/LaunchAgents/com.<user>.auth2api.prewarm.plist
+rm        ~/Library/LaunchAgents/com.<user>.auth2api.prewarm.plist
+
+# 2) 确认已不在运行
+launchctl list | grep prewarm   # 应无输出
+
+# 3) 在管理页 账号 → ⚡ 窗口暖机调度 里确认 enabled + 时间,点「立即暖机一次」验证
+#    或命令行:./scripts/auth2api-admin.sh prewarm
+```
+
+> 只删 `*.prewarm.plist`,**不要动主服务 plist**(`com.<user>.auth2api.plist`)。
+> 若想继续用 launchd(例如想让暖机独立于主进程的崩溃窗口),也可保留 launchd 而在页面里把内置调度 **停用**,二选一即可。
 
 ### 5.9 TLS 前置:给 Cowork / 桌面 enterprise 客户端用
 
