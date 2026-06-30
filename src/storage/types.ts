@@ -145,7 +145,8 @@ export function normalizeKeyEntry(v: any): ApiKeyEntry | null {
     label: v.label,
     owner: v.owner,
     enabled: v.enabled ?? true,
-    admin: v.admin ?? false,
+    admin: v.role ? v.role === "admin" : (v.admin ?? false),
+    role: v.role,
     quota: v.quota,
     "rate-limit": v["rate-limit"],
     // These must round-trip too — otherwise UI-set model allow/deny lists are

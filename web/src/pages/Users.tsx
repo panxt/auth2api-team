@@ -12,69 +12,19 @@ import {
   CreateKeyResponse,
   KeyQuota,
   KeyModelQuota,
+  KeyRole,
 } from "../api/keys";
 import { ApiError } from "../api/client";
 import { Modal } from "../components/Modal";
 import { useAuth } from "../lib/auth";
+import { buildAccessDoc, downloadAccessDoc } from "../lib/accessDoc";
 
 interface MergedRow extends UsageKey {
   source: "managed" | "config";
   managedId: string | null;   // null = config-only key (read-only)
+  role: KeyRole | null;       // from managed view; null for config-only
   allowedModels: string[] | null; // model allowlist (managed keys only)
   deniedModels: string[] | null;  // model denylist (managed keys only)
-}
-
-/** Build a ready-to-send personal access doc (markdown) for a freshly created
- *  key. Base URL is the dashboard origin (= the proxy's address). */
-function buildAccessDoc(key: string, label: string | null): string {
-  const base = window.location.origin;
-  const who = label ? ` —— ${label}` : "";
-  return `# auth2api 接入手册${who}
-
-> 含你的专属 API key,请勿外发 / 提交到 Git。key 仅此一次明文可见。
-
-| 项 | 值 |
-|---|---|
-| Base URL | ${base} |
-| API 前缀 | ${base}/v1 |
-| API Key | ${key} |
-| 用量看板 | ${base}/ui |
-
-## 1. Claude Code
-\`\`\`bash
-export ANTHROPIC_BASE_URL="${base}"
-export ANTHROPIC_AUTH_TOKEN="${key}"
-\`\`\`
-\`\`\`powershell
-[Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", "${base}", "User")
-[Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", "${key}", "User")
-\`\`\`
-> 新版 Claude Code 用 ANTHROPIC_AUTH_TOKEN;旧版用 ANTHROPIC_API_KEY,本服务两者都收。
-> 启动 claude 若弹登录菜单,选「Anthropic Console account · API usage billing」,切勿选订阅登录(会绕过代理)。
-
-## 2. OpenAI Codex CLI(~/.codex/config.toml)
-\`\`\`toml
-model_provider = "auth2api"
-model = "gpt-5.5"
-[model_providers.auth2api]
-name = "auth2api"
-base_url = "${base}/v1"
-wire_api = "responses"
-env_key = "OPENAI_API_KEY"
-\`\`\`
-\`export OPENAI_API_KEY="${key}"\`,启动后选「Provide your own API key」。
-
-## 3. 第三方 GUI / SDK(OpenAI 兼容)
-- Base URL:\`${base}/v1\`
-- API Key:\`${key}\`
-- 模型:claude-sonnet-4-6 / claude-opus-4-8 / gpt-5.5(以 /v1/models 为准)
-
-## 4. 烟测
-\`\`\`bash
-curl -s ${base}/health
-curl -s -H "Authorization: Bearer ${key}" ${base}/v1/models
-\`\`\`
-`;
 }
 
 function fmtUSD(n: number | undefined): string {
@@ -123,6 +73,7 @@ export function Users() {
           ...u,
           source: m ? "managed" : "config",
           managedId: m ? m.id : null,
+          role: m ? m.role : null,
           allowedModels: m ? m["allowed-models"] : null,
           deniedModels: m ? m["denied-models"] : null,
         };
@@ -409,16 +360,9 @@ export function Users() {
               </button>
               <button
                 className="btn-secondary"
-                onClick={() => {
-                  const md = buildAccessDoc(createdKey.key, createdKey.label);
-                  const blob = new Blob([md], { type: "text/markdown" });
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement("a");
-                  a.href = url;
-                  a.download = `auth2api-接入手册-${(createdKey.label || createdKey.id).replace(/[^a-zA-Z0-9@._-]/g, "_")}.md`;
-                  a.click();
-                  URL.revokeObjectURL(url);
-                }}
+                onClick={() =>
+                  downloadAccessDoc(createdKey.key, createdKey.label, createdKey.id)
+                }
               >
                 下载文档 (.md)
               </button>
@@ -459,7 +403,7 @@ function CreateKeyModal({
 }) {
   const [label, setLabel] = useState("");
   const [owner, setOwner] = useState("");
-  const [admin, setAdmin] = useState(false);
+  const [role, setRole] = useState<KeyRole>("member");
   const [quota, setQuota] = useState<KeyQuota>({});
   const [allowedModels, setAllowedModels] = useState<string[]>([]);
   const [deniedModels, setDeniedModels] = useState<string[]>([]);
@@ -469,7 +413,7 @@ function CreateKeyModal({
   function reset() {
     setLabel("");
     setOwner("");
-    setAdmin(false);
+    setRole("member");
     setQuota({});
     setAllowedModels([]);
     setDeniedModels([]);
@@ -480,7 +424,7 @@ function CreateKeyModal({
     setSubmitting(true);
     setErr(null);
     try {
-      const input: CreateKeyInput = { label, admin, enabled: true };
+      const input: CreateKeyInput = { label, role, enabled: true };
       if (owner) input.owner = owner;
       const cleaned = cleanQuota(quota);
       if (cleaned) input.quota = cleaned;
@@ -528,16 +472,17 @@ function CreateKeyModal({
             onChange={(e) => setOwner(e.target.value)}
           />
         </div>
-        <div className="flex items-center gap-2">
-          <input
-            id="admin"
-            type="checkbox"
-            checked={admin}
-            onChange={(e) => setAdmin(e.target.checked)}
-          />
-          <label htmlFor="admin" className="text-sm">
-            Admin key(可调 /admin/* 全部接口)
-          </label>
+        <div>
+          <label className="block text-xs text-ink-500 mb-1">角色</label>
+          <select
+            className="input !py-1"
+            value={role}
+            onChange={(e) => setRole(e.target.value as KeyRole)}
+          >
+            <option value="member">成员(仅自己:查用量 / 重置自己的 key)</option>
+            <option value="auditor">审计员(只读全局:用量 / 日志 / 账号)</option>
+            <option value="admin">管理员(全部 /admin/* + 配置 + 增删改)</option>
+          </select>
         </div>
         <QuotaEditor value={quota} onChange={setQuota} models={models} />
         <ModelAllowlistPicker
@@ -592,7 +537,7 @@ function EditKeyModal({
 }) {
   const [label, setLabel] = useState("");
   const [owner, setOwner] = useState("");
-  const [admin, setAdmin] = useState(false);
+  const [role, setRole] = useState<KeyRole>("member");
   const [quota, setQuota] = useState<KeyQuota>({});
   const [allowedModels, setAllowedModels] = useState<string[]>([]);
   const [deniedModels, setDeniedModels] = useState<string[]>([]);
@@ -603,7 +548,7 @@ function EditKeyModal({
     if (row) {
       setLabel(row.label || "");
       setOwner(row.owner || "");
-      setAdmin(row.admin);
+      setRole(row.role ?? (row.admin ? "admin" : "member"));
       setQuota(row.quota ?? {});
       setAllowedModels(row.allowedModels ?? []);
       setDeniedModels(row.deniedModels ?? []);
@@ -621,7 +566,7 @@ function EditKeyModal({
       await updateKey(row.managedId, {
         label,
         owner: owner || undefined,
-        admin,
+        role,
         // null clears the quota; cleanQuota returns null when all caps empty.
         quota: cleanQuota(quota),
         // Always send: an empty array clears the list.
@@ -655,16 +600,17 @@ function EditKeyModal({
             onChange={(e) => setOwner(e.target.value)}
           />
         </div>
-        <div className="flex items-center gap-2">
-          <input
-            id="edit-admin"
-            type="checkbox"
-            checked={admin}
-            onChange={(e) => setAdmin(e.target.checked)}
-          />
-          <label htmlFor="edit-admin" className="text-sm">
-            Admin key
-          </label>
+        <div>
+          <label className="block text-sm text-ink-400 mb-1.5">角色</label>
+          <select
+            className="input"
+            value={role}
+            onChange={(e) => setRole(e.target.value as KeyRole)}
+          >
+            <option value="member">成员(仅自己)</option>
+            <option value="auditor">审计员(只读全局)</option>
+            <option value="admin">管理员(全部)</option>
+          </select>
         </div>
         <QuotaEditor value={quota} onChange={setQuota} models={models} />
         <ModelAllowlistPicker

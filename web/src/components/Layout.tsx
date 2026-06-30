@@ -12,6 +12,7 @@ interface NavItemDef extends NavItem {
 }
 
 const NAV: NavItemDef[] = [
+  { to: "/me", label: "我的", icon: "🙋" },
   { to: "/stats", label: "看板", icon: "📊" },
   { to: "/users", label: "用户", icon: "👥" },
   { to: "/accounts", label: "账号", icon: "🔌" },

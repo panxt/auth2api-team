@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import { Config, isDebugLevel, ApiKeyEntry } from "./config";
+import { Config, isDebugLevel, ApiKeyEntry, canReadAll, resolveAuthDir } from "./config";
 import { ProviderRegistry } from "./providers/registry";
 import { extractApiKey, hashApiKey } from "./utils/common";
 import {
@@ -450,6 +450,17 @@ export function createServer(
     next();
   };
 
+  // Org-wide READ access: admin or auditor. Used for read-only endpoints that
+  // expose everyone's data (key list, etc.). Mutations stay requireAdmin.
+  const requireReadAll: express.RequestHandler = (_req, res, next) => {
+    const entry = res.locals.apiKey as ApiKeyEntry | undefined;
+    if (!entry || !canReadAll(entry)) {
+      res.status(403).json({ error: { message: "Admin or auditor API key required" } });
+      return;
+    }
+    next();
+  };
+
   // GET /admin/stats — three-axis aggregated call statistics.
   //   byClient — keyed by sha256(api-key); show short hex prefix to operator
   //   byAccount — keyed by `${provider}:${email}` (upstream OAuth account)
@@ -645,10 +656,11 @@ export function createServer(
   // numbers that drive enforcement), so reports and limits never disagree.
   app.get("/admin/usage/keys", (_req, res) => {
     const requester = res.locals.apiKey as ApiKeyEntry | undefined;
-    const isAdmin = !!requester?.admin;
+    // admin + auditor see everyone; members see only their own row.
+    const seeAll = !!requester && canReadAll(requester);
     const keys = [];
     for (const entry of config["api-keys"].values()) {
-      if (!isAdmin && entry.key !== requester?.key) continue;
+      if (!seeAll && entry.key !== requester?.key) continue;
       const consumed = quotaTracker
         ? quotaTracker.consumed(hashApiKey(entry.key))
         : null;
@@ -695,24 +707,47 @@ export function createServer(
       res.status(500).json({ error: { message: "Internal server error" } });
     };
 
-    app.get("/admin/keys", requireAdmin, (_req, res) => {
+    // Read: admin + auditor (org-wide). Mutations below stay admin-only.
+    app.get("/admin/keys", requireReadAll, (_req, res) => {
       res.json({ keys: store.list(), generated_at: new Date().toISOString() });
+    });
+
+    const keyCreateResponse = (entry: ApiKeyEntry) => ({
+      key: entry.key,
+      id: hashApiKey(entry.key).slice(0, 12),
+      label: entry.label ?? null,
+      owner: entry.owner ?? null,
+      enabled: entry.enabled,
+      admin: entry.admin,
+      role: entry.role ?? (entry.admin ? "admin" : "member"),
+      quota: entry.quota ?? null,
+      "rate-limit": entry["rate-limit"] ?? null,
     });
 
     // Returns the raw key ONCE so the operator can copy it; never again.
     app.post("/admin/keys", requireAdmin, (req, res) => {
       try {
         const entry = store.create(req.body || {});
-        res.status(201).json({
-          key: entry.key,
-          id: hashApiKey(entry.key).slice(0, 12),
-          label: entry.label ?? null,
-          owner: entry.owner ?? null,
-          enabled: entry.enabled,
-          admin: entry.admin,
-          quota: entry.quota ?? null,
-          "rate-limit": entry["rate-limit"] ?? null,
-        });
+        res.status(201).json(keyCreateResponse(entry));
+      } catch (err) {
+        handleKeyError(err, res);
+      }
+    });
+
+    // POST /admin/keys/self/rotate — self-service: the CALLING key reissues
+    // itself with a fresh secret (same label/owner/role/quota). Any valid
+    // managed key; config.yaml keys are read-only (409). Returns the new raw
+    // key once. Lets members reset their own key without an admin.
+    app.post("/admin/keys/self/rotate", (_req, res) => {
+      const requester = res.locals.apiKey as ApiKeyEntry | undefined;
+      if (!requester) {
+        res.status(401).json({ error: { message: "no api key" } });
+        return;
+      }
+      try {
+        const id = hashApiKey(requester.key).slice(0, 12);
+        const entry = store.rotate(id);
+        res.json(keyCreateResponse(entry));
       } catch (err) {
         handleKeyError(err, res);
       }
@@ -891,7 +926,7 @@ export function createServer(
         return;
       }
       const email = decodeURIComponent(req.params.email);
-      const token = loadAllTokens(config["auth-dir"], provider.id).find(
+      const token = loadAllTokens(resolveAuthDir(config["auth-dir"]), provider.id).find(
         (t) => t.email === email,
       );
       if (!token) {
@@ -957,7 +992,7 @@ export function createServer(
           tierLabel: t.tierLabel,
           concurrencyWeight: t.concurrencyWeight,
         };
-        saveToken(config["auth-dir"], token);
+        saveToken(resolveAuthDir(config["auth-dir"]), token);
         provider.manager.addAccount(token);
         imported.push({ provider: providerId, email: token.email });
       } catch (err: any) {
@@ -1064,6 +1099,8 @@ export function createServer(
       label: entry.label ?? null,
       owner: entry.owner ?? null,
       admin: entry.admin,
+      role: entry.role ?? (entry.admin ? "admin" : "member"),
+      source: keyStore?.list().find((k) => k.id === hashApiKey(entry.key).slice(0, 12))?.source ?? "config",
       enabled: entry.enabled,
     });
   });

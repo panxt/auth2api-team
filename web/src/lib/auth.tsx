@@ -12,6 +12,8 @@ export interface WhoAmI {
   label: string | null;
   owner: string | null;
   admin: boolean;
+  role?: "admin" | "auditor" | "member";
+  source?: "managed" | "config";
   enabled: boolean;
   apiKeyShort: string;
 }

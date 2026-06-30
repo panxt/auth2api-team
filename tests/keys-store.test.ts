@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { ManagedKeyStore, ManagedKeyError } from "../src/keys/store";
 import { FileKeyRepository } from "../src/storage/file";
-import { ApiKeyEntry } from "../src/config";
+import { ApiKeyEntry, effectiveRole, canReadAll } from "../src/config";
 import { hashApiKey } from "../src/utils/common";
 
 const managedKeysPath = (dir: string) => path.join(dir, "managed-keys.json");
@@ -19,6 +19,66 @@ function tmpDir(): string {
 function configMap(keys: ApiKeyEntry[]): Map<string, ApiKeyEntry> {
   return new Map(keys.map((k) => [k.key, k]));
 }
+
+test("role: effectiveRole + canReadAll honor role with admin-flag fallback", () => {
+  assert.equal(effectiveRole({ role: "auditor" }), "auditor");
+  assert.equal(effectiveRole({ admin: true }), "admin"); // legacy fallback
+  assert.equal(effectiveRole({ admin: false }), "member");
+  assert.equal(canReadAll({ role: "auditor" }), true);
+  assert.equal(canReadAll({ role: "admin" }), true);
+  assert.equal(canReadAll({ role: "member" }), false);
+  assert.equal(canReadAll({ admin: false }), false);
+});
+
+test("create: role sets admin flag in sync; auditor is not admin", () => {
+  const dir = tmpDir();
+  try {
+    const store = newStore(dir, configMap([]));
+    store.load();
+    const auditor = store.create({ label: "qa", role: "auditor" });
+    assert.equal(auditor.role, "auditor");
+    assert.equal(auditor.admin, false);
+    assert.equal(canReadAll(auditor), true);
+    const admin = store.create({ label: "boss", role: "admin" });
+    assert.equal(admin.admin, true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("rotate: reissues a fresh secret, keeps metadata, invalidates the old key", () => {
+  const dir = tmpDir();
+  try {
+    const live = configMap([]);
+    const store = newStore(dir, live);
+    store.load();
+    const orig = store.create({ label: "alice", role: "member", quota: { "monthly-tokens": 50 } });
+    const origId = hashApiKey(orig.key).slice(0, 12);
+
+    const rotated = store.rotate(origId);
+    assert.notEqual(rotated.key, orig.key); // new secret
+    assert.equal(rotated.label, "alice"); // metadata carried
+    assert.equal(rotated.role, "member");
+    assert.deepEqual(rotated.quota, { "monthly-tokens": 50 });
+    assert.equal(live.has(orig.key), false); // old key gone from live map
+    assert.equal(live.has(rotated.key), true); // new key live
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("rotate: config-sourced key is read-only (cannot self-rotate)", () => {
+  const dir = tmpDir();
+  try {
+    const live = configMap([{ key: "sk-static", enabled: true, admin: false }]);
+    const store = newStore(dir, live);
+    store.load();
+    const id = hashApiKey("sk-static").slice(0, 12);
+    assert.throws(() => store.rotate(id), (e) => e instanceof ManagedKeyError && e.code === "read_only");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("create: adds a managed key to the live map and persists it", () => {
   const dir = tmpDir();

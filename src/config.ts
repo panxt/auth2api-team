@@ -98,6 +98,15 @@ export interface ApiKeyRateLimit {
  * key with no metadata) normalizes to `{ key, enabled: true, admin: false }`,
  * so old configs keep working unchanged.
  */
+/**
+ * Access role for an API key:
+ *   - "admin":   full control (mutations + config + see everyone).
+ *   - "auditor": org-wide READ-only (all usage/logs/accounts), no mutations.
+ *   - "member":  self-only (own usage, rotate own key). Default.
+ * `admin: true` is kept in sync for back-compat (admin ⟺ role === "admin").
+ */
+export type KeyRole = "admin" | "auditor" | "member";
+
 export interface ApiKeyEntry {
   key: string;
   /** Human label, e.g. "zhangsan / dev". Shown in admin reports. */
@@ -108,6 +117,8 @@ export interface ApiKeyEntry {
   enabled: boolean;
   /** Admin keys see all clients in usage reports; non-admin see only themselves. Default false. */
   admin: boolean;
+  /** Access role. Optional for back-compat; falls back to admin?"admin":"member". */
+  role?: KeyRole;
   quota?: ApiKeyQuota;
   "rate-limit"?: ApiKeyRateLimit;
   /**
@@ -132,10 +143,27 @@ interface RawApiKeyEntry {
   owner?: string;
   enabled?: boolean;
   admin?: boolean;
+  role?: KeyRole;
   quota?: ApiKeyQuota;
   "rate-limit"?: ApiKeyRateLimit;
   "allowed-models"?: string[];
   "denied-models"?: string[];
+}
+
+/** Effective role of a key, with back-compat: an explicit role wins, else
+ *  derive from the legacy admin flag. */
+export function effectiveRole(entry: {
+  role?: KeyRole;
+  admin?: boolean;
+}): KeyRole {
+  if (entry.role) return entry.role;
+  return entry.admin ? "admin" : "member";
+}
+
+/** Whether a key can read org-wide data (everyone's usage/logs/keys). */
+export function canReadAll(entry: { role?: KeyRole; admin?: boolean }): boolean {
+  const r = effectiveRole(entry);
+  return r === "admin" || r === "auditor";
 }
 
 export type DebugMode = "off" | "errors" | "verbose";
@@ -386,12 +414,15 @@ export function normalizeApiKeys(
     if (typeof item === "string") {
       map.set(item, { key: item, enabled: true, admin: false });
     } else if (item && typeof item.key === "string") {
+      const role = item.role;
       map.set(item.key, {
         key: item.key,
         label: item.label,
         owner: item.owner,
         enabled: item.enabled ?? true,
-        admin: item.admin ?? false,
+        // role wins; keep admin in sync for back-compat.
+        admin: role ? role === "admin" : (item.admin ?? false),
+        role,
         quota: item.quota,
         "rate-limit": item["rate-limit"],
         "allowed-models": item["allowed-models"],
