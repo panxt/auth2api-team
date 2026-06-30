@@ -7,6 +7,8 @@ import {
   setAccountBudget,
   AccountSnapshot,
   CapacitySummary,
+  QuotaPool,
+  QuotaWindowPool,
   PrewarmResp,
 } from "../api/accounts";
 import { fetchStats } from "../api/stats";
@@ -46,6 +48,28 @@ function fmtRelative(iso: string | null): string {
   if (diff < 3600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
   if (diff < 86400_000) return `${Math.floor(diff / 3600_000)} 小时前`;
   return `${Math.floor(diff / 86400_000)} 天前`;
+}
+
+/** Format a unix-seconds string as a short countdown ("剩 1h12m" / "已重置"). */
+function fmtUnixCountdown(s: string | null): string {
+  if (!s) return "—";
+  const n = Number(s);
+  if (!Number.isFinite(n)) return "—";
+  const diff = n * 1000 - Date.now();
+  if (diff <= 0) return "已重置";
+  const h = Math.floor(diff / 3600_000);
+  const m = Math.floor((diff % 3600_000) / 60_000);
+  if (h >= 24) return `${Math.floor(h / 24)}天${h % 24}h`;
+  if (h > 0) return `${h}h${m}m`;
+  return `${m}m`;
+}
+
+/** Format a unix-seconds string as a local time-of-day ("12:47"). */
+function fmtUnixClock(s: string | null): string {
+  if (!s) return "—";
+  const n = Number(s);
+  if (!Number.isFinite(n)) return "—";
+  return new Date(n * 1000).toLocaleString();
 }
 
 function cooldownStatus(acct: AccountSnapshot): {
@@ -135,6 +159,8 @@ export function Accounts() {
   const [monthCost, setMonthCost] = useState<Record<string, number>>({});
   // Per-provider capacity summary → drives the "上游已打满" alert.
   const [capacity, setCapacity] = useState<Record<string, CapacitySummary>>({});
+  // Per-provider aggregated 5h/7d quota pool → drives the "额度池" summary.
+  const [pools, setPools] = useState<Record<string, QuotaPool>>({});
   // "实时" — poll every 2s instead of 30s to watch concurrency spread live.
   const [realtime, setRealtime] = useState(false);
 
@@ -149,12 +175,16 @@ export function Accounts() {
       ]);
       const byProvider: Record<string, AccountSnapshot[]> = {};
       const caps: Record<string, CapacitySummary> = {};
+      const pls: Record<string, QuotaPool> = {};
       for (const [p, info] of Object.entries(resp.providers)) {
         if (info.account_count > 0) byProvider[p] = info.accounts;
         if (info.capacity) caps[p] = info.capacity;
+        if (info.quota_pool && (info.quota_pool["5h"] || info.quota_pool["7d"]))
+          pls[p] = info.quota_pool;
       }
       setData(byProvider);
       setCapacity(caps);
+      setPools(pls);
       if (stats) {
         const costs: Record<string, number> = {};
         for (const [k, b] of Object.entries(stats.byAccount)) {
@@ -294,6 +324,9 @@ export function Accounts() {
 
       {/* 上游容量告警 + 解决办法 */}
       <CapacityAlerts capacity={capacity} onAdd={() => setShowAdd(true)} isAdmin={isAdmin} />
+
+      {/* 额度池汇总:全部账号 5h / 7d 加权等效窗口 */}
+      <QuotaPoolSummary pools={pools} />
 
       {isAdmin && <RoutingCard />}
 
@@ -793,6 +826,104 @@ function CapacityAlerts({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/* ─── Quota pool summary (5h / 7d aggregated) ─────────────────── */
+
+const POOL_TIP =
+  "把全部启用账号的额度汇总成一个『池子』。\n\n" +
+  "Anthropic 只暴露每账号的『利用率%』,不公开绝对 token 配额,所以无法相加 token —— 这里用『加权等效窗口』口径:\n" +
+  "• 每个账号按档位权重(并发权重)折算成若干『份』窗口容量;$125 账号比 $25 账号占更大份额。\n" +
+  "• 池子已用 = Σ(权重 × 该账号利用率);剩余% = 1 − 已用/容量。\n\n" +
+  "因此『剩余』是等效窗口份数的估算,不是精确 token 数。5h 与 7d 相互独立,任一打满都会限流。各账号窗口重置时间通常不同步(错峰反而能拉平供给),『最早重置』取池内最近的一个。\n\n" +
+  "仅统计有 unified-* 数据的 Anthropic 订阅账号;Codex/Cursor 无此语义不计入。";
+
+function poolBarColor(level: QuotaWindowPool["level"]): string {
+  if (level === "critical") return "bg-rose-500";
+  if (level === "warn") return "bg-amber-500";
+  if (level === "info") return "bg-yellow-400";
+  return "bg-emerald-500";
+}
+
+function PoolWindowRow({
+  label,
+  win,
+}: {
+  label: string;
+  win: QuotaWindowPool | null;
+}) {
+  if (!win) {
+    return (
+      <div className="flex items-center gap-3 text-sm text-ink-500">
+        <span className="w-16 shrink-0">{label}</span>
+        <span>无数据</span>
+      </div>
+    );
+  }
+  const remainingPct = win.remainingPct ?? 0;
+  const usedPct = Math.min(Math.max(1 - remainingPct, 0), 1);
+  return (
+    <div className="flex items-center gap-3 text-sm">
+      <span className="w-16 shrink-0 text-ink-400">{label}</span>
+      <div className="flex-1 min-w-[120px] h-2.5 rounded-full bg-ink-800 overflow-hidden">
+        <div
+          className={`h-full ${poolBarColor(win.level)}`}
+          style={{ width: `${usedPct * 100}%` }}
+          title={`已用 ${(usedPct * 100).toFixed(0)}%`}
+        />
+      </div>
+      <span className="w-20 shrink-0 text-right text-ink-200">
+        剩余 {(remainingPct * 100).toFixed(0)}%
+      </span>
+      <span className="w-24 shrink-0 text-right text-ink-500 font-mono text-xs">
+        ≈ {win.remainingUnits}/{win.capacity} 份
+      </span>
+      <span className="w-32 shrink-0 text-right text-ink-500 text-xs">
+        {win.soonestReset
+          ? `重置 ${fmtUnixCountdown(win.soonestReset)}`
+          : "—"}
+      </span>
+    </div>
+  );
+}
+
+function QuotaPoolSummary({ pools }: { pools: Record<string, QuotaPool> }) {
+  const entries = Object.entries(pools).filter(
+    ([, p]) => p["5h"] || p["7d"],
+  );
+  if (entries.length === 0) return null;
+  return (
+    <div className="card mb-6">
+      <div className="text-sm font-medium mb-3 inline-flex items-center">
+        额度池汇总
+        <InfoTip text={POOL_TIP} />
+        <span className="ml-2 text-xs text-ink-500 font-normal">
+          全部启用账号 · 加权等效窗口(估算)
+        </span>
+      </div>
+      <div className="space-y-4">
+        {entries.map(([provider, pool]) => {
+          const accounts = pool["5h"]?.accounts ?? pool["7d"]?.accounts ?? 0;
+          const soonest = pool["5h"]?.soonestReset ?? null;
+          return (
+            <div key={provider}>
+              <div className="flex items-center gap-2 mb-1.5">
+                <span className="badge-muted text-xs">{provider}</span>
+                <span className="text-xs text-ink-500">
+                  {accounts} 账号
+                  {soonest && ` · 5h 最早重置 ${fmtUnixClock(soonest)}`}
+                </span>
+              </div>
+              <div className="space-y-1.5">
+                <PoolWindowRow label="5h 窗口" win={pool["5h"]} />
+                <PoolWindowRow label="7d 窗口" win={pool["7d"]} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

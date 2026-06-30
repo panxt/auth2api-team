@@ -810,7 +810,12 @@ export function createServer(
   app.get("/admin/accounts", (_req, res) => {
     const providers: Record<
       string,
-      { accounts: unknown[]; account_count: number; capacity: unknown }
+      {
+        accounts: unknown[];
+        account_count: number;
+        capacity: unknown;
+        quota_pool: unknown;
+      }
     > = {};
     for (const p of registry.all()) {
       providers[p.id] = {
@@ -818,6 +823,8 @@ export function createServer(
         account_count: p.manager.accountCount,
         // Pool capacity summary → drives the dashboard's "上游已打满" alert.
         capacity: p.manager.capacitySummary(),
+        // Aggregated 5h/7d quota across the pool (weighted equivalent windows).
+        quota_pool: p.manager.quotaPool(),
       };
     }
     res.json({

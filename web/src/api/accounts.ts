@@ -51,6 +51,24 @@ export interface CapacitySummary {
   level: "ok" | "info" | "warn" | "critical";
 }
 
+/** Aggregated quota for one rolling window across the pool (weighted
+ *  equivalent windows — see backend QuotaWindowPool). */
+export interface QuotaWindowPool {
+  accounts: number;
+  capacity: number;
+  used: number;
+  remainingUnits: number;
+  remainingPct: number | null;
+  maxUtil: number | null;
+  soonestReset: string | null;
+  level: "ok" | "info" | "warn" | "critical";
+}
+
+export interface QuotaPool {
+  "5h": QuotaWindowPool | null;
+  "7d": QuotaWindowPool | null;
+}
+
 export interface AccountsResp {
   providers: Record<
     string,
@@ -58,6 +76,7 @@ export interface AccountsResp {
       accounts: AccountSnapshot[];
       account_count: number;
       capacity: CapacitySummary;
+      quota_pool?: QuotaPool;
     }
   >;
   generated_at: string;
