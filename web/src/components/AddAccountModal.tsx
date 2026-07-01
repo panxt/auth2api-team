@@ -58,7 +58,13 @@ export function AddAccountModal({
   // locked, and clicking "重新认证" should land directly on the authorize page
   // with the OAuth URL already requested. Trigger when the modal opens.
   useEffect(() => {
-    if (!open || !reauthProvider || step !== "choose" || busy || authUrl) return;
+    // Auto-request the OAuth URL exactly once when the re-auth modal opens.
+    // Depend ONLY on [open, reauthProvider]: including `busy`/`step`/`authUrl`
+    // caused the effect to re-run (and its cleanup to set cancelled=true) the
+    // instant setBusy(true) fired — which threw away the resolved result and
+    // left the button stuck on "请求中…" forever.
+    if (!open || !reauthProvider) return;
+    if (step !== "choose" || authUrl || busy) return;
     let cancelled = false;
     setBusy(true);
     setErr(null);
@@ -79,7 +85,8 @@ export function AddAccountModal({
     return () => {
       cancelled = true;
     };
-  }, [open, reauthProvider, step, busy, authUrl]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, reauthProvider]);
 
   async function onStart() {
     setBusy(true);
