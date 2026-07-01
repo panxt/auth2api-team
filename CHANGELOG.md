@@ -3,6 +3,34 @@
 本文档记录 `<your-user>/auth2api-team`(fork)在上游 `AmazingAng/auth2api` 基础上的改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.3.0] — 2026-07-01
+
+在 v2.2.0 基础上把服务从「能用的共享网关」推进到「**多租户 AI 接入平台**」:三角色 RBAC + 成员自助门户(ROADMAP ⑤⑭)、上游账号全生命周期运维(主动续期 / 跨实例迁移 / 重新认证)、5h 窗口暖机内置调度器 + 定时执行审计、5h/7d 额度池汇总、以及配置/日志的权限化重构。基线 = v2.2.0,含 12 个 commit。**向后兼容**:旧 `admin: true` 键自动映射为 `admin` 角色;`prewarm_runs` 表 + `scheduled_time` 列经 `PRAGMA table_info` 轻量迁移自动创建;账号 token 文件格式不变。
+
+### Added(新增)
+
+- **三角色 RBAC + 成员自助门户**(`src/config.ts` `KeyRole`/`effectiveRole`/`canReadAll` + `src/keys/store.ts` + `web/src/pages/Self.tsx`)— 权限从 admin 布尔细化为 `admin`(全权)/ `auditor`(全局只读,禁写与配置)/ `member`(仅限自己)。新增「🙋 我的」自助页:查看身份/角色、本月用量、**自助重置自己的 key**(`POST /admin/keys/self/rotate`,保留 label/角色/配额,旧 key 立即失效;config.yaml 键只读)。建/改 key 弹窗的 admin 复选框改为角色下拉。
+- **Web 建 key 同步生成接入文档**(`web/src/lib/accessDoc.ts` + `web/src/pages/Users.tsx`,ROADMAP ⑤)— 创建 key 的对话框即时生成该用户专属接入手册(base URL = 面板地址、明文 key、Claude Code/Codex/GUI/curl 接入步骤,用 `ANTHROPIC_AUTH_TOKEN`):复制 key / 复制文档 / 下载 .md / 预览。免管理员手工跑脚本。
+- **跨实例账号无缝转移**(`src/server.ts` + `src/auth/token-storage.ts`)— `GET /admin/accounts/:provider/:email/export` 导出完整凭据 bundle(token + uuid + 预算/档位/权重),`POST /admin/accounts/import` 导入(同 email 覆盖=重认证语义)。UI 每账号「导出」下载 JSON + header「⇄ 导入账号」弹窗。admin 专属。
+- **单账号主动续期 + 全局刷新**(`src/server.ts` + `web/src/pages/Accounts.tsx`)— 每账号「↻ 刷新」`POST /admin/accounts/:provider/:email/refresh` 主动续 OAuth token(成功清认证冷却);header「↻ 刷新状态」= reconcile 整池。
+- **5h 窗口暖机内置调度器**(`src/accounts/prewarm.ts` + `src/storage`,ROADMAP)— 取代外部 launchd cron。UI 可配开关/多时间点/套用推荐/立即暖机(设置页);运行历史持久化到 `prewarm_runs` 表(sqlite)+ JSONL(file 后端),跨重启保留。历史以**「按天 × 计划时刻」执行审计表**呈现:✓按时 / ⚠部分 / ✗失败 / ✗漏跑 / ·待跑,直接核对定时任务是否到点执行。
+- **5h/7d 额度池汇总**(`src/accounts/manager.ts` `quotaPool()` + `web/src/pages/Accounts.tsx`)— 把全部启用账号的 5h/7d 滚动窗口按 `concurrencyWeight` 聚合成「加权等效窗口」:剩余% + 等效份数 + 最早重置。诚实标注为估算(Anthropic 只暴露利用率%、不公开绝对配额)。
+- **设置页**(`web/src/pages/Config.tsx`)— 负载均衡 / 窗口暖机 / 日志策略集中到独立「⚙️ 设置」页,admin 专属(路由 `RequireAdmin` 守卫)。
+- **日志按人名展示 + 搜索**(`src/server.ts` + `web/src/pages/Logs.tsx`)— key hash 解析为人名(label/owner)行内展示;admin/auditor 可按人名模糊搜索(解析为 hash 集合过滤,`RequestLogFilter` 增 `apiKeyHashes`)。
+
+### Fixed(修复)
+
+- **重新认证弹窗卡死**(`web/src/components/AddAccountModal.tsx`)— 自动发起 OAuth 的 `useEffect` 把 `busy` 放进依赖数组:`setBusy(true)` 触发 effect 清理 → `cancelled=true` → `startOAuth` 成功结果被丢弃、busy 不复位 → 永远停在「请求中…」。改为仅依赖 `[open, reauthProvider]`。
+- **导出/导入找不到 token 文件**(`src/server.ts`)— 直接用了 config 里的原始 `auth-dir`(`~/.auth2api` 未展开 `~`),`fs.existsSync` 失败。改用 `resolveAuthDir()` 展开。
+
+### Changed / Security(行为与权限变化)
+
+- **账号写操作全部锁定 admin**:`reload` / `import` / `export` / `refresh` / `delete` / `patch` 均 `requireAdmin`;`notifyServerReload` 改为优先选 admin key(`/admin/reload` 变 admin-only 后 `--login` 自动 reload 仍可用)。
+- **日志按角色隔离**:`/admin/logs` 对 admin/auditor 返回全局、对 member 硬限本人 key 的行;前端 member 隐藏「用户」搜索框。(原 v2.3 开发中期一度对全员开放,经审查收敛。)
+- `ApiKeyEntry` 增 `role`;`AccountSnapshot`/`/admin/accounts` 增 `quota_pool`;`PrewarmRunRecord` 增 `scheduledTime`;whoami 增 `role`/`source`。
+- 重新认证优化:凭据失效账号顶部红色告警条 + 行内「需重新认证」徽章 + 按钮高亮。
+- 运维文档 §5.8 改为推荐内置暖机调度器,新增 §5.8.8 launchd 迁移(卸载旧 `*.prewarm.plist`)。
+
 ## [2.2.0] — 2026-06-16
 
 在 v2.1.0 基础上引入**自适应加权并发调度**(让多账号在瞬时高并发下真正并行分摊,而非全挤一个),**日志按来源分类降噪**(区分模型/上游报错 vs 本服务报错,默认隐藏非真错噪音),以及**上游容量告警**(打满时管理页主动提示并给出解决办法)。基线 = v2.1.0,含 3 个 commit。**完全向后兼容,无破坏性 schema 迁移**(request_logs 自动加 `category` 列;账号 `concurrencyWeight` 可选)。
