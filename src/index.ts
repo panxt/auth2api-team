@@ -16,6 +16,8 @@ import { ManagedKeyStore } from "./keys/store";
 import { openStorage } from "./storage";
 import { RequestLogger } from "./logging/logger";
 import { RoutingController } from "./accounts/routing";
+import { PrewarmScheduler } from "./accounts/prewarm";
+import type { PrewarmResult } from "./providers/types";
 
 function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
@@ -239,6 +241,37 @@ async function startServer(): Promise<void> {
     config.routing,
   );
 
+  // Daily window-prewarm scheduler. Pings each prewarm-capable provider's pool
+  // at the configured local times to anchor the 5h rate-limit window to
+  // working hours. Replaces the external launchd cron; UI-configurable.
+  let prewarmScheduler: PrewarmScheduler | undefined;
+  const runPrewarm = async (): Promise<PrewarmResult[]> => {
+    const filter = prewarmScheduler?.getConfig().providers ?? [];
+    const out: PrewarmResult[] = [];
+    for (const p of registry.all()) {
+      if (!p.prewarm) continue;
+      if (filter.length > 0 && !filter.includes(p.id)) continue;
+      try {
+        out.push(await p.prewarm(config));
+      } catch (err: any) {
+        out.push({
+          provider: p.id,
+          results: [],
+          generated_at: new Date().toISOString(),
+        });
+        console.error(`[prewarm] ${p.id} failed:`, err?.message || err);
+      }
+    }
+    return out;
+  };
+  prewarmScheduler = new PrewarmScheduler(
+    storage.settings,
+    runPrewarm,
+    config.prewarm,
+    storage.prewarmLog,
+  );
+  prewarmScheduler.start();
+
   const app = createServer(
     config,
     registry,
@@ -247,6 +280,7 @@ async function startServer(): Promise<void> {
     keyStore,
     requestLogger,
     routingController,
+    prewarmScheduler,
   );
   const host = config.host || "127.0.0.1";
   const port = config.port;

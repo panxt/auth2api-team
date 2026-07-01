@@ -1,16 +1,19 @@
 import { useEffect, useState, useCallback } from "react";
 import {
   listAccounts,
-  prewarm,
+  reload,
+  refreshAccount,
+  exportAccount,
+  importAccounts,
   deleteAccount,
   setAccountDisabled,
   setAccountBudget,
   AccountSnapshot,
   CapacitySummary,
-  PrewarmResp,
+  QuotaPool,
+  QuotaWindowPool,
 } from "../api/accounts";
 import { fetchStats } from "../api/stats";
-import { fetchRoutingConfig, updateRoutingConfig, RoutingConfig } from "../api/routing";
 import { ApiError } from "../api/client";
 import { AddAccountModal } from "../components/AddAccountModal";
 import { AccountQuotaPanel, InfoTip } from "../components/AccountQuotaPanel";
@@ -41,6 +44,39 @@ function fmtRelative(iso: string | null): string {
   return `${Math.floor(diff / 86400_000)} 天前`;
 }
 
+/** Format a unix-seconds string as a short countdown ("剩 1h12m" / "已重置"). */
+function fmtUnixCountdown(s: string | null): string {
+  if (!s) return "—";
+  const n = Number(s);
+  if (!Number.isFinite(n)) return "—";
+  const diff = n * 1000 - Date.now();
+  if (diff <= 0) return "已重置";
+  const h = Math.floor(diff / 3600_000);
+  const m = Math.floor((diff % 3600_000) / 60_000);
+  if (h >= 24) return `${Math.floor(h / 24)}天${h % 24}h`;
+  if (h > 0) return `${h}h${m}m`;
+  return `${m}m`;
+}
+
+/** Format a unix-seconds string as a local time-of-day ("12:47"). */
+function fmtUnixClock(s: string | null): string {
+  if (!s) return "—";
+  const n = Number(s);
+  if (!Number.isFinite(n)) return "—";
+  return new Date(n * 1000).toLocaleString();
+}
+
+/** True when an account is down because its OAuth credential is dead (refresh
+ *  token expired / revoked / auth error) — a token refresh won't fix it; only
+ *  re-auth (or importing a fresh bundle) will. Drives the re-auth surfacing. */
+function needsReauth(acct: AccountSnapshot): boolean {
+  if (acct.disabled || acct.available) return false;
+  const e = (acct.lastError || "").toLowerCase();
+  return /invalid_grant|refresh token|revoked|unauthor|invalid_token|re-?auth|401/.test(
+    e,
+  );
+}
+
 function cooldownStatus(acct: AccountSnapshot): {
   badge: string;
   className: string;
@@ -65,47 +101,6 @@ function cooldownStatus(acct: AccountSnapshot): {
   return { badge: "ok", className: "badge-ok" };
 }
 
-/**
- * Turn a prewarm result into a short, human reason instead of dumping the raw
- * upstream 429 JSON. Rate-limit on prewarm is expected when the 5h window is
- * already active, so it's shown amber (informational), not red.
- */
-function prewarmOutcome(r: { ok: boolean; error?: string; latencyMs?: number }): {
-  label: string;
-  tone: string;
-} {
-  if (r.ok) {
-    return {
-      label: r.latencyMs ? `成功 · ${r.latencyMs}ms` : "成功",
-      tone: "text-emerald-400",
-    };
-  }
-  const e = r.error || "";
-  if (/cooldown|not found/i.test(e)) {
-    return { label: "未加载 / 冷却中", tone: "text-ink-500" };
-  }
-  const status = e.match(/\b(\d{3})\b/)?.[1] ?? null;
-  if (status === "429" || /rate_limit/i.test(e)) {
-    return { label: "已限流 · 5h 窗口暂满", tone: "text-amber-400" };
-  }
-  if (status === "401" || /unauthor|invalid_token|invalid_grant/i.test(e)) {
-    return { label: "认证失效 · 需重新认证", tone: "text-rose-400" };
-  }
-  // Fallback: pull a clean message out of any embedded JSON, else truncate.
-  let msg = e;
-  const brace = e.indexOf("{");
-  if (brace >= 0) {
-    try {
-      const obj = JSON.parse(e.slice(brace));
-      msg = obj?.error?.message || obj?.message || e;
-    } catch {
-      /* keep raw */
-    }
-  }
-  if (msg.length > 80) msg = msg.slice(0, 80) + "…";
-  return { label: `${status ? status + " · " : ""}${msg || "失败"}`, tone: "text-rose-400" };
-}
-
 export function Accounts() {
   const { whoami } = useAuth();
   const isAdmin = !!whoami?.admin;
@@ -113,8 +108,6 @@ export function Accounts() {
   const [data, setData] = useState<Record<string, AccountSnapshot[]>>({});
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-  const [prewarming, setPrewarming] = useState(false);
-  const [lastPrewarm, setLastPrewarm] = useState<PrewarmResp | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [reauth, setReauth] = useState<{
     provider: SupportedProvider;
@@ -128,6 +121,13 @@ export function Accounts() {
   const [monthCost, setMonthCost] = useState<Record<string, number>>({});
   // Per-provider capacity summary → drives the "上游已打满" alert.
   const [capacity, setCapacity] = useState<Record<string, CapacitySummary>>({});
+  // Per-provider aggregated 5h/7d quota pool → drives the "额度池" summary.
+  const [pools, setPools] = useState<Record<string, QuotaPool>>({});
+  // 全局「刷新状态」按钮 in-flight, and per-account refresh ("provider:email").
+  const [reloading, setReloading] = useState(false);
+  const [refreshingOne, setRefreshingOne] = useState<string | null>(null);
+  // 跨实例账号转移:导入弹窗。
+  const [showImport, setShowImport] = useState(false);
   // "实时" — poll every 2s instead of 30s to watch concurrency spread live.
   const [realtime, setRealtime] = useState(false);
 
@@ -142,12 +142,16 @@ export function Accounts() {
       ]);
       const byProvider: Record<string, AccountSnapshot[]> = {};
       const caps: Record<string, CapacitySummary> = {};
+      const pls: Record<string, QuotaPool> = {};
       for (const [p, info] of Object.entries(resp.providers)) {
         if (info.account_count > 0) byProvider[p] = info.accounts;
         if (info.capacity) caps[p] = info.capacity;
+        if (info.quota_pool && (info.quota_pool["5h"] || info.quota_pool["7d"]))
+          pls[p] = info.quota_pool;
       }
       setData(byProvider);
       setCapacity(caps);
+      setPools(pls);
       if (stats) {
         const costs: Record<string, number> = {};
         for (const [k, b] of Object.entries(stats.byAccount)) {
@@ -168,21 +172,6 @@ export function Accounts() {
     const t = setInterval(() => load(false), realtime ? 2000 : 30_000);
     return () => clearInterval(t);
   }, [load, realtime]);
-
-  async function onPrewarm() {
-    setPrewarming(true);
-    setLastPrewarm(null);
-    try {
-      const resp = await prewarm();
-      setLastPrewarm(resp);
-      // refresh account view after a moment so lastSuccessAt shows the ping
-      setTimeout(load, 500);
-    } catch (e) {
-      alert(`prewarm 失败: ${(e as ApiError).message}`);
-    } finally {
-      setPrewarming(false);
-    }
-  }
 
   async function onToggleDisabled(providerId: string, acct: AccountSnapshot) {
     const target = !acct.disabled;
@@ -207,6 +196,56 @@ export function Accounts() {
       load();
     } catch (e) {
       alert(`删除失败: ${(e as ApiError).message}`);
+    }
+  }
+
+  // 全局刷新:重读 token 文件 + 和解整池(捡起 CLI/UI 新登录),再拉快照。
+  async function onReloadAll() {
+    setReloading(true);
+    try {
+      await reload();
+      await load(false);
+    } catch (e) {
+      alert(`刷新失败: ${(e as ApiError).message}`);
+    } finally {
+      setReloading(false);
+    }
+  }
+
+  // 单账号刷新:主动续该账号的 OAuth token,成功可清认证冷却。
+  async function onRefreshOne(providerId: string, email: string) {
+    const key = `${providerId}:${email}`;
+    setRefreshingOne(key);
+    try {
+      const r = await refreshAccount(providerId, email);
+      await load(false);
+      if (!r.ok) {
+        alert(
+          `账号 ${email} 续期失败 —— 多半是 refresh token 已过期,需重新登录(点该账号的「重新认证」)。`,
+        );
+      }
+    } catch (e) {
+      alert(`刷新失败: ${(e as ApiError).message}`);
+    } finally {
+      setRefreshingOne(null);
+    }
+  }
+
+  // 导出该账号的凭据 bundle → 下载 JSON,可导入到另一台 auth2api。
+  async function onExport(providerId: string, email: string) {
+    try {
+      const bundle = await exportAccount(providerId, email);
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `auth2api-account-${providerId}-${email.replace(/[^a-zA-Z0-9@._-]/g, "_")}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(`导出失败: ${(e as ApiError).message}`);
     }
   }
 
@@ -252,8 +291,8 @@ export function Accounts() {
           </h1>
           <p className="text-sm text-ink-400 mt-1">
             {isAdmin
-              ? "每个 OAuth 账号当前状态 + 累计统计。点 prewarm 可立即把所有 anthropic 账号的 5h 窗口往前对齐。"
-              : "每个 OAuth 账号当前状态 + 累计统计。新增账号 / Prewarm 需 admin 权限,请联系管理员。"}
+              ? "每个 OAuth 账号当前状态 + 累计统计。负载均衡与窗口暖机配置见「设置」页。"
+              : "每个 OAuth 账号当前状态 + 累计统计。新增账号需 admin 权限,请联系管理员。"}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -269,16 +308,24 @@ export function Accounts() {
           <div className="flex gap-2">
             <button
               className="btn-secondary"
+              onClick={onReloadAll}
+              disabled={reloading}
+              title="重读 token 文件并和解整池(捡起新登录的账号)"
+            >
+              {reloading ? "刷新中..." : "↻ 刷新状态"}
+            </button>
+            <button
+              className="btn-secondary"
+              onClick={() => setShowImport(true)}
+              title="从另一台 auth2api 导出的 JSON 导入账号"
+            >
+              ⇄ 导入账号
+            </button>
+            <button
+              className="btn-secondary"
               onClick={() => setShowAdd(true)}
             >
               + 新增账号
-            </button>
-            <button
-              className="btn-primary"
-              onClick={onPrewarm}
-              disabled={prewarming}
-            >
-              {prewarming ? "Prewarming..." : "⚡ 立即 Prewarm"}
             </button>
           </div>
         )}
@@ -288,7 +335,47 @@ export function Accounts() {
       {/* 上游容量告警 + 解决办法 */}
       <CapacityAlerts capacity={capacity} onAdd={() => setShowAdd(true)} isAdmin={isAdmin} />
 
-      {isAdmin && <RoutingCard />}
+      {/* 额度池汇总:全部账号 5h / 7d 加权等效窗口 */}
+      <QuotaPoolSummary pools={pools} />
+
+      {/* 需重新认证提醒 */}
+      {isAdmin &&
+        (() => {
+          const stale = Object.entries(data).flatMap(([p, accts]) =>
+            accts.filter(needsReauth).map((a) => ({ provider: p, acct: a })),
+          );
+          if (stale.length === 0) return null;
+          return (
+            <div className="card mb-6 border-rose-500/40">
+              <div className="text-sm font-medium text-rose-300 mb-2">
+                ⚠ {stale.length} 个账号凭据失效,需重新认证
+              </div>
+              <div className="space-y-1.5">
+                {stale.map(({ provider, acct }) => (
+                  <div
+                    key={`${provider}:${acct.email}`}
+                    className="flex items-center gap-3 text-sm"
+                  >
+                    <span className="badge-muted text-xs">{provider}</span>
+                    <span className="font-mono text-ink-300">{acct.email}</span>
+                    <span className="text-ink-500 truncate max-w-[20rem]">
+                      {acct.lastError || "认证失效"}
+                    </span>
+                    <button
+                      className="btn-primary text-xs ml-auto"
+                      onClick={() => onReauth(provider, acct)}
+                    >
+                      重新认证
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="text-xs text-ink-500 mt-2">
+                提示:也可在另一台已认证的实例「导出」该账号,在此「⇄ 导入账号」无缝迁入。
+              </div>
+            </div>
+          );
+        })()}
 
       {isAdmin && (
         <>
@@ -315,46 +402,17 @@ export function Accounts() {
             onClose={() => setBudgetEdit(null)}
             onSave={onSaveBudget}
           />
+          <ImportAccountsModal
+            open={showImport}
+            onClose={() => setShowImport(false)}
+            onImported={() => {
+              setShowImport(false);
+              setTimeout(() => load(false), 300);
+            }}
+          />
         </>
       )}
 
-      {lastPrewarm && (
-        <div className="card mb-6">
-          <div className="text-sm text-ink-300 mb-2 font-medium">
-            上次 prewarm 结果
-          </div>
-          <div className="space-y-1">
-            {lastPrewarm.providers.flatMap((p) => {
-              if (p.results.length === 0) {
-                return [
-                  <div
-                    key={p.provider}
-                    className="flex items-center gap-2 text-sm"
-                  >
-                    <span className="badge-muted text-xs">{p.provider}</span>
-                    <span className="text-ink-500">
-                      {p.error ? p.error : "无可 prewarm 的账号"}
-                    </span>
-                  </div>,
-                ];
-              }
-              return p.results.map((r) => {
-                const o = prewarmOutcome(r);
-                return (
-                  <div
-                    key={`${p.provider}:${r.email}`}
-                    className="flex items-center gap-2 text-sm"
-                  >
-                    <span className="badge-muted text-xs">{p.provider}</span>
-                    <span className="font-mono text-ink-300">{r.email}</span>
-                    <span className={o.tone}>· {o.label}</span>
-                  </div>
-                );
-              });
-            })}
-          </div>
-        </div>
-      )}
 
       {loading && <div className="text-ink-400">加载中...</div>}
       {err && <div className="badge-err px-3 py-2 inline-block">{err}</div>}
@@ -403,6 +461,9 @@ export function Accounts() {
                       </td>
                       <td className="px-4 py-3">
                         <div className={cd.className}>{cd.badge}</div>
+                        {needsReauth(a) && (
+                          <div className="badge-err text-xs mt-0.5">需重新认证</div>
+                        )}
                         {cd.detail && (
                           <div
                             className="text-xs text-ink-500 mt-0.5 truncate max-w-[16rem]"
@@ -440,17 +501,41 @@ export function Accounts() {
                         <td className="px-4 py-3 text-right whitespace-nowrap space-x-1">
                           <button
                             className="btn-ghost text-xs"
+                            onClick={() => onRefreshOne(providerId, a.email)}
+                            disabled={
+                              refreshingOne === `${providerId}:${a.email}` ||
+                              a.refreshing
+                            }
+                            title="主动续期该账号的 OAuth token(成功可清认证冷却)"
+                          >
+                            {refreshingOne === `${providerId}:${a.email}`
+                              ? "刷新中..."
+                              : "↻ 刷新"}
+                          </button>
+                          <button
+                            className="btn-ghost text-xs"
                             onClick={() => onToggleDisabled(providerId, a)}
                             title={a.disabled ? "重新启用" : "暂停使用,token 保留"}
                           >
                             {a.disabled ? "启用" : "停用"}
                           </button>
                           <button
-                            className="btn-ghost text-xs"
+                            className={
+                              needsReauth(a)
+                                ? "btn-primary text-xs"
+                                : "btn-ghost text-xs"
+                            }
                             onClick={() => onReauth(providerId, a)}
                             title="OAuth 重新登录 — 用相同 email 登录会刷新 token"
                           >
                             重新认证
+                          </button>
+                          <button
+                            className="btn-ghost text-xs"
+                            onClick={() => onExport(providerId, a.email)}
+                            title="导出凭据 JSON,可导入到另一台 auth2api(含 token,妥善保管)"
+                          >
+                            导出
                           </button>
                           <button
                             className="btn-ghost text-xs"
@@ -788,110 +873,182 @@ function CapacityAlerts({
   );
 }
 
-/* ─── Routing settings card (admin) ──────────────────────────── */
+/* ─── Import accounts modal (cross-instance transfer) ─────────── */
 
-function RoutingCard() {
-  const [open, setOpen] = useState(false);
-  const [cfg, setCfg] = useState<RoutingConfig | null>(null);
-  const [saving, setSaving] = useState(false);
+function ImportAccountsModal({
+  open,
+  onClose,
+  onImported,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onImported: () => void;
+}) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetchRoutingConfig().then(setCfg).catch(() => setCfg(null));
-  }, []);
-
-  function patch(p: Partial<RoutingConfig>) {
-    setCfg((c) => (c ? { ...c, ...p } : c));
+  function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    file.text().then(setText);
   }
 
-  async function save() {
-    if (!cfg) return;
-    setSaving(true);
+  async function doImport() {
+    setBusy(true);
     setMsg(null);
+    let payload: unknown;
     try {
-      const next = await updateRoutingConfig(cfg);
-      setCfg(next);
-      setMsg("已保存");
-      setTimeout(() => setMsg(null), 2000);
+      payload = JSON.parse(text);
+    } catch {
+      setMsg("JSON 解析失败,请检查粘贴内容");
+      setBusy(false);
+      return;
+    }
+    try {
+      const r = await importAccounts(payload);
+      const okN = r.imported.length;
+      const errN = r.errors.length;
+      if (errN === 0) {
+        setMsg(`已导入 ${okN} 个账号 ✓`);
+        setTimeout(onImported, 800);
+      } else {
+        setMsg(
+          `导入 ${okN} 个,失败 ${errN} 个:${r.errors
+            .map((e) => `${e.email ?? "?"}(${e.error})`)
+            .join("; ")}`,
+        );
+        if (okN > 0) setTimeout(onImported, 1500);
+      }
     } catch (e) {
-      setMsg(`保存失败: ${(e as ApiError).message}`);
+      setMsg(`导入失败: ${(e as ApiError).message}`);
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   }
 
   return (
-    <div className="card mb-4">
-      <button
-        className="flex items-center justify-between w-full text-left"
-        onClick={() => setOpen((o) => !o)}
-      >
-        <span className="font-medium">⚙️ 负载均衡设置</span>
-        <span className="text-ink-500 text-sm">{open ? "收起" : "展开"}</span>
-      </button>
-      {open && cfg && (
-        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-          <div>
-            <label className="block text-xs text-ink-500 mb-1">调度策略</label>
-            <select
-              className="input !py-1"
-              value={cfg.strategy}
-              onChange={(e) => patch({ strategy: e.target.value as any })}
-            >
-              <option value="adaptive">自适应(低并发粘账号,高并发分摊)</option>
-              <option value="weighted-least-inflight">加权最少处理中(始终分摊)</option>
-              <option value="sticky">粘性(旧行为,挤一个)</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs text-ink-500 mb-1 inline-flex items-center">
-              粘性阈值(处理中 &lt; 此值才粘账号)
-              <InfoTip text={"账号当前『处理中』请求数低于此值时,新请求继续打到同一账号,以命中 Anthropic 的 prompt 缓存、降低延迟与成本;超过此值即视为该账号拥堵,调度器把请求溢出分摊到其他账号。\n\n调大 = 更省:更黏一个账号、缓存命中高,但单账号易先打满限流。\n调小 = 更稳:更早分摊、并发更均衡,但缓存命中率下降。\n\n默认 4 适合多数场景;压测/批量可调到 1~2 尽快摊开。仅对『自适应』策略生效。"} />
-            </label>
-            <input
-              className="input !py-1"
-              type="number"
-              min="1"
-              value={cfg["stick-while-inflight-below"]}
-              onChange={(e) =>
-                patch({ "stick-while-inflight-below": Number(e.target.value) })
-              }
-            />
-          </div>
-          <div>
-            <label className="block text-xs text-ink-500 mb-1 inline-flex items-center">
-              每账号并发上限(0 = 不限)
-              <InfoTip text="单个账号同时『处理中』的请求数硬上限。达到后该账号不再接新请求,溢出请求改派其他账号;全部账号都满则快速返回 429(带 Retry-After),避免把请求堆在某个账号上拖垮它、触发上游限流冷却。0 表示不设上限。" />
-            </label>
-            <input
-              className="input !py-1"
-              type="number"
-              min="0"
-              value={cfg["per-account-max-inflight"]}
-              onChange={(e) =>
-                patch({ "per-account-max-inflight": Number(e.target.value) })
-              }
-            />
-          </div>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={cfg["use-5h-utilization"]}
-              onChange={(e) => patch({ "use-5h-utilization": e.target.checked })}
-            />
-            <span className="inline-flex items-center">
-              纳入 5 小时窗口利用率打分
-              <InfoTip text={"开启后,选账号不只看『处理中』请求数,还把各账号上游 5 小时滚动窗口的已用额度计入打分:剩余额度越少的账号越不优先,从而提前避开快打满限流的账号、让用量在账号间更均衡。\n\n数据来自上游返回的 unified-5h-utilization,仅 Anthropic 订阅账号有;无此数据的账号(Codex/Cursor)按纯并发分摊,不受影响。\n\n关闭则只按加权处理中数分摊。"} />
-            </span>
-          </label>
-          <div className="md:col-span-2 flex items-center gap-3">
-            <button className="btn-primary text-sm" onClick={save} disabled={saving}>
-              {saving ? "保存中..." : "保存设置"}
-            </button>
-            {msg && <span className="text-ink-400 text-sm">{msg}</span>}
-          </div>
+    <Modal open={open} onClose={onClose} title="导入账号(跨实例转移)">
+      <div className="space-y-3 text-sm">
+        <p className="text-ink-400">
+          粘贴(或上传)另一台 auth2api 用「导出」生成的 JSON。支持单个或
+          <code className="mx-1">{"{ accounts: [...] }"}</code>批量。
+          <span className="text-amber-400">
+            ⚠ 文件含真实 OAuth 凭据,导入即等于把上游账号迁到本实例。
+          </span>
+        </p>
+        <input type="file" accept="application/json,.json" onChange={onFile} className="text-xs" />
+        <textarea
+          className="input w-full font-mono text-xs h-40"
+          placeholder='{"kind":"auth2api-account-export", "account": { ... }}'
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+        <div className="flex items-center gap-3">
+          <button className="btn-primary text-sm" onClick={doImport} disabled={busy || !text.trim()}>
+            {busy ? "导入中..." : "导入"}
+          </button>
+          {msg && <span className="text-ink-300 text-xs">{msg}</span>}
         </div>
-      )}
+      </div>
+    </Modal>
+  );
+}
+
+/* ─── Quota pool summary (5h / 7d aggregated) ─────────────────── */
+
+const POOL_TIP =
+  "把全部启用账号的额度汇总成一个『池子』。\n\n" +
+  "Anthropic 只暴露每账号的『利用率%』,不公开绝对 token 配额,所以无法相加 token —— 这里用『加权等效窗口』口径:\n" +
+  "• 每个账号按档位权重(并发权重)折算成若干『份』窗口容量;$125 账号比 $25 账号占更大份额。\n" +
+  "• 池子已用 = Σ(权重 × 该账号利用率);剩余% = 1 − 已用/容量。\n\n" +
+  "因此『剩余』是等效窗口份数的估算,不是精确 token 数。5h 与 7d 相互独立,任一打满都会限流。各账号窗口重置时间通常不同步(错峰反而能拉平供给),『最早重置』取池内最近的一个。\n\n" +
+  "仅统计有 unified-* 数据的 Anthropic 订阅账号;Codex/Cursor 无此语义不计入。";
+
+function poolBarColor(level: QuotaWindowPool["level"]): string {
+  if (level === "critical") return "bg-rose-500";
+  if (level === "warn") return "bg-amber-500";
+  if (level === "info") return "bg-yellow-400";
+  return "bg-emerald-500";
+}
+
+function PoolWindowRow({
+  label,
+  win,
+}: {
+  label: string;
+  win: QuotaWindowPool | null;
+}) {
+  if (!win) {
+    return (
+      <div className="flex items-center gap-3 text-sm text-ink-500">
+        <span className="w-16 shrink-0">{label}</span>
+        <span>无数据</span>
+      </div>
+    );
+  }
+  const remainingPct = win.remainingPct ?? 0;
+  const usedPct = Math.min(Math.max(1 - remainingPct, 0), 1);
+  return (
+    <div className="flex items-center gap-3 text-sm">
+      <span className="w-16 shrink-0 text-ink-400">{label}</span>
+      <div className="flex-1 min-w-[120px] h-2.5 rounded-full bg-ink-800 overflow-hidden">
+        <div
+          className={`h-full ${poolBarColor(win.level)}`}
+          style={{ width: `${usedPct * 100}%` }}
+          title={`已用 ${(usedPct * 100).toFixed(0)}%`}
+        />
+      </div>
+      <span className="w-20 shrink-0 text-right text-ink-200">
+        剩余 {(remainingPct * 100).toFixed(0)}%
+      </span>
+      <span className="w-24 shrink-0 text-right text-ink-500 font-mono text-xs">
+        ≈ {win.remainingUnits}/{win.capacity} 份
+      </span>
+      <span className="w-32 shrink-0 text-right text-ink-500 text-xs">
+        {win.soonestReset
+          ? `重置 ${fmtUnixCountdown(win.soonestReset)}`
+          : "—"}
+      </span>
+    </div>
+  );
+}
+
+function QuotaPoolSummary({ pools }: { pools: Record<string, QuotaPool> }) {
+  const entries = Object.entries(pools).filter(
+    ([, p]) => p["5h"] || p["7d"],
+  );
+  if (entries.length === 0) return null;
+  return (
+    <div className="card mb-6">
+      <div className="text-sm font-medium mb-3 inline-flex items-center">
+        额度池汇总
+        <InfoTip text={POOL_TIP} />
+        <span className="ml-2 text-xs text-ink-500 font-normal">
+          全部启用账号 · 加权等效窗口(估算)
+        </span>
+      </div>
+      <div className="space-y-4">
+        {entries.map(([provider, pool]) => {
+          const accounts = pool["5h"]?.accounts ?? pool["7d"]?.accounts ?? 0;
+          const soonest = pool["5h"]?.soonestReset ?? null;
+          return (
+            <div key={provider}>
+              <div className="flex items-center gap-2 mb-1.5">
+                <span className="badge-muted text-xs">{provider}</span>
+                <span className="text-xs text-ink-500">
+                  {accounts} 账号
+                  {soonest && ` · 5h 最早重置 ${fmtUnixClock(soonest)}`}
+                </span>
+              </div>
+              <div className="space-y-1.5">
+                <PoolWindowRow label="5h 窗口" win={pool["5h"]} />
+                <PoolWindowRow label="7d 窗口" win={pool["7d"]} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

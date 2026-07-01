@@ -33,8 +33,17 @@ export function normalizeNotifyHost(configured: string | undefined): string {
 export async function notifyServerReload(config: Config): Promise<void> {
   const host = normalizeNotifyHost(config.host);
   const port = config.port;
-  // Map preserves insertion order; pick the first configured key.
-  const apiKey = config["api-keys"].keys().next().value;
+  // /admin/reload is admin-only, so prefer the first ADMIN key; fall back to
+  // the first configured key (Map preserves insertion order) when none is
+  // marked admin (older single-key setups where the sole key isn't flagged).
+  let apiKey: string | undefined;
+  for (const [key, entry] of config["api-keys"].entries()) {
+    if (entry.admin) {
+      apiKey = key;
+      break;
+    }
+  }
+  if (!apiKey) apiKey = config["api-keys"].keys().next().value;
   if (!apiKey) return; // loadConfig always seeds at least one key
   const url = `http://${host}:${port}/admin/reload`;
 

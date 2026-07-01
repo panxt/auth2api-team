@@ -67,6 +67,9 @@ export interface RequestLogFilter {
   status?: "success" | "failure";
   category?: LogCategory;
   apiKeyPrefix?: string;
+  /** Restrict to these full api-key hashes (used to resolve a name search to
+   *  the keys that match). An empty array matches nothing. */
+  apiKeyHashes?: string[];
   email?: string;
   model?: string;
   endpoint?: string;
@@ -95,11 +98,41 @@ export interface SettingsStore {
   set(key: string, value: unknown): void;
 }
 
+/**
+ * One persisted window-prewarm run (scheduled or manual). Stored separately
+ * from request logs so its retention is independent and it survives restarts.
+ * `providers` is the opaque per-provider result payload (PrewarmResult[]).
+ */
+export interface PrewarmRunRecord {
+  at: string; // ISO8601 UTC — when the run actually fired
+  trigger: "schedule" | "manual";
+  /** For scheduled runs: the configured "HH:MM" plan this run satisfies.
+   *  null for manual runs. Lets the dashboard audit on-time vs missed. */
+  scheduledTime: string | null;
+  ok: number;
+  total: number;
+  providers: unknown;
+}
+
+export interface PrewarmRunPage {
+  rows: (PrewarmRunRecord & { id: number })[];
+  nextCursor: number | null; // pass back as `cursor` to load older rows
+}
+
+/** Append-only, newest-first store for prewarm run history. */
+export interface PrewarmRunStore {
+  append(rec: PrewarmRunRecord): void;
+  list(opts: { limit: number; cursor?: number | null }): PrewarmRunPage;
+  /** Keep only the newest `maxRows`; returns rows removed. */
+  prune(opts: { maxRows?: number }): number;
+}
+
 /** A selected storage backend: the repositories plus a shared close(). */
 export interface Storage {
   eventLog: EventLog;
   keyRepo: KeyRepository;
   requestLog: RequestLogStore;
+  prewarmLog: PrewarmRunStore;
   settings: SettingsStore;
   close(): Promise<void>;
 }
@@ -112,7 +145,8 @@ export function normalizeKeyEntry(v: any): ApiKeyEntry | null {
     label: v.label,
     owner: v.owner,
     enabled: v.enabled ?? true,
-    admin: v.admin ?? false,
+    admin: v.role ? v.role === "admin" : (v.admin ?? false),
+    role: v.role,
     quota: v.quota,
     "rate-limit": v["rate-limit"],
     // These must round-trip too — otherwise UI-set model allow/deny lists are

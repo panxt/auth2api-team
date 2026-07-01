@@ -50,12 +50,15 @@ export interface UsageKeysResp {
 
 /* ── Shapes from /admin/keys (managed only) ───────────────────────────── */
 
+export type KeyRole = "admin" | "auditor" | "member";
+
 export interface ManagedKeyView {
   id: string;                    // hash prefix
   label: string | null;
   owner: string | null;
   enabled: boolean;
   admin: boolean;
+  role: KeyRole;
   quota: KeyQuota | null;
   "rate-limit": KeyRateLimit | null;
   "allowed-models": string[] | null;
@@ -70,6 +73,7 @@ export interface CreateKeyResponse {
   owner: string | null;
   enabled: boolean;
   admin: boolean;
+  role: KeyRole;
   quota: KeyQuota | null;
   "rate-limit": KeyRateLimit | null;
   "allowed-models"?: string[] | null;
@@ -80,6 +84,7 @@ export interface CreateKeyInput {
   label?: string;
   owner?: string;
   admin?: boolean;
+  role?: KeyRole;
   enabled?: boolean;
   // null explicitly clears a previously-set quota on PATCH.
   quota?: KeyQuota | null;
@@ -89,6 +94,10 @@ export interface CreateKeyInput {
 }
 
 export type PatchKeyInput = CreateKeyInput;
+
+/** Self-service: rotate the CALLING key — reissue with a fresh secret. */
+export const rotateSelfKey = () =>
+  post<CreateKeyResponse>("/admin/keys/self/rotate");
 
 /* ── /v1/models (for the model allowlist picker) ──────────────────────── */
 

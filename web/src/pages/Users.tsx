@@ -9,16 +9,20 @@ import {
   UsageKey,
   ManagedKeyView,
   CreateKeyInput,
+  CreateKeyResponse,
   KeyQuota,
   KeyModelQuota,
+  KeyRole,
 } from "../api/keys";
 import { ApiError } from "../api/client";
 import { Modal } from "../components/Modal";
 import { useAuth } from "../lib/auth";
+import { buildAccessDoc, downloadAccessDoc } from "../lib/accessDoc";
 
 interface MergedRow extends UsageKey {
   source: "managed" | "config";
   managedId: string | null;   // null = config-only key (read-only)
+  role: KeyRole | null;       // from managed view; null for config-only
   allowedModels: string[] | null; // model allowlist (managed keys only)
   deniedModels: string[] | null;  // model denylist (managed keys only)
 }
@@ -45,7 +49,7 @@ export function Users() {
 
   const [showCreate, setShowCreate] = useState(false);
   const [editing, setEditing] = useState<MergedRow | null>(null);
-  const [createdKey, setCreatedKey] = useState<string | null>(null); // raw key shown once
+  const [createdKey, setCreatedKey] = useState<CreateKeyResponse | null>(null); // raw key + meta, shown once
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -69,6 +73,7 @@ export function Users() {
           ...u,
           source: m ? "managed" : "config",
           managedId: m ? m.id : null,
+          role: m ? m.role : null,
           allowedModels: m ? m["allowed-models"] : null,
           deniedModels: m ? m["denied-models"] : null,
         };
@@ -304,9 +309,9 @@ export function Users() {
         open={showCreate}
         models={models}
         onClose={() => setShowCreate(false)}
-        onCreated={(rawKey) => {
+        onCreated={(resp) => {
           setShowCreate(false);
-          setCreatedKey(rawKey);
+          setCreatedKey(resp);
           load();
         }}
       />
@@ -326,22 +331,40 @@ export function Users() {
           open
           onClose={() => setCreatedKey(null)}
           title="✓ Key 已创建 — 这是唯一一次能看到明文"
+          size="lg"
         >
           <div className="space-y-3">
             <p className="text-sm text-ink-300">
               立即复制保存,关掉这个对话框后**就再也看不到了**(后端只存 hash)。
+              下方是为该用户生成的专属接入文档,可直接复制 / 下载发给成员。
             </p>
             <div className="bg-ink-800 p-3 rounded-md break-all font-mono text-sm">
-              {createdKey}
+              {createdKey.key}
             </div>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <button
                 className="btn-primary"
-                onClick={() => {
-                  navigator.clipboard.writeText(createdKey);
-                }}
+                onClick={() => navigator.clipboard.writeText(createdKey.key)}
               >
-                复制
+                复制 key
+              </button>
+              <button
+                className="btn-secondary"
+                onClick={() =>
+                  navigator.clipboard.writeText(
+                    buildAccessDoc(createdKey.key, createdKey.label),
+                  )
+                }
+              >
+                复制接入文档
+              </button>
+              <button
+                className="btn-secondary"
+                onClick={() =>
+                  downloadAccessDoc(createdKey.key, createdKey.label, createdKey.id)
+                }
+              >
+                下载文档 (.md)
               </button>
               <button
                 className="btn-secondary"
@@ -350,6 +373,14 @@ export function Users() {
                 我保存好了
               </button>
             </div>
+            <details className="text-sm">
+              <summary className="cursor-pointer text-ink-400 hover:text-ink-200">
+                预览接入文档
+              </summary>
+              <pre className="mt-2 bg-ink-800 p-3 rounded-md text-xs whitespace-pre-wrap max-h-72 overflow-auto">
+                {buildAccessDoc(createdKey.key, createdKey.label)}
+              </pre>
+            </details>
           </div>
         </Modal>
       )}
@@ -368,11 +399,11 @@ function CreateKeyModal({
   open: boolean;
   models: string[];
   onClose: () => void;
-  onCreated: (rawKey: string) => void;
+  onCreated: (resp: CreateKeyResponse) => void;
 }) {
   const [label, setLabel] = useState("");
   const [owner, setOwner] = useState("");
-  const [admin, setAdmin] = useState(false);
+  const [role, setRole] = useState<KeyRole>("member");
   const [quota, setQuota] = useState<KeyQuota>({});
   const [allowedModels, setAllowedModels] = useState<string[]>([]);
   const [deniedModels, setDeniedModels] = useState<string[]>([]);
@@ -382,7 +413,7 @@ function CreateKeyModal({
   function reset() {
     setLabel("");
     setOwner("");
-    setAdmin(false);
+    setRole("member");
     setQuota({});
     setAllowedModels([]);
     setDeniedModels([]);
@@ -393,7 +424,7 @@ function CreateKeyModal({
     setSubmitting(true);
     setErr(null);
     try {
-      const input: CreateKeyInput = { label, admin, enabled: true };
+      const input: CreateKeyInput = { label, role, enabled: true };
       if (owner) input.owner = owner;
       const cleaned = cleanQuota(quota);
       if (cleaned) input.quota = cleaned;
@@ -401,7 +432,7 @@ function CreateKeyModal({
       if (deniedModels.length > 0) input["denied-models"] = deniedModels;
       const resp = await createKey(input);
       reset();
-      onCreated(resp.key);
+      onCreated(resp);
     } catch (e) {
       setErr((e as ApiError).message);
     } finally {
@@ -441,16 +472,17 @@ function CreateKeyModal({
             onChange={(e) => setOwner(e.target.value)}
           />
         </div>
-        <div className="flex items-center gap-2">
-          <input
-            id="admin"
-            type="checkbox"
-            checked={admin}
-            onChange={(e) => setAdmin(e.target.checked)}
-          />
-          <label htmlFor="admin" className="text-sm">
-            Admin key(可调 /admin/* 全部接口)
-          </label>
+        <div>
+          <label className="block text-xs text-ink-500 mb-1">角色</label>
+          <select
+            className="input !py-1"
+            value={role}
+            onChange={(e) => setRole(e.target.value as KeyRole)}
+          >
+            <option value="member">成员(仅自己:查用量 / 重置自己的 key)</option>
+            <option value="auditor">审计员(只读全局:用量 / 日志 / 账号)</option>
+            <option value="admin">管理员(全部 /admin/* + 配置 + 增删改)</option>
+          </select>
         </div>
         <QuotaEditor value={quota} onChange={setQuota} models={models} />
         <ModelAllowlistPicker
@@ -505,7 +537,7 @@ function EditKeyModal({
 }) {
   const [label, setLabel] = useState("");
   const [owner, setOwner] = useState("");
-  const [admin, setAdmin] = useState(false);
+  const [role, setRole] = useState<KeyRole>("member");
   const [quota, setQuota] = useState<KeyQuota>({});
   const [allowedModels, setAllowedModels] = useState<string[]>([]);
   const [deniedModels, setDeniedModels] = useState<string[]>([]);
@@ -516,7 +548,7 @@ function EditKeyModal({
     if (row) {
       setLabel(row.label || "");
       setOwner(row.owner || "");
-      setAdmin(row.admin);
+      setRole(row.role ?? (row.admin ? "admin" : "member"));
       setQuota(row.quota ?? {});
       setAllowedModels(row.allowedModels ?? []);
       setDeniedModels(row.deniedModels ?? []);
@@ -534,7 +566,7 @@ function EditKeyModal({
       await updateKey(row.managedId, {
         label,
         owner: owner || undefined,
-        admin,
+        role,
         // null clears the quota; cleanQuota returns null when all caps empty.
         quota: cleanQuota(quota),
         // Always send: an empty array clears the list.
@@ -568,16 +600,17 @@ function EditKeyModal({
             onChange={(e) => setOwner(e.target.value)}
           />
         </div>
-        <div className="flex items-center gap-2">
-          <input
-            id="edit-admin"
-            type="checkbox"
-            checked={admin}
-            onChange={(e) => setAdmin(e.target.checked)}
-          />
-          <label htmlFor="edit-admin" className="text-sm">
-            Admin key
-          </label>
+        <div>
+          <label className="block text-sm text-ink-400 mb-1.5">角色</label>
+          <select
+            className="input"
+            value={role}
+            onChange={(e) => setRole(e.target.value as KeyRole)}
+          >
+            <option value="member">成员(仅自己)</option>
+            <option value="auditor">审计员(只读全局)</option>
+            <option value="admin">管理员(全部)</option>
+          </select>
         </div>
         <QuotaEditor value={quota} onChange={setQuota} models={models} />
         <ModelAllowlistPicker

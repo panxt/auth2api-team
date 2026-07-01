@@ -22,7 +22,7 @@ function makeConfig(authDir: string): Config {
     host: "127.0.0.1",
     port: 0,
     "auth-dir": authDir,
-    "api-keys": normalizeApiKeys(["test-key"]),
+    "api-keys": normalizeApiKeys([{ key: "test-key", admin: true }]),
     "body-limit": "200mb",
     cloaking: {
       "cli-version": "2.1.88",

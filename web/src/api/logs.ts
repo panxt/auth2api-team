@@ -6,6 +6,7 @@ export interface LogRow {
   id: number;
   ts: string;
   apiKeyShort: string;
+  keyName: string | null;
   ip: string;
   endpoint: string;
   model: string | null;
@@ -34,6 +35,7 @@ export interface LogFilter {
   status?: "success" | "failure" | "";
   category?: LogCategory | "";
   apiKey?: string;
+  keyName?: string;
   email?: string;
   model?: string;
   endpoint?: string;
@@ -50,6 +52,7 @@ export function fetchLogs(f: LogFilter): Promise<LogsResp> {
   if (f.status) p.set("status", f.status);
   if (f.category) p.set("category", f.category);
   if (f.apiKey) p.set("apiKey", f.apiKey);
+  if (f.keyName) p.set("keyName", f.keyName);
   if (f.email) p.set("email", f.email);
   if (f.model) p.set("model", f.model);
   if (f.endpoint) p.set("endpoint", f.endpoint);

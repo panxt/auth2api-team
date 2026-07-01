@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import { Config, isDebugLevel, ApiKeyEntry } from "./config";
+import { Config, isDebugLevel, ApiKeyEntry, canReadAll, resolveAuthDir } from "./config";
 import { ProviderRegistry } from "./providers/registry";
 import { extractApiKey, hashApiKey } from "./utils/common";
 import {
@@ -28,10 +28,12 @@ import {
 } from "./ratelimit/per-key";
 import { ManagedKeyStore, ManagedKeyError } from "./keys/store";
 import { startOAuth, exchangeOAuth } from "./admin/oauth";
-import { ProviderId } from "./auth/types";
+import { ProviderId, TokenData } from "./auth/types";
+import { loadAllTokens, saveToken } from "./auth/token-storage";
 import { RequestLogger } from "./logging/logger";
 import { RoutingController } from "./accounts/routing";
-import { LoggingConfig, RoutingConfig } from "./config";
+import { PrewarmScheduler } from "./accounts/prewarm";
+import { LoggingConfig, RoutingConfig, PrewarmConfig } from "./config";
 
 // Simple in-memory rate limiter per IP
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -83,6 +85,7 @@ export function createServer(
   keyStore?: ManagedKeyStore,
   requestLogger?: RequestLogger,
   routingController?: RoutingController,
+  prewarmScheduler?: PrewarmScheduler,
 ): express.Application {
   const app = express();
   // Stats slots are seeded whenever any subsystem needs them: the recorder
@@ -447,6 +450,17 @@ export function createServer(
     next();
   };
 
+  // Org-wide READ access: admin or auditor. Used for read-only endpoints that
+  // expose everyone's data (key list, etc.). Mutations stay requireAdmin.
+  const requireReadAll: express.RequestHandler = (_req, res, next) => {
+    const entry = res.locals.apiKey as ApiKeyEntry | undefined;
+    if (!entry || !canReadAll(entry)) {
+      res.status(403).json({ error: { message: "Admin or auditor API key required" } });
+      return;
+    }
+    next();
+  };
+
   // GET /admin/stats — three-axis aggregated call statistics.
   //   byClient — keyed by sha256(api-key); show short hex prefix to operator
   //   byAccount — keyed by `${provider}:${email}` (upstream OAuth account)
@@ -512,8 +526,13 @@ export function createServer(
   // are never returned (only a hash prefix). GET/PUT /admin/logging/config —
   // read / live-update the logging policy (persisted to the SettingsStore).
   if (requestLogger) {
-    app.get("/admin/logs", requireAdmin, (req, res) => {
+    // Any valid key may open the logs page, but scope by role: admin + auditor
+    // see org-wide logs; members see ONLY their own key's requests. Key hashes
+    // are resolved to human names (label/owner), never exposed beyond a prefix.
+    app.get("/admin/logs", (req, res) => {
       const q = req.query;
+      const requester = res.locals.apiKey as ApiKeyEntry | undefined;
+      const seeAll = !!requester && canReadAll(requester);
       const limRaw = Number(q.limit);
       const limit =
         Number.isFinite(limRaw) && limRaw > 0 ? Math.min(1000, limRaw) : 100;
@@ -522,12 +541,40 @@ export function createServer(
       const str = (v: unknown) =>
         typeof v === "string" && v.length ? v : undefined;
       const validCats = ["upstream", "service", "policy", "client", "ok"];
+
+      // hash → human name (label || owner). Keys are few; rebuild per request
+      // so renames/new keys reflect immediately.
+      const nameByHash = new Map<string, string>();
+      for (const entry of config["api-keys"].values()) {
+        const name = entry.label || entry.owner;
+        if (name) nameByHash.set(hashApiKey(entry.key), name);
+      }
+
+      let apiKeyHashes: string[] | undefined;
+      if (!seeAll) {
+        // Members: hard-restrict to their own key's rows, ignoring any name
+        // filter — they must never see other users' request history.
+        apiKeyHashes = requester ? [hashApiKey(requester.key)] : [];
+      } else {
+        // admin/auditor: resolve an optional name search to matching hashes.
+        // No match → empty array → zero results (rather than ignoring it).
+        const keyName = str(q.keyName);
+        if (keyName) {
+          const needle = keyName.toLowerCase();
+          apiKeyHashes = [];
+          for (const [hash, name] of nameByHash) {
+            if (name.toLowerCase().includes(needle)) apiKeyHashes.push(hash);
+          }
+        }
+      }
+
       const page = requestLogger.query({
         limit,
         cursor,
         status: q.status === "failure" || q.status === "success" ? q.status : undefined,
         category: validCats.includes(q.category as string) ? (q.category as any) : undefined,
         apiKeyPrefix: str(q.apiKey),
+        apiKeyHashes,
         email: str(q.email),
         model: str(q.model),
         endpoint: str(q.endpoint),
@@ -537,9 +584,11 @@ export function createServer(
         q: str(q.q),
       });
       // Redact: only expose the 12-char hash prefix, never the full hash.
+      // keyName falls back to the prefix when the key is unknown (e.g. deleted).
       const rows = page.rows.map((r) => ({
         ...r,
         apiKeyShort: r.apiKeyHash.slice(0, 12),
+        keyName: nameByHash.get(r.apiKeyHash) ?? null,
         apiKeyHash: undefined,
       }));
       res.json({ logs: rows, nextCursor: page.nextCursor, generated_at: new Date().toISOString() });
@@ -576,6 +625,38 @@ export function createServer(
     });
   }
 
+  // ── Window-prewarm scheduler (admin-only) ──
+  if (prewarmScheduler) {
+    app.get("/admin/prewarm/config", requireAdmin, (_req, res) => {
+      res.json(prewarmScheduler.getConfig());
+    });
+    app.put("/admin/prewarm/config", requireAdmin, (req, res) => {
+      try {
+        const next = prewarmScheduler.updateConfig(
+          (req.body || {}) as Partial<PrewarmConfig>,
+        );
+        res.json(next);
+      } catch (err: any) {
+        res.status(400).json({ error: { message: err?.message || String(err) } });
+      }
+    });
+    // Run history (scheduled + manual), newest first, persisted across
+    // restarts. Paginated: ?limit=&cursor= (cursor from previous nextCursor).
+    app.get("/admin/prewarm/history", requireAdmin, (req, res) => {
+      const limit = Math.min(
+        Math.max(Number(req.query.limit) || 20, 1),
+        100,
+      );
+      const cursor =
+        req.query.cursor != null ? Number(req.query.cursor) : null;
+      const page = prewarmScheduler.historyPage({
+        limit,
+        cursor: Number.isFinite(cursor as number) ? cursor : null,
+      });
+      res.json({ runs: page.rows, nextCursor: page.nextCursor });
+    });
+  }
+
   // GET /admin/usage/keys — month-to-date consumption per API key vs its
   // quota. An admin key sees every key; a non-admin key sees only itself.
   // Raw keys are never returned — only the sha256 short prefix, plus the
@@ -583,10 +664,11 @@ export function createServer(
   // numbers that drive enforcement), so reports and limits never disagree.
   app.get("/admin/usage/keys", (_req, res) => {
     const requester = res.locals.apiKey as ApiKeyEntry | undefined;
-    const isAdmin = !!requester?.admin;
+    // admin + auditor see everyone; members see only their own row.
+    const seeAll = !!requester && canReadAll(requester);
     const keys = [];
     for (const entry of config["api-keys"].values()) {
-      if (!isAdmin && entry.key !== requester?.key) continue;
+      if (!seeAll && entry.key !== requester?.key) continue;
       const consumed = quotaTracker
         ? quotaTracker.consumed(hashApiKey(entry.key))
         : null;
@@ -633,24 +715,47 @@ export function createServer(
       res.status(500).json({ error: { message: "Internal server error" } });
     };
 
-    app.get("/admin/keys", requireAdmin, (_req, res) => {
+    // Read: admin + auditor (org-wide). Mutations below stay admin-only.
+    app.get("/admin/keys", requireReadAll, (_req, res) => {
       res.json({ keys: store.list(), generated_at: new Date().toISOString() });
+    });
+
+    const keyCreateResponse = (entry: ApiKeyEntry) => ({
+      key: entry.key,
+      id: hashApiKey(entry.key).slice(0, 12),
+      label: entry.label ?? null,
+      owner: entry.owner ?? null,
+      enabled: entry.enabled,
+      admin: entry.admin,
+      role: entry.role ?? (entry.admin ? "admin" : "member"),
+      quota: entry.quota ?? null,
+      "rate-limit": entry["rate-limit"] ?? null,
     });
 
     // Returns the raw key ONCE so the operator can copy it; never again.
     app.post("/admin/keys", requireAdmin, (req, res) => {
       try {
         const entry = store.create(req.body || {});
-        res.status(201).json({
-          key: entry.key,
-          id: hashApiKey(entry.key).slice(0, 12),
-          label: entry.label ?? null,
-          owner: entry.owner ?? null,
-          enabled: entry.enabled,
-          admin: entry.admin,
-          quota: entry.quota ?? null,
-          "rate-limit": entry["rate-limit"] ?? null,
-        });
+        res.status(201).json(keyCreateResponse(entry));
+      } catch (err) {
+        handleKeyError(err, res);
+      }
+    });
+
+    // POST /admin/keys/self/rotate — self-service: the CALLING key reissues
+    // itself with a fresh secret (same label/owner/role/quota). Any valid
+    // managed key; config.yaml keys are read-only (409). Returns the new raw
+    // key once. Lets members reset their own key without an admin.
+    app.post("/admin/keys/self/rotate", (_req, res) => {
+      const requester = res.locals.apiKey as ApiKeyEntry | undefined;
+      if (!requester) {
+        res.status(401).json({ error: { message: "no api key" } });
+        return;
+      }
+      try {
+        const id = hashApiKey(requester.key).slice(0, 12);
+        const entry = store.rotate(id);
+        res.json(keyCreateResponse(entry));
       } catch (err) {
         handleKeyError(err, res);
       }
@@ -784,10 +889,136 @@ export function createServer(
     },
   );
 
+  // POST /admin/accounts/:provider/:email/refresh — actively renew this one
+  // account's OAuth token now (instead of waiting for the auto-refresh loop).
+  // On success the token's expiry is bumped and an auth-failure cooldown is
+  // cleared; on failure (e.g. refresh token expired) ok=false and the snapshot
+  // shows the account still needs re-auth. Admin-only.
+  app.post(
+    "/admin/accounts/:provider/:email/refresh",
+    requireAdmin,
+    async (req, res) => {
+      const provider = registry.get(req.params.provider as ProviderId);
+      if (!provider) {
+        res.status(404).json({ error: { message: `unknown provider ${req.params.provider}` } });
+        return;
+      }
+      const email = decodeURIComponent(req.params.email);
+      try {
+        const ok = await provider.manager.refreshAccount(email);
+        const snapshot =
+          provider.manager.getSnapshots().find((s) => s.email === email) ?? null;
+        if (!snapshot) {
+          res.status(404).json({ error: { message: `no account ${email} loaded for ${provider.id}` } });
+          return;
+        }
+        res.json({ ok, provider: provider.id, email, account: snapshot });
+      } catch (err: any) {
+        res.status(500).json({ error: { message: err?.message || String(err) } });
+      }
+    },
+  );
+
+  // GET /admin/accounts/:provider/:email/export — export one account's full
+  // credential bundle (access+refresh token, uuid, annotations) so it can be
+  // moved to another auth2api instance. ⚠ Contains live OAuth credentials —
+  // admin-only; the response is a secret. The receiving instance imports it via
+  // POST /admin/accounts/import.
+  app.get(
+    "/admin/accounts/:provider/:email/export",
+    requireAdmin,
+    (req, res) => {
+      const provider = registry.get(req.params.provider as ProviderId);
+      if (!provider) {
+        res.status(404).json({ error: { message: `unknown provider ${req.params.provider}` } });
+        return;
+      }
+      const email = decodeURIComponent(req.params.email);
+      const token = loadAllTokens(resolveAuthDir(config["auth-dir"]), provider.id).find(
+        (t) => t.email === email,
+      );
+      if (!token) {
+        res.status(404).json({ error: { message: `no account ${email} loaded for ${provider.id}` } });
+        return;
+      }
+      res.json({
+        kind: "auth2api-account-export",
+        version: 1,
+        exported_at: new Date().toISOString(),
+        account: token,
+      });
+    },
+  );
+
+  // POST /admin/accounts/import — import one or more account bundles produced by
+  // the export endpoint (single {account} or {accounts:[...]} or a bare bundle).
+  // Writes the token file + loads it live. Existing same-email accounts are
+  // overwritten (re-auth semantics). Admin-only.
+  app.post("/admin/accounts/import", requireAdmin, async (req, res) => {
+    const body = (req.body || {}) as any;
+    // Accept: {accounts:[...]}, {account:{...}}, a single bundle {kind, account},
+    // or a bare TokenData.
+    let bundles: any[] = [];
+    if (Array.isArray(body.accounts)) bundles = body.accounts;
+    else if (body.account) bundles = [body.account];
+    else if (body.accessToken || body.refreshToken) bundles = [body];
+    else {
+      res.status(400).json({ error: { message: "no account(s) in body — expected { account } or { accounts: [...] }" } });
+      return;
+    }
+
+    const imported: { provider: string; email: string }[] = [];
+    const errors: { email?: string; error: string }[] = [];
+    for (const raw of bundles) {
+      try {
+        const t = raw as Partial<TokenData>;
+        if (!t || typeof t.email !== "string" || !t.refreshToken) {
+          errors.push({ email: t?.email, error: "missing email or refreshToken" });
+          continue;
+        }
+        const providerId = (t.provider ?? "anthropic") as ProviderId;
+        const provider = registry.get(providerId);
+        if (!provider) {
+          errors.push({ email: t.email, error: `unknown provider ${providerId}` });
+          continue;
+        }
+        const token: TokenData = {
+          accessToken: t.accessToken ?? "",
+          refreshToken: t.refreshToken,
+          email: t.email,
+          expiresAt: t.expiresAt ?? new Date(0).toISOString(),
+          accountUuid: t.accountUuid ?? "",
+          provider: providerId,
+          idToken: t.idToken,
+          planType: t.planType,
+          cursorServiceMachineId: t.cursorServiceMachineId,
+          cursorClientVersion: t.cursorClientVersion,
+          cursorConfigVersion: t.cursorConfigVersion,
+          cursorClientId: t.cursorClientId,
+          cursorMembershipType: t.cursorMembershipType,
+          monthlyBudgetUsd: t.monthlyBudgetUsd,
+          tierLabel: t.tierLabel,
+          concurrencyWeight: t.concurrencyWeight,
+        };
+        saveToken(resolveAuthDir(config["auth-dir"]), token);
+        provider.manager.addAccount(token);
+        imported.push({ provider: providerId, email: token.email });
+      } catch (err: any) {
+        errors.push({ email: raw?.email, error: err?.message || String(err) });
+      }
+    }
+    res.json({ imported, errors, generated_at: new Date().toISOString() });
+  });
+
   app.get("/admin/accounts", (_req, res) => {
     const providers: Record<
       string,
-      { accounts: unknown[]; account_count: number; capacity: unknown }
+      {
+        accounts: unknown[];
+        account_count: number;
+        capacity: unknown;
+        quota_pool: unknown;
+      }
     > = {};
     for (const p of registry.all()) {
       providers[p.id] = {
@@ -795,6 +1026,8 @@ export function createServer(
         account_count: p.manager.accountCount,
         // Pool capacity summary → drives the dashboard's "上游已打满" alert.
         capacity: p.manager.capacitySummary(),
+        // Aggregated 5h/7d quota across the pool (weighted equivalent windows).
+        quota_pool: p.manager.quotaPool(),
       };
     }
     res.json({
@@ -808,7 +1041,7 @@ export function createServer(
   // a successful re-auth (see notifyServerReload in src/index.ts), and
   // available for manual use via curl. See AccountManager.reload() for
   // upsert semantics.
-  app.post("/admin/reload", async (_req, res) => {
+  app.post("/admin/reload", requireAdmin, async (_req, res) => {
     const reloaded: Record<string, unknown> = {};
     for (const p of registry.all()) {
       try {
@@ -874,11 +1107,32 @@ export function createServer(
       label: entry.label ?? null,
       owner: entry.owner ?? null,
       admin: entry.admin,
+      role: entry.role ?? (entry.admin ? "admin" : "member"),
+      source: keyStore?.list().find((k) => k.id === hashApiKey(entry.key).slice(0, 12))?.source ?? "config",
       enabled: entry.enabled,
     });
   });
 
   app.post("/admin/prewarm", requireAdmin, async (_req, res) => {
+    // Prefer the scheduler so the manual run is recorded in history and honors
+    // the configured provider filter. Fall back to a direct registry sweep if
+    // no scheduler is wired (e.g. in tests).
+    if (prewarmScheduler) {
+      try {
+        const run = await prewarmScheduler.trigger("manual");
+        res.json({
+          providers: run.providers,
+          ok: run.ok,
+          total: run.total,
+          generated_at: run.at,
+        });
+      } catch (err: any) {
+        res
+          .status(500)
+          .json({ error: { message: err?.message || String(err) } });
+      }
+      return;
+    }
     const providers: unknown[] = [];
     for (const p of registry.all()) {
       if (!p.prewarm) continue;

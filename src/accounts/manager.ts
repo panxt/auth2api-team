@@ -198,6 +198,41 @@ export interface CapacitySummary {
   level: "ok" | "info" | "warn" | "critical";
 }
 
+/**
+ * Aggregated quota for one rolling window (5h or 7d) across the pool.
+ *
+ * Anthropic exposes per-account *utilization* (0..1), not absolute token
+ * ceilings, so the pool is summed as **weighted equivalent windows**: each
+ * account contributes `weight` units of capacity (weight = concurrencyWeight,
+ * so a $125 account counts more than a $25 one) and `weight×util` units used.
+ * Remaining is therefore an estimate in "window units", not in tokens.
+ */
+export interface QuotaWindowPool {
+  /** Accounts contributing utilization data to this window. */
+  accounts: number;
+  /** Σ weight — total weighted capacity (equivalent windows). */
+  capacity: number;
+  /** Σ weight×util — weighted used capacity. */
+  used: number;
+  /** capacity − used — weighted remaining (equivalent windows). */
+  remainingUnits: number;
+  /** 1 − used/capacity (0..1), or null if no data. */
+  remainingPct: number | null;
+  /** Highest single-account utilization in this window (0..1). */
+  maxUtil: number | null;
+  /** Earliest window reset across accounts — raw unix-seconds string, or null. */
+  soonestReset: string | null;
+  /** Pool-exhaustion level by used fraction. */
+  level: "ok" | "info" | "warn" | "critical";
+}
+
+/** Both rolling windows aggregated across the pool; either may be null when
+ *  no account has surfaced that window's headers (e.g. non-Anthropic pools). */
+export interface QuotaPool {
+  "5h": QuotaWindowPool | null;
+  "7d": QuotaWindowPool | null;
+}
+
 export interface AvailableAccount {
   token: TokenData;
   deviceId: string;
@@ -424,14 +459,19 @@ export class AccountManager {
     return typeof w === "number" && w > 0 ? w : 1;
   }
 
-  /** Parse 5h-window utilization (0..1) from captured rate-limit headers, or
-   *  null if unknown. Header may be a fraction (0.42) or a percent (42). */
-  private util5h(acct: AccountState): number | null {
-    const raw = acct.rateLimit?.fields?.["unified-5h-utilization"];
+  /** Parse a utilization header value (0..1), or null if unknown. May be a
+   *  fraction (0.42) or a percent (42). */
+  private parseUtil(raw: string | undefined): number | null {
     if (raw == null) return null;
     const n = Number(raw);
     if (!Number.isFinite(n)) return null;
     return n > 1 ? n / 100 : n;
+  }
+
+  /** Parse 5h-window utilization (0..1) from captured rate-limit headers, or
+   *  null if unknown. */
+  private util5h(acct: AccountState): number | null {
+    return this.parseUtil(acct.rateLimit?.fields?.["unified-5h-utilization"]);
   }
 
   private isUsable(acct: AccountState, now: number): boolean {
@@ -604,6 +644,64 @@ export class AccountManager {
       inFlight,
       saturationRejects: this.saturationRejects,
       level,
+    };
+  }
+
+  /** Aggregate one rolling window across all enabled accounts that have its
+   *  headers. Capacity is weighted by concurrencyWeight (equivalent windows);
+   *  remaining is reported as a percentage + weighted units, never as tokens
+   *  (Anthropic does not publish absolute quotas). Returns null if no account
+   *  surfaces this window. */
+  private windowPool(utilKey: string, resetKey: string): QuotaWindowPool | null {
+    const now = Date.now();
+    let accounts = 0;
+    let capacity = 0;
+    let used = 0;
+    let maxUtil: number | null = null;
+    let soonest: number | null = null;
+    for (const acct of this.accounts.values()) {
+      if (acct.disabled) continue;
+      const u = this.parseUtil(acct.rateLimit?.fields?.[utilKey]);
+      if (u == null) continue;
+      const clamped = Math.min(Math.max(u, 0), 1);
+      const w = this.weightOf(acct);
+      accounts++;
+      capacity += w;
+      used += w * clamped;
+      maxUtil = maxUtil == null ? u : Math.max(maxUtil, u);
+      const r = Number(acct.rateLimit?.fields?.[resetKey]);
+      if (Number.isFinite(r) && r * 1000 > now) {
+        soonest = soonest == null ? r : Math.min(soonest, r);
+      }
+    }
+    if (accounts === 0) return null;
+    const round = (x: number) => Math.round(x * 100) / 100;
+    const remainingPct =
+      capacity > 0 ? Math.round((1 - used / capacity) * 10000) / 10000 : null;
+    const usedPct = remainingPct == null ? 0 : 1 - remainingPct;
+    let level: QuotaWindowPool["level"] = "ok";
+    if (usedPct >= 0.95) level = "critical";
+    else if (usedPct >= 0.9) level = "warn";
+    else if (usedPct >= 0.75) level = "info";
+    return {
+      accounts,
+      capacity: round(capacity),
+      used: round(used),
+      remainingUnits: round(capacity - used),
+      remainingPct,
+      maxUtil,
+      soonestReset: soonest == null ? null : String(soonest),
+      level,
+    };
+  }
+
+  /** Pool-wide quota summary for the dashboard: 5h + 7d windows aggregated as
+   *  weighted equivalent windows. Either window is null if no account exposes
+   *  it (e.g. Codex/Cursor pools have no unified-* headers). */
+  quotaPool(): QuotaPool {
+    return {
+      "5h": this.windowPool("unified-5h-utilization", "unified-5h-reset"),
+      "7d": this.windowPool("unified-7d-utilization", "unified-7d-reset"),
     };
   }
 

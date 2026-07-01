@@ -51,6 +51,24 @@ export interface CapacitySummary {
   level: "ok" | "info" | "warn" | "critical";
 }
 
+/** Aggregated quota for one rolling window across the pool (weighted
+ *  equivalent windows — see backend QuotaWindowPool). */
+export interface QuotaWindowPool {
+  accounts: number;
+  capacity: number;
+  used: number;
+  remainingUnits: number;
+  remainingPct: number | null;
+  maxUtil: number | null;
+  soonestReset: string | null;
+  level: "ok" | "info" | "warn" | "critical";
+}
+
+export interface QuotaPool {
+  "5h": QuotaWindowPool | null;
+  "7d": QuotaWindowPool | null;
+}
+
 export interface AccountsResp {
   providers: Record<
     string,
@@ -58,6 +76,7 @@ export interface AccountsResp {
       accounts: AccountSnapshot[];
       account_count: number;
       capacity: CapacitySummary;
+      quota_pool?: QuotaPool;
     }
   >;
   generated_at: string;
@@ -90,6 +109,28 @@ export const reload = () =>
   post<{ reloaded: Record<string, unknown>; generated_at: string }>(
     "/admin/reload",
   );
+
+/** Actively renew one account's OAuth token now. Returns ok=false (not an
+ *  error) when the refresh token itself is expired → needs re-auth. */
+export const refreshAccount = (provider: string, email: string) =>
+  post<{ ok: boolean; provider: string; email: string; account: AccountSnapshot }>(
+    `/admin/accounts/${provider}/${encodeURIComponent(email)}/refresh`,
+  );
+
+/** Export one account's full credential bundle (for moving to another
+ *  auth2api instance). ⚠ Contains live OAuth tokens. */
+export const exportAccount = (provider: string, email: string) =>
+  get<{ kind: string; version: number; exported_at: string; account: unknown }>(
+    `/admin/accounts/${provider}/${encodeURIComponent(email)}/export`,
+  );
+
+/** Import account bundle(s) produced by exportAccount on another instance. */
+export const importAccounts = (payload: unknown) =>
+  post<{
+    imported: { provider: string; email: string }[];
+    errors: { email?: string; error: string }[];
+    generated_at: string;
+  }>("/admin/accounts/import", payload);
 
 export const deleteAccount = (provider: string, email: string) =>
   del<{ ok: true; provider: string; email: string }>(

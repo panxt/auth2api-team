@@ -12,6 +12,9 @@ import {
   RequestLogRecord,
   RequestLogFilter,
   RequestLogPage,
+  PrewarmRunStore,
+  PrewarmRunRecord,
+  PrewarmRunPage,
   SettingsStore,
 } from "./types";
 
@@ -27,6 +30,7 @@ export class SqliteStorage implements Storage {
   readonly eventLog: EventLog;
   readonly keyRepo: KeyRepository;
   readonly requestLog: RequestLogStore;
+  readonly prewarmLog: PrewarmRunStore;
   readonly settings: SettingsStore;
 
   constructor(dbPath: string) {
@@ -72,7 +76,26 @@ export class SqliteStorage implements Storage {
       CREATE INDEX IF NOT EXISTS idx_rl_account ON request_logs(account_email);
       CREATE INDEX IF NOT EXISTS idx_rl_key ON request_logs(api_key_hash);
       CREATE INDEX IF NOT EXISTS idx_rl_model ON request_logs(model);
+      CREATE TABLE IF NOT EXISTS prewarm_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        at TEXT NOT NULL,
+        trigger TEXT,
+        scheduled_time TEXT,
+        ok INTEGER,
+        total INTEGER,
+        providers TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_pw_at ON prewarm_runs(at);
     `);
+    // Migration: add `scheduled_time` to a pre-existing prewarm_runs table.
+    {
+      const cols = this.db
+        .prepare("PRAGMA table_info(prewarm_runs)")
+        .all() as { name: string }[];
+      if (!cols.some((c) => c.name === "scheduled_time")) {
+        this.db.exec("ALTER TABLE prewarm_runs ADD COLUMN scheduled_time TEXT");
+      }
+    }
     // Migration: add `category` to a pre-existing request_logs table (older
     // installs created before the column existed). CREATE TABLE IF NOT EXISTS
     // won't alter an existing table, so add the column when missing.
@@ -229,6 +252,16 @@ export class SqliteStorage implements Storage {
           where.push("api_key_hash LIKE ?");
           params.push(`${filter.apiKeyPrefix}%`);
         }
+        if (filter.apiKeyHashes) {
+          if (filter.apiKeyHashes.length === 0) {
+            where.push("0"); // matches nothing
+          } else {
+            where.push(
+              `api_key_hash IN (${filter.apiKeyHashes.map(() => "?").join(",")})`,
+            );
+            params.push(...filter.apiKeyHashes);
+          }
+        }
         if (filter.since) {
           where.push("ts >= ?");
           params.push(filter.since);
@@ -297,9 +330,70 @@ export class SqliteStorage implements Storage {
         return removed;
       },
     };
+
+    // ── Prewarm run history ──
+    const insertPrewarm = this.db.prepare(
+      `INSERT INTO prewarm_runs (at, trigger, scheduled_time, ok, total, providers)
+       VALUES (@at, @trigger, @scheduledTime, @ok, @total, @providers)`,
+    );
+    this.prewarmLog = {
+      append: (rec: PrewarmRunRecord) => {
+        insertPrewarm.run({
+          at: rec.at,
+          trigger: rec.trigger,
+          scheduledTime: rec.scheduledTime ?? null,
+          ok: rec.ok,
+          total: rec.total,
+          providers: JSON.stringify(rec.providers ?? []),
+        });
+      },
+      list: ({ limit, cursor }): PrewarmRunPage => {
+        const where = cursor != null ? "WHERE id < ?" : "";
+        const params: any[] = cursor != null ? [cursor] : [];
+        const rows = this.db
+          .prepare(
+            `SELECT * FROM prewarm_runs ${where} ORDER BY id DESC LIMIT ?`,
+          )
+          .all(...params, limit + 1) as any[];
+        const hasMore = rows.length > limit;
+        const page = rows.slice(0, limit);
+        return {
+          rows: page.map((r) => ({
+            id: r.id,
+            at: r.at,
+            trigger: r.trigger,
+            scheduledTime: r.scheduled_time ?? null,
+            ok: r.ok,
+            total: r.total,
+            providers: safeParse(r.providers),
+          })),
+          nextCursor: hasMore ? page[page.length - 1].id : null,
+        };
+      },
+      prune: ({ maxRows }): number => {
+        if (!maxRows || maxRows <= 0) return 0;
+        const info = this.db
+          .prepare(
+            `DELETE FROM prewarm_runs WHERE id <= (
+               SELECT id FROM prewarm_runs ORDER BY id DESC LIMIT 1 OFFSET ?
+             )`,
+          )
+          .run(maxRows);
+        return info.changes;
+      },
+    };
   }
 
   async close(): Promise<void> {
     this.db.close();
+  }
+}
+
+function safeParse(s: unknown): unknown {
+  if (typeof s !== "string") return [];
+  try {
+    return JSON.parse(s);
+  } catch {
+    return [];
   }
 }

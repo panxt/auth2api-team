@@ -1,4 +1,4 @@
-import { ApiKeyEntry, generateApiKey } from "../config";
+import { ApiKeyEntry, KeyRole, generateApiKey } from "../config";
 import { hashApiKey } from "../utils/common";
 import type { KeyRepository } from "../storage/types";
 
@@ -18,6 +18,7 @@ export interface KeyInput {
   owner?: string;
   enabled?: boolean;
   admin?: boolean;
+  role?: KeyRole;
   // null explicitly clears a previously-set quota.
   quota?: ApiKeyEntry["quota"] | null;
   "rate-limit"?: ApiKeyEntry["rate-limit"];
@@ -33,6 +34,7 @@ export interface KeyView {
   owner: string | null;
   enabled: boolean;
   admin: boolean;
+  role: KeyRole;
   quota: ApiKeyEntry["quota"] | null;
   "rate-limit": ApiKeyEntry["rate-limit"] | null;
   "allowed-models": ApiKeyEntry["allowed-models"] | null;
@@ -53,7 +55,8 @@ function normalizeEntry(v: any): ApiKeyEntry {
     label: v.label,
     owner: v.owner,
     enabled: v.enabled ?? true,
-    admin: v.admin ?? false,
+    admin: v.role ? v.role === "admin" : (v.admin ?? false),
+    role: v.role,
     quota: v.quota,
     "rate-limit": v["rate-limit"],
     "allowed-models": v["allowed-models"],
@@ -69,6 +72,7 @@ function toView(entry: ApiKeyEntry, source: "config" | "managed"): KeyView {
     owner: entry.owner ?? null,
     enabled: entry.enabled,
     admin: entry.admin,
+    role: entry.role ?? (entry.admin ? "admin" : "member"),
     quota: entry.quota ?? null,
     "rate-limit": entry["rate-limit"] ?? null,
     "allowed-models": entry["allowed-models"] ?? null,
@@ -122,12 +126,15 @@ export class ManagedKeyStore {
    */
   create(input: KeyInput): ApiKeyEntry {
     const key = generateApiKey();
+    const role: KeyRole =
+      input.role ?? (input.admin ? "admin" : "member");
     const entry: ApiKeyEntry = {
       key,
       label: input.label,
       owner: input.owner,
       enabled: input.enabled ?? true,
-      admin: input.admin ?? false,
+      admin: role === "admin",
+      role,
       quota: input.quota ?? undefined,
       "rate-limit": input["rate-limit"],
       "allowed-models": input["allowed-models"],
@@ -139,13 +146,37 @@ export class ManagedKeyStore {
     return entry;
   }
 
+  /**
+   * Rotate a managed key by id: issue a NEW secret carrying the same metadata
+   * (label/owner/role/quota/limits), drop the old one. Returns the new entry
+   * WITH its raw key (surface once). Self-service "reset my key" uses this.
+   * Config-sourced keys can't be rotated (read-only).
+   */
+  rotate(id: string): ApiKeyEntry {
+    const old = this.findManaged(id);
+    const fresh = generateApiKey();
+    const entry: ApiKeyEntry = { ...old, key: fresh };
+    this.managed.delete(old.key);
+    this.live.delete(old.key);
+    this.managed.set(fresh, entry);
+    this.live.set(fresh, entry);
+    this.persist();
+    return entry;
+  }
+
   /** Patch a managed key by id. Config-sourced keys are read-only. */
   update(id: string, patch: KeyInput): KeyView {
     const entry = this.findManaged(id);
     if (patch.label !== undefined) entry.label = patch.label;
     if (patch.owner !== undefined) entry.owner = patch.owner;
     if (patch.enabled !== undefined) entry.enabled = patch.enabled;
-    if (patch.admin !== undefined) entry.admin = patch.admin;
+    if (patch.role !== undefined) {
+      entry.role = patch.role;
+      entry.admin = patch.role === "admin";
+    } else if (patch.admin !== undefined) {
+      entry.admin = patch.admin;
+      entry.role = patch.admin ? "admin" : "member";
+    }
     // null clears the quota; an object replaces it; undefined leaves it as-is.
     if (patch.quota !== undefined) entry.quota = patch.quota ?? undefined;
     if (patch["rate-limit"] !== undefined) entry["rate-limit"] = patch["rate-limit"];

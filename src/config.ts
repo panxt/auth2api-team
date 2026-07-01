@@ -98,6 +98,15 @@ export interface ApiKeyRateLimit {
  * key with no metadata) normalizes to `{ key, enabled: true, admin: false }`,
  * so old configs keep working unchanged.
  */
+/**
+ * Access role for an API key:
+ *   - "admin":   full control (mutations + config + see everyone).
+ *   - "auditor": org-wide READ-only (all usage/logs/accounts), no mutations.
+ *   - "member":  self-only (own usage, rotate own key). Default.
+ * `admin: true` is kept in sync for back-compat (admin ⟺ role === "admin").
+ */
+export type KeyRole = "admin" | "auditor" | "member";
+
 export interface ApiKeyEntry {
   key: string;
   /** Human label, e.g. "zhangsan / dev". Shown in admin reports. */
@@ -108,6 +117,8 @@ export interface ApiKeyEntry {
   enabled: boolean;
   /** Admin keys see all clients in usage reports; non-admin see only themselves. Default false. */
   admin: boolean;
+  /** Access role. Optional for back-compat; falls back to admin?"admin":"member". */
+  role?: KeyRole;
   quota?: ApiKeyQuota;
   "rate-limit"?: ApiKeyRateLimit;
   /**
@@ -132,10 +143,27 @@ interface RawApiKeyEntry {
   owner?: string;
   enabled?: boolean;
   admin?: boolean;
+  role?: KeyRole;
   quota?: ApiKeyQuota;
   "rate-limit"?: ApiKeyRateLimit;
   "allowed-models"?: string[];
   "denied-models"?: string[];
+}
+
+/** Effective role of a key, with back-compat: an explicit role wins, else
+ *  derive from the legacy admin flag. */
+export function effectiveRole(entry: {
+  role?: KeyRole;
+  admin?: boolean;
+}): KeyRole {
+  if (entry.role) return entry.role;
+  return entry.admin ? "admin" : "member";
+}
+
+/** Whether a key can read org-wide data (everyone's usage/logs/keys). */
+export function canReadAll(entry: { role?: KeyRole; admin?: boolean }): boolean {
+  const r = effectiveRole(entry);
+  return r === "admin" || r === "auditor";
 }
 
 export type DebugMode = "off" | "errors" | "verbose";
@@ -276,6 +304,72 @@ export function resolveRoutingConfig(
   return out;
 }
 
+/**
+ * Window-prewarm policy. Anthropic's 5h rate-limit window is "first-message
+ * anchored", so sending one cheap ping at a fixed local time each day anchors
+ * the window to working hours instead of to whenever the first real request
+ * lands. Admin-editable at runtime via /admin/prewarm/config (persisted to the
+ * SettingsStore); the config.yaml `prewarm:` block, if present, only seeds the
+ * initial defaults. Replaces the external launchd cron with an in-process,
+ * UI-configurable scheduler.
+ */
+export interface PrewarmConfig {
+  /** Master switch for the in-process scheduler. */
+  enabled: boolean;
+  /** Local-time trigger points, "HH:MM" (24h). Each fires once per day. */
+  times: string[];
+  /** Provider ids to prewarm; empty = every provider that supports it. */
+  providers: string[];
+}
+
+export const DEFAULT_PREWARM_CONFIG: PrewarmConfig = {
+  enabled: true,
+  times: ["08:00"],
+  providers: [],
+};
+
+/** Validate & canonicalize "HH:MM" entries; drops blanks/dupes, sorts. */
+export function normalizePrewarmTimes(times: unknown): string[] {
+  if (!Array.isArray(times)) return [...DEFAULT_PREWARM_CONFIG.times];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of times) {
+    if (typeof t !== "string") continue;
+    const m = /^(\d{1,2}):(\d{2})$/.exec(t.trim());
+    if (!m) continue;
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    if (h > 23 || min > 59) continue;
+    const norm = `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+    if (!seen.has(norm)) {
+      seen.add(norm);
+      out.push(norm);
+    }
+  }
+  out.sort();
+  return out;
+}
+
+/** Merge prewarm config: 默认 < config.yaml < 持久化(UI)覆盖。 */
+export function resolvePrewarmConfig(
+  ...layers: (Partial<PrewarmConfig> | undefined | null)[]
+): PrewarmConfig {
+  const out: PrewarmConfig = {
+    ...DEFAULT_PREWARM_CONFIG,
+    times: [...DEFAULT_PREWARM_CONFIG.times],
+    providers: [...DEFAULT_PREWARM_CONFIG.providers],
+  };
+  for (const layer of layers) {
+    if (!layer) continue;
+    for (const [k, v] of Object.entries(layer)) {
+      if (v !== undefined) (out as any)[k] = v;
+    }
+  }
+  out.times = normalizePrewarmTimes(out.times);
+  if (!Array.isArray(out.providers)) out.providers = [];
+  return out;
+}
+
 export interface Config {
   host: string;
   port: number;
@@ -295,6 +389,8 @@ export interface Config {
   logging?: Partial<LoggingConfig>;
   /** Optional seed for the account-selection / load-balancing policy. */
   routing?: Partial<RoutingConfig>;
+  /** Optional seed for the daily window-prewarm scheduler. */
+  prewarm?: Partial<PrewarmConfig>;
   debug: DebugMode;
 }
 
@@ -318,12 +414,15 @@ export function normalizeApiKeys(
     if (typeof item === "string") {
       map.set(item, { key: item, enabled: true, admin: false });
     } else if (item && typeof item.key === "string") {
+      const role = item.role;
       map.set(item.key, {
         key: item.key,
         label: item.label,
         owner: item.owner,
         enabled: item.enabled ?? true,
-        admin: item.admin ?? false,
+        // role wins; keep admin in sync for back-compat.
+        admin: role ? role === "admin" : (item.admin ?? false),
+        role,
         quota: item.quota,
         "rate-limit": item["rate-limit"],
         "allowed-models": item["allowed-models"],

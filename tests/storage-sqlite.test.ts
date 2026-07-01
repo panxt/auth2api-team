@@ -212,6 +212,65 @@ test("RequestLogStore: filter by status + email, newest-first, cursor paginates"
   }
 });
 
+test("RequestLogStore: filter by apiKeyHashes (name search resolution)", () => {
+  const file = dbPath();
+  try {
+    const s = new SqliteStorage(file);
+    s.requestLog.append(logRec({ apiKeyHash: "hashAAA" }));
+    s.requestLog.append(logRec({ apiKeyHash: "hashBBB" }));
+    s.requestLog.append(logRec({ apiKeyHash: "hashCCC" }));
+
+    // Restrict to a resolved set of hashes (e.g. keys whose name matched).
+    const some = s.requestLog.query({
+      limit: 100,
+      apiKeyHashes: ["hashAAA", "hashCCC"],
+    });
+    assert.equal(some.rows.length, 2);
+    assert.ok(some.rows.every((r) => r.apiKeyHash !== "hashBBB"));
+
+    // Empty set → a name search that matched no key → zero rows (not ignored).
+    const none = s.requestLog.query({ limit: 100, apiKeyHashes: [] });
+    assert.equal(none.rows.length, 0);
+  } finally {
+    fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  }
+});
+
+test("PrewarmRunStore: append + newest-first list + cursor + prune", () => {
+  const file = dbPath();
+  try {
+    const s = new SqliteStorage(file);
+    for (let i = 0; i < 5; i++)
+      s.prewarmLog.append({
+        at: new Date(Date.now() + i * 1000).toISOString(),
+        trigger: i % 2 ? "manual" : "schedule",
+        scheduledTime: i % 2 ? null : "08:00",
+        ok: i,
+        total: 5,
+        providers: [{ provider: "anthropic", results: [] }],
+      });
+
+    const p1 = s.prewarmLog.list({ limit: 2 });
+    assert.equal(p1.rows.length, 2);
+    assert.equal(p1.rows[0].ok, 4); // newest first
+    assert.equal(p1.rows[0].scheduledTime, "08:00"); // schedule plan round-trips
+    assert.ok(p1.nextCursor != null);
+    const p2 = s.prewarmLog.list({ limit: 2, cursor: p1.nextCursor });
+    assert.equal(p2.rows.length, 2);
+    assert.ok(p1.rows[0].id > p2.rows[0].id);
+    // providers JSON round-trips
+    assert.deepEqual(p1.rows[0].providers, [
+      { provider: "anthropic", results: [] },
+    ]);
+
+    const removed = s.prewarmLog.prune({ maxRows: 2 });
+    assert.equal(removed, 3);
+    assert.equal(s.prewarmLog.list({ limit: 100 }).rows.length, 2);
+  } finally {
+    fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  }
+});
+
 test("RequestLogStore: prune by max-rows keeps the newest", () => {
   const file = dbPath();
   try {

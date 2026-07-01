@@ -1,12 +1,9 @@
 import { useEffect, useState, useCallback, Fragment } from "react";
 import {
   fetchLogs,
-  fetchLoggingConfig,
-  updateLoggingConfig,
   LogRow,
   LogFilter,
   LogCategory,
-  LoggingConfig,
 } from "../api/logs";
 import { ApiError } from "../api/client";
 import { listAccounts } from "../api/accounts";
@@ -31,6 +28,8 @@ const CAT_META: Record<LogCategory, { label: string; cls: string }> = {
 export function Logs() {
   const { whoami } = useAuth();
   const isAdmin = !!whoami?.admin;
+  // admin + auditor see org-wide logs; members see only their own rows.
+  const seeAll = isAdmin || whoami?.role === "auditor";
 
   const [rows, setRows] = useState<LogRow[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
@@ -42,6 +41,7 @@ export function Logs() {
   // filters (draft) — applied on 查询
   const [status, setStatus] = useState<"" | "failure" | "success">("failure");
   const [category, setCategory] = useState<LogCategory | "">("");
+  const [keyName, setKeyName] = useState("");
   const [email, setEmail] = useState("");
   const [model, setModel] = useState("");
   const [q, setQ] = useState("");
@@ -101,6 +101,7 @@ export function Logs() {
     setApplied({
       status: status || undefined,
       category: category || undefined,
+      keyName: keyName.trim() || undefined,
       email: email.trim() || undefined,
       model: model.trim() || undefined,
       q: q.trim() || undefined,
@@ -116,7 +117,9 @@ export function Logs() {
         <div>
           <h1 className="text-2xl font-semibold">请求日志</h1>
           <p className="text-sm text-ink-400 mt-1">
-            每条请求的结果与失败原因。仅 admin 可见。
+            {seeAll
+              ? "每条请求的结果与失败原因,按用户名归集。"
+              : "仅显示你自己 key 的请求(全局日志需管理员 / 审计员权限)。"}
           </p>
         </div>
         <label className="flex items-center gap-2 text-sm text-ink-400">
@@ -129,7 +132,7 @@ export function Logs() {
         </label>
       </header>
 
-      {isAdmin && <SettingsCard />}
+      {/* 日志策略设置已移至「设置」页 */}
 
       {/* Filter bar */}
       <div className="card flex flex-wrap items-end gap-3">
@@ -159,6 +162,18 @@ export function Logs() {
             <option value="client">客户端</option>
           </select>
         </div>
+        {seeAll && (
+          <div>
+            <label className="block text-xs text-ink-500 mb-1">用户</label>
+            <input
+              className="input !py-1 text-sm"
+              placeholder="按用户名 / 备注搜索"
+              value={keyName}
+              onChange={(e) => setKeyName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && applyFilters()}
+            />
+          </div>
+        )}
         <div>
           <label className="block text-xs text-ink-500 mb-1">上游账号</label>
           <input
@@ -226,7 +241,7 @@ export function Logs() {
             <tr className="text-left">
               <th className="px-3 py-2 font-medium">时间</th>
               <th className="px-3 py-2 font-medium">类别</th>
-              <th className="px-3 py-2 font-medium">客户端</th>
+              <th className="px-3 py-2 font-medium">用户</th>
               <th className="px-3 py-2 font-medium">端点</th>
               <th className="px-3 py-2 font-medium">模型</th>
               <th className="px-3 py-2 font-medium">账号</th>
@@ -250,7 +265,13 @@ export function Logs() {
                       {CAT_META[r.category]?.label ?? r.category}
                     </span>
                   </td>
-                  <td className="px-3 py-2 font-mono text-xs">{r.apiKeyShort}</td>
+                  <td className="px-3 py-2 text-xs" title={r.apiKeyShort}>
+                    {r.keyName ? (
+                      <span className="text-ink-200">{r.keyName}</span>
+                    ) : (
+                      <span className="font-mono text-ink-500">{r.apiKeyShort}</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2 text-ink-300">
                     {r.endpoint.replace(/^POST\s+/, "")}
                   </td>
@@ -301,181 +322,6 @@ export function Logs() {
           <button className="btn-secondary text-sm" onClick={() => load(false)}>
             加载更多
           </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ─── Logging settings card (admin) ─────────────────────────── */
-
-function SettingsCard() {
-  const [open, setOpen] = useState(false);
-  const [cfg, setCfg] = useState<LoggingConfig | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetchLoggingConfig().then(setCfg).catch(() => setCfg(null));
-  }, []);
-
-  function patch(p: Partial<LoggingConfig>) {
-    setCfg((c) => (c ? { ...c, ...p } : c));
-  }
-  function patchRetention(p: Partial<LoggingConfig["retention"]>) {
-    setCfg((c) => (c ? { ...c, retention: { ...c.retention, ...p } } : c));
-  }
-  function patchCategories(p: Partial<LoggingConfig["categories"]>) {
-    setCfg((c) => (c ? { ...c, categories: { ...c.categories, ...p } } : c));
-  }
-
-  async function save() {
-    if (!cfg) return;
-    setSaving(true);
-    setMsg(null);
-    try {
-      const next = await updateLoggingConfig(cfg);
-      setCfg(next);
-      setMsg("已保存");
-      setTimeout(() => setMsg(null), 2000);
-    } catch (e) {
-      setMsg(`保存失败: ${(e as ApiError).message}`);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="card">
-      <button
-        className="flex items-center justify-between w-full text-left"
-        onClick={() => setOpen((o) => !o)}
-      >
-        <span className="font-medium">⚙️ 日志设置</span>
-        <span className="text-ink-500 text-sm">{open ? "收起" : "展开"}</span>
-      </button>
-      {open && cfg && (
-        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={cfg.enabled}
-              onChange={(e) => patch({ enabled: e.target.checked })}
-            />
-            启用日志
-          </label>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={cfg.redact}
-              onChange={(e) => patch({ redact: e.target.checked })}
-            />
-            脱敏(剥离 sk-/Bearer/JWT)
-          </label>
-          <div>
-            <label className="block text-xs text-ink-500 mb-1">记录范围</label>
-            <select
-              className="input !py-1"
-              value={cfg.capture}
-              onChange={(e) => patch({ capture: e.target.value as any })}
-            >
-              <option value="failures">仅失败</option>
-              <option value="all">全部请求</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs text-ink-500 mb-1">错误详情</label>
-            <select
-              className="input !py-1"
-              value={cfg["error-detail"]}
-              onChange={(e) => patch({ "error-detail": e.target.value as any })}
-            >
-              <option value="full">全文</option>
-              <option value="snippet">片段</option>
-              <option value="off">不记</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs text-ink-500 mb-1">片段长度</label>
-            <input
-              className="input !py-1"
-              type="number"
-              min="50"
-              value={cfg["snippet-length"]}
-              onChange={(e) => patch({ "snippet-length": Number(e.target.value) })}
-            />
-          </div>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={cfg["store-request-id"]}
-              onChange={(e) => patch({ "store-request-id": e.target.checked })}
-            />
-            存 request_id
-          </label>
-
-          {/* 记录哪些类别(区分模型报错 vs 本服务报错 vs 噪音) */}
-          <div className="md:col-span-2">
-            <label className="block text-xs text-ink-500 mb-1">
-              记录类别(关掉的不入库 — 默认只记真错)
-            </label>
-            <div className="flex flex-wrap gap-3">
-              {([
-                ["upstream", "模型/上游报错"],
-                ["service", "本服务报错"],
-                ["policy", "策略拒绝(配额/白名单/限流)"],
-                ["client", "客户端断开/坏请求"],
-              ] as const).map(([k, txt]) => (
-                <label key={k} className="flex items-center gap-1.5">
-                  <input
-                    type="checkbox"
-                    checked={cfg.categories[k]}
-                    onChange={(e) => patchCategories({ [k]: e.target.checked })}
-                  />
-                  {txt}
-                </label>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-xs text-ink-500 mb-1">保留天数</label>
-            <input
-              className="input !py-1"
-              type="number"
-              min="0"
-              value={cfg.retention["max-age-days"]}
-              onChange={(e) => patchRetention({ "max-age-days": Number(e.target.value) })}
-            />
-          </div>
-          <div>
-            <label className="block text-xs text-ink-500 mb-1">行数上限</label>
-            <input
-              className="input !py-1"
-              type="number"
-              min="0"
-              value={cfg.retention["max-rows"]}
-              onChange={(e) => patchRetention({ "max-rows": Number(e.target.value) })}
-            />
-          </div>
-          <div>
-            <label className="block text-xs text-ink-500 mb-1">清理间隔(分钟)</label>
-            <input
-              className="input !py-1"
-              type="number"
-              min="1"
-              value={cfg.retention["cleanup-interval-minutes"]}
-              onChange={(e) =>
-                patchRetention({ "cleanup-interval-minutes": Number(e.target.value) })
-              }
-            />
-          </div>
-          <div className="md:col-span-2 flex items-center gap-3">
-            <button className="btn-primary text-sm" onClick={save} disabled={saving}>
-              {saving ? "保存中..." : "保存设置"}
-            </button>
-            {msg && <span className="text-ink-400 text-sm">{msg}</span>}
-          </div>
         </div>
       )}
     </div>
