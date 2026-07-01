@@ -9,8 +9,12 @@ import { marked } from "marked";
  * Claude Code (CLI + IDE), Claude desktop (Cowork/https), Codex CLI, 3rd-party
  * GUIs, SDK/curl, usage dashboard, model picker, troubleshooting, security.
  */
-export function buildAccessDoc(key: string, label: string | null): string {
-  const base = window.location.origin;
+export function buildAccessDoc(
+  key: string,
+  label: string | null,
+  baseUrl?: string | null,
+): string {
+  const base = baseUrl || window.location.origin;
   const who = label ? `(${label})` : "";
   return `# 🚀 auth2api 接入与使用手册 ${who}
 
@@ -202,8 +206,13 @@ export function renderAccessDocHtml(md: string): string {
 }
 
 /** Trigger a browser download of the access doc as a .md file. */
-export function downloadAccessDoc(key: string, label: string | null, idForName: string): void {
-  const md = buildAccessDoc(key, label);
+export function downloadAccessDoc(
+  key: string,
+  label: string | null,
+  idForName: string,
+  baseUrl?: string | null,
+): void {
+  const md = buildAccessDoc(key, label, baseUrl);
   const blob = new Blob([md], { type: "text/markdown" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");

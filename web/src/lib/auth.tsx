@@ -14,6 +14,8 @@ export interface WhoAmI {
   admin: boolean;
   role?: "admin" | "auditor" | "member";
   source?: "managed" | "config";
+  /** Public base URL for access docs; null → use window.location.origin. */
+  publicBaseUrl?: string | null;
   enabled: boolean;
   apiKeyShort: string;
 }
