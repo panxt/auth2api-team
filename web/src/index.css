@@ -50,3 +50,38 @@ body {
   .badge-err { @apply badge bg-rose-900/60 text-rose-300; }
   .badge-muted { @apply badge bg-ink-800 text-ink-400; }
 }
+
+/* Rendered-Markdown container (access-doc preview). Tailwind preflight strips
+   default element styles, so restore the essentials for parsed HTML. */
+.md-body {
+  @apply text-sm text-ink-300 leading-relaxed;
+}
+.md-body > :first-child { margin-top: 0; }
+.md-body h1 { @apply text-lg font-semibold text-ink-100 mt-5 mb-2; }
+.md-body h2 { @apply text-base font-semibold text-ink-100 mt-5 mb-2 pb-1 border-b border-ink-800; }
+.md-body h3 { @apply text-sm font-semibold text-ink-200 mt-4 mb-1.5; }
+.md-body p { @apply my-2; }
+.md-body ul { @apply list-disc pl-5 my-2 space-y-1; }
+.md-body ol { @apply list-decimal pl-5 my-2 space-y-1; }
+.md-body a { @apply text-emerald-400 underline; }
+.md-body strong { @apply text-ink-100 font-semibold; }
+.md-body hr { @apply my-4 border-ink-800; }
+.md-body blockquote {
+  @apply my-2 pl-3 border-l-2 border-ink-700 text-ink-400;
+}
+.md-body code {
+  @apply px-1 py-0.5 rounded bg-ink-800 text-ink-200 text-[0.85em] font-mono;
+}
+.md-body pre {
+  @apply my-2 p-3 rounded-md bg-ink-950 border border-ink-800 overflow-x-auto;
+}
+.md-body pre code {
+  @apply p-0 bg-transparent text-ink-300 text-xs leading-relaxed;
+}
+.md-body table {
+  @apply my-2 w-full text-xs border-collapse;
+}
+.md-body th, .md-body td {
+  @apply border border-ink-800 px-2 py-1 text-left align-top;
+}
+.md-body th { @apply bg-ink-900 text-ink-300 font-medium; }

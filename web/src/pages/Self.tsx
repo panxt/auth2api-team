@@ -3,7 +3,7 @@ import { listUsage, rotateSelfKey, UsageKey, CreateKeyResponse } from "../api/ke
 import { ApiError } from "../api/client";
 import { useAuth } from "../lib/auth";
 import { Modal } from "../components/Modal";
-import { buildAccessDoc, downloadAccessDoc } from "../lib/accessDoc";
+import { buildAccessDoc, downloadAccessDoc, renderAccessDocHtml } from "../lib/accessDoc";
 
 const ROLE_LABEL: Record<string, string> = {
   admin: "管理员",
@@ -213,6 +213,19 @@ export function Self() {
                 我保存好了
               </button>
             </div>
+            <details className="text-sm" open>
+              <summary className="cursor-pointer text-ink-400 hover:text-ink-200">
+                预览接入文档
+              </summary>
+              <div
+                className="md-body mt-2 bg-ink-900 border border-ink-800 p-4 rounded-md max-h-96 overflow-auto"
+                dangerouslySetInnerHTML={{
+                  __html: renderAccessDocHtml(
+                    buildAccessDoc(rotated.key, rotated.label),
+                  ),
+                }}
+              />
+            </details>
           </div>
         </Modal>
       )}
