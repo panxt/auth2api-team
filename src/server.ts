@@ -526,11 +526,13 @@ export function createServer(
   // are never returned (only a hash prefix). GET/PUT /admin/logging/config —
   // read / live-update the logging policy (persisted to the SettingsStore).
   if (requestLogger) {
-    // Readable by any valid key (not admin-only): everyone can view the logs.
-    // Key hashes are resolved to human names (label/owner) and never exposed
-    // beyond a 12-char prefix.
+    // Any valid key may open the logs page, but scope by role: admin + auditor
+    // see org-wide logs; members see ONLY their own key's requests. Key hashes
+    // are resolved to human names (label/owner), never exposed beyond a prefix.
     app.get("/admin/logs", (req, res) => {
       const q = req.query;
+      const requester = res.locals.apiKey as ApiKeyEntry | undefined;
+      const seeAll = !!requester && canReadAll(requester);
       const limRaw = Number(q.limit);
       const limit =
         Number.isFinite(limRaw) && limRaw > 0 ? Math.min(1000, limRaw) : 100;
@@ -548,15 +550,21 @@ export function createServer(
         if (name) nameByHash.set(hashApiKey(entry.key), name);
       }
 
-      // Resolve a name search to the set of matching key hashes. No match →
-      // empty array → zero results (rather than ignoring the filter).
-      const keyName = str(q.keyName);
       let apiKeyHashes: string[] | undefined;
-      if (keyName) {
-        const needle = keyName.toLowerCase();
-        apiKeyHashes = [];
-        for (const [hash, name] of nameByHash) {
-          if (name.toLowerCase().includes(needle)) apiKeyHashes.push(hash);
+      if (!seeAll) {
+        // Members: hard-restrict to their own key's rows, ignoring any name
+        // filter — they must never see other users' request history.
+        apiKeyHashes = requester ? [hashApiKey(requester.key)] : [];
+      } else {
+        // admin/auditor: resolve an optional name search to matching hashes.
+        // No match → empty array → zero results (rather than ignoring it).
+        const keyName = str(q.keyName);
+        if (keyName) {
+          const needle = keyName.toLowerCase();
+          apiKeyHashes = [];
+          for (const [hash, name] of nameByHash) {
+            if (name.toLowerCase().includes(needle)) apiKeyHashes.push(hash);
+          }
         }
       }
 
@@ -1033,7 +1041,7 @@ export function createServer(
   // a successful re-auth (see notifyServerReload in src/index.ts), and
   // available for manual use via curl. See AccountManager.reload() for
   // upsert semantics.
-  app.post("/admin/reload", async (_req, res) => {
+  app.post("/admin/reload", requireAdmin, async (_req, res) => {
     const reloaded: Record<string, unknown> = {};
     for (const p of registry.all()) {
       try {

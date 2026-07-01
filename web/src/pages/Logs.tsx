@@ -28,6 +28,8 @@ const CAT_META: Record<LogCategory, { label: string; cls: string }> = {
 export function Logs() {
   const { whoami } = useAuth();
   const isAdmin = !!whoami?.admin;
+  // admin + auditor see org-wide logs; members see only their own rows.
+  const seeAll = isAdmin || whoami?.role === "auditor";
 
   const [rows, setRows] = useState<LogRow[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
@@ -115,7 +117,9 @@ export function Logs() {
         <div>
           <h1 className="text-2xl font-semibold">请求日志</h1>
           <p className="text-sm text-ink-400 mt-1">
-            每条请求的结果与失败原因,按用户名归集。
+            {seeAll
+              ? "每条请求的结果与失败原因,按用户名归集。"
+              : "仅显示你自己 key 的请求(全局日志需管理员 / 审计员权限)。"}
           </p>
         </div>
         <label className="flex items-center gap-2 text-sm text-ink-400">
@@ -158,16 +162,18 @@ export function Logs() {
             <option value="client">客户端</option>
           </select>
         </div>
-        <div>
-          <label className="block text-xs text-ink-500 mb-1">用户</label>
-          <input
-            className="input !py-1 text-sm"
-            placeholder="按用户名 / 备注搜索"
-            value={keyName}
-            onChange={(e) => setKeyName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && applyFilters()}
-          />
-        </div>
+        {seeAll && (
+          <div>
+            <label className="block text-xs text-ink-500 mb-1">用户</label>
+            <input
+              className="input !py-1 text-sm"
+              placeholder="按用户名 / 备注搜索"
+              value={keyName}
+              onChange={(e) => setKeyName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && applyFilters()}
+            />
+          </div>
+        )}
         <div>
           <label className="block text-xs text-ink-500 mb-1">上游账号</label>
           <input

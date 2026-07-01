@@ -304,16 +304,16 @@ export function Accounts() {
             />
             实时(2s)
           </label>
-          <button
-            className="btn-secondary"
-            onClick={onReloadAll}
-            disabled={reloading}
-            title="重读 token 文件并和解整池(捡起新登录的账号)"
-          >
-            {reloading ? "刷新中..." : "↻ 刷新状态"}
-          </button>
         {isAdmin && (
           <div className="flex gap-2">
+            <button
+              className="btn-secondary"
+              onClick={onReloadAll}
+              disabled={reloading}
+              title="重读 token 文件并和解整池(捡起新登录的账号)"
+            >
+              {reloading ? "刷新中..." : "↻ 刷新状态"}
+            </button>
             <button
               className="btn-secondary"
               onClick={() => setShowImport(true)}
