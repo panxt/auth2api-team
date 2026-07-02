@@ -153,5 +153,6 @@ export function normalizeKeyEntry(v: any): ApiKeyEntry | null {
     // silently dropped when managed keys are reloaded from disk on restart.
     "allowed-models": v["allowed-models"],
     "denied-models": v["denied-models"],
+    "allowed-mcp": v["allowed-mcp"],
   };
 }

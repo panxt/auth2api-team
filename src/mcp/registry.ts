@@ -135,7 +135,7 @@ function normalizeServers(raw: unknown): McpServerConfig[] {
   const seen = new Set<string>();
   for (const item of raw) {
     const s = item as Partial<McpServerConfig>;
-    if (!s || typeof s.id !== "string" || !ID_RE.test(s.id) || seen.has(s.id)) continue;
+    if (!s || typeof s.id !== "string" || !ID_RE.test(s.id) || s.id.includes("__") || seen.has(s.id)) continue;
     if (typeof s.url !== "string" || !s.url) continue;
     const transport = TRANSPORTS.includes(s.transport as McpTransport)
       ? (s.transport as McpTransport)
@@ -191,10 +191,10 @@ function validateNew(
   input: McpServerInput,
   existing: McpServerConfig[],
 ): McpServerConfig {
-  if (!input.id || !ID_RE.test(input.id)) {
+  if (!input.id || !ID_RE.test(input.id) || input.id.includes("__")) {
     throw new McpError(
       "invalid",
-      "id required, lowercase [a-z0-9_-], starting alnum, ≤32 chars",
+      "id required, lowercase [a-z0-9_-], starting alnum, ≤32 chars, no '__'",
     );
   }
   if (existing.some((s) => s.id === input.id)) {

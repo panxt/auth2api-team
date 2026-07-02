@@ -34,6 +34,8 @@ import { RequestLogger } from "./logging/logger";
 import { RoutingController } from "./accounts/routing";
 import { PrewarmScheduler } from "./accounts/prewarm";
 import { McpController, McpError } from "./mcp/registry";
+import { handleMcpRpc } from "./mcp/gateway";
+import { allowedMcpIds } from "./usage/mcp-access";
 import { LoggingConfig, RoutingConfig, PrewarmConfig } from "./config";
 
 // Simple in-memory rate limiter per IP
@@ -707,6 +709,96 @@ export function createServer(
         handleMcpError(err, res);
       }
     });
+
+    // Meter one MCP tool call: feed stats + quota + request log, reusing the
+    // /v1 event shape (endpoint = "MCP <server>/<tool>", no tokens).
+    const recordMcpCall = (
+      res: express.Response,
+      serverId: string,
+      tool: string,
+      ok: boolean,
+    ) => {
+      const entry = res.locals.apiKey as ApiKeyEntry | undefined;
+      if (!entry) return;
+      const req = res.req;
+      const input = {
+        apiKeyHash: hashApiKey(entry.key),
+        ip: req.ip || req.socket?.remoteAddress || "unknown",
+        ua: (req.headers["user-agent"] as string) || "",
+        endpoint: `MCP ${serverId}/${tool}`,
+        model: null,
+        provider: null,
+        accountEmail: null,
+        status: (ok ? "success" : "failure") as "success" | "failure",
+        failureKind: ok ? null : "mcp_error",
+        statusCode: ok ? 200 : 502,
+        latencyMs: 0,
+        usage: null,
+      };
+      const ev = statsRecorder
+        ? statsRecorder.record(input)
+        : { v: 1 as const, ts: new Date().toISOString(), ...input };
+      quotaTracker?.record(ev);
+      requestLogger?.record({
+        ts: ev.ts,
+        apiKeyHash: input.apiKeyHash,
+        ip: input.ip,
+        endpoint: input.endpoint,
+        model: null,
+        provider: null,
+        accountEmail: null,
+        status: input.status,
+        statusCode: input.statusCode,
+        failureKind: input.failureKind,
+        category: ok ? "ok" : "upstream",
+        latencyMs: 0,
+        inputTokens: null,
+        outputTokens: null,
+      });
+    };
+
+    // ── Client-facing unified MCP endpoint (Streamable HTTP, stateless JSON) ──
+    // Any valid key; per-key default-deny filtering by allowed-mcp; per-key
+    // rate limit reused. GET/DELETE unsupported (no server-initiated stream).
+    app.use("/mcp", requireApiKey);
+    app.use("/mcp", enforceKeyRateLimit);
+    app.post("/mcp", async (req, res) => {
+      const entry = res.locals.apiKey as ApiKeyEntry | undefined;
+      const allowed = allowedMcpIds(entry, ctrl.enabledIds());
+      const gctx = {
+        allowedIds: allowed,
+        controller: ctrl,
+        onToolCall: (serverId: string, tool: string, ok: boolean) =>
+          recordMcpCall(res, serverId, tool, ok),
+      };
+      try {
+        const body = req.body;
+        if (Array.isArray(body)) {
+          const out = [];
+          for (const r of body) {
+            const resp = await handleMcpRpc(r, gctx);
+            if (resp) out.push(resp);
+          }
+          res.json(out);
+        } else {
+          const resp = await handleMcpRpc(body || {}, gctx);
+          if (resp === null) res.status(202).end();
+          else res.json(resp);
+        }
+      } catch (e: any) {
+        res.status(500).json({
+          jsonrpc: "2.0",
+          id: (req.body && req.body.id) ?? null,
+          error: { code: -32603, message: e?.message || "internal error" },
+        });
+      }
+    });
+    app.get("/mcp", (_req, res) =>
+      res
+        .status(405)
+        .json({ error: { message: "SSE stream not supported (stateless JSON mode)" } }),
+    );
+    app.delete("/mcp", (_req, res) => res.status(204).end());
   }
 
   // GET /admin/usage/keys — month-to-date consumption per API key vs its
