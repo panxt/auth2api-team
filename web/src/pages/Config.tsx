@@ -15,6 +15,17 @@ import {
   updateLoggingConfig,
   LoggingConfig,
 } from "../api/logs";
+import {
+  fetchMcpServers,
+  createMcpServer,
+  updateMcpServer,
+  deleteMcpServer,
+  probeMcpServer,
+  McpServerView,
+  McpServerInput,
+  McpTransport,
+} from "../api/mcp";
+import { Modal } from "../components/Modal";
 
 /* ── shared small formatters (local copies) ────────────────────── */
 
@@ -98,12 +109,13 @@ export function Config() {
       <header className="mb-6">
         <h1 className="text-2xl font-semibold">设置</h1>
         <p className="text-sm text-ink-400 mt-1">
-          负载均衡、窗口暖机、日志策略。改动即时持久化并热生效,无需重启。仅 admin 可见。
+          负载均衡、窗口暖机、日志策略、MCP 服务。改动即时持久化并热生效,无需重启。仅 admin 可见。
         </p>
       </header>
       <div className="space-y-4">
         <RoutingCard />
         <PrewarmCard />
+        <McpCard />
         <LoggingCard />
       </div>
     </div>
@@ -592,6 +604,279 @@ function PrewarmCard() {
         </div>
       )}
     </div>
+  );
+}
+
+/* ─── MCP 服务(聚合网关上游)管理卡 ───────────────────────── */
+
+function mcpHealthBadge(h: McpServerView["health"]): { cls: string; text: string } {
+  switch (h.status) {
+    case "connected":
+      return { cls: "badge-ok", text: `已连接 · ${h.toolCount ?? "?"} 工具` };
+    case "connecting":
+      return { cls: "badge-muted", text: "连接中…" };
+    case "error":
+      return { cls: "badge-err", text: "连接失败" };
+    default:
+      return { cls: "badge-muted", text: "已停用" };
+  }
+}
+
+function McpCard() {
+  const [open, setOpen] = useState(true);
+  const [servers, setServers] = useState<McpServerView[] | null>(null);
+  const [editing, setEditing] = useState<
+    { mode: "new" } | { mode: "edit"; server: McpServerView } | null
+  >(null);
+  const [probing, setProbing] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    fetchMcpServers()
+      .then((r) => setServers(r.servers))
+      .catch(() => setServers([]));
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function onProbe(id: string) {
+    setProbing(id);
+    try {
+      await probeMcpServer(id);
+      load();
+    } catch (e) {
+      setMsg(`探活失败: ${(e as ApiError).message}`);
+    } finally {
+      setProbing(null);
+    }
+  }
+
+  async function onDelete(s: McpServerView) {
+    if (!confirm(`删除 MCP 服务 "${s.label}" (${s.id})? 已授权此类目的 key 将失去访问。`)) return;
+    try {
+      await deleteMcpServer(s.id);
+      load();
+    } catch (e) {
+      setMsg(`删除失败: ${(e as ApiError).message}`);
+    }
+  }
+
+  return (
+    <div className="card">
+      <button
+        className="flex items-center justify-between w-full text-left"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="font-medium inline-flex items-center">
+          🧩 MCP 服务(聚合网关)
+          <InfoTip text={"注册上游 MCP 服务(每个=一个『类目』)。auth2api 把它们聚合到统一 MCP 端点,客户端用 key 访问已授权的类目。\n\n本期支持 Streamable HTTP / SSE 远程 MCP;stdio(本地进程)后续。\n\n默认拒绝:key 需在『用户』页显式勾选类目才能看到 / 调用。"} />
+          {servers && (
+            <span className="ml-2 text-xs text-ink-500 font-normal">
+              {servers.length} 个
+            </span>
+          )}
+        </span>
+        <span className="text-ink-500 text-sm">{open ? "收起" : "展开"}</span>
+      </button>
+
+      {open && (
+        <div className="mt-4 space-y-3 text-sm">
+          {servers === null && <div className="text-ink-500">加载中…</div>}
+          {servers && servers.length === 0 && (
+            <div className="text-ink-500">尚未注册任何 MCP 服务。</div>
+          )}
+          {servers && servers.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="text-ink-500">
+                  <tr>
+                    <th className="text-left font-medium px-2 py-1">类目 id</th>
+                    <th className="text-left font-medium px-2 py-1">名称</th>
+                    <th className="text-left font-medium px-2 py-1">传输</th>
+                    <th className="text-left font-medium px-2 py-1">地址</th>
+                    <th className="text-left font-medium px-2 py-1">状态</th>
+                    <th className="px-2 py-1"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {servers.map((s) => {
+                    const b = mcpHealthBadge(s.health);
+                    return (
+                      <tr key={s.id} className="border-t border-ink-800/60">
+                        <td className="px-2 py-1 font-mono text-ink-300">{s.id}</td>
+                        <td className="px-2 py-1 text-ink-200">{s.label}</td>
+                        <td className="px-2 py-1 text-ink-400">{s.transport}</td>
+                        <td className="px-2 py-1 text-ink-400 font-mono max-w-[16rem] truncate" title={s.url}>
+                          {s.url}
+                        </td>
+                        <td className="px-2 py-1">
+                          <span className={`${b.cls} text-xs`} title={s.health.lastError || ""}>
+                            {b.text}
+                          </span>
+                        </td>
+                        <td className="px-2 py-1 text-right whitespace-nowrap space-x-1">
+                          <button
+                            className="btn-ghost text-xs"
+                            onClick={() => onProbe(s.id)}
+                            disabled={probing === s.id}
+                          >
+                            {probing === s.id ? "探活…" : "↻ 探活"}
+                          </button>
+                          <button
+                            className="btn-ghost text-xs"
+                            onClick={() => setEditing({ mode: "edit", server: s })}
+                          >
+                            编辑
+                          </button>
+                          <button
+                            className="btn-ghost text-xs text-rose-400 hover:text-rose-300"
+                            onClick={() => onDelete(s)}
+                          >
+                            删除
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="flex items-center gap-3">
+            <button className="btn-primary text-sm" onClick={() => setEditing({ mode: "new" })}>
+              + 新增 MCP 服务
+            </button>
+            {msg && <span className="text-ink-400 text-xs">{msg}</span>}
+          </div>
+        </div>
+      )}
+
+      {editing && (
+        <McpServerModal
+          edit={editing.mode === "edit" ? editing.server : null}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null);
+            load();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function McpServerModal({
+  edit,
+  onClose,
+  onSaved,
+}: {
+  edit: McpServerView | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [id, setId] = useState(edit?.id ?? "");
+  const [label, setLabel] = useState(edit?.label ?? "");
+  const [transport, setTransport] = useState<McpTransport>(edit?.transport ?? "streamable-http");
+  const [url, setUrl] = useState(edit?.url ?? "");
+  const [headersText, setHeadersText] = useState("");
+  const [enabled, setEnabled] = useState(edit?.enabled ?? true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  function parseHeaders(): Record<string, string> | undefined {
+    const lines = headersText.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (lines.length === 0) return undefined; // untouched → keep existing (edit)
+    const out: Record<string, string> = {};
+    for (const line of lines) {
+      const i = line.indexOf(":");
+      if (i < 0) continue;
+      out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    }
+    return out;
+  }
+
+  async function save() {
+    setBusy(true);
+    setErr(null);
+    const input: McpServerInput = { label, transport, url, enabled };
+    const headers = parseHeaders();
+    if (headers) input.headers = headers;
+    try {
+      if (edit) {
+        await updateMcpServer(edit.id, input);
+      } else {
+        input.id = id;
+        await createMcpServer(input);
+      }
+      onSaved();
+    } catch (e) {
+      setErr((e as ApiError).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal open onClose={onClose} title={edit ? `编辑 MCP 服务 ${edit.id}` : "新增 MCP 服务"} size="lg">
+      <div className="space-y-3 text-sm">
+        <div>
+          <label className="block text-xs text-ink-500 mb-1">类目 id(小写字母/数字/-_,创建后不可改)</label>
+          <input
+            className="input !py-1 font-mono"
+            value={id}
+            disabled={!!edit}
+            placeholder="gitlab"
+            onChange={(e) => setId(e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-ink-500 mb-1">名称</label>
+          <input className="input !py-1" value={label} placeholder="GitLab" onChange={(e) => setLabel(e.target.value)} />
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div>
+            <label className="block text-xs text-ink-500 mb-1">传输</label>
+            <select className="input !py-1" value={transport} onChange={(e) => setTransport(e.target.value as McpTransport)}>
+              <option value="streamable-http">streamable-http</option>
+              <option value="sse">sse</option>
+            </select>
+          </div>
+          <div className="md:col-span-2">
+            <label className="block text-xs text-ink-500 mb-1">地址 URL</label>
+            <input
+              className="input !py-1 font-mono"
+              value={url}
+              placeholder="http://172.18.11.231:3333/mcp"
+              onChange={(e) => setUrl(e.target.value)}
+            />
+          </div>
+        </div>
+        <div>
+          <label className="block text-xs text-ink-500 mb-1 inline-flex items-center">
+            上游鉴权 Headers(每行 <code className="mx-1">Name: value</code>)
+            <InfoTip text={edit ? "留空 = 保持原有(密钥不回显)。填写则整体替换。" : "上游 MCP 需要的鉴权头,如 Private-Token: xxxx。视为密钥,存储加密目录、不回显、日志脱敏。"} />
+          </label>
+          <textarea
+            className="input w-full font-mono text-xs h-20"
+            value={headersText}
+            placeholder={edit && edit.headerKeys.length ? `原有:${edit.headerKeys.join(", ")}(留空保持)` : "Private-Token: glpat-xxxx"}
+            onChange={(e) => setHeadersText(e.target.value)}
+          />
+        </div>
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+          启用(连接并纳入聚合)
+        </label>
+        <div className="flex items-center gap-3">
+          <button className="btn-primary text-sm" onClick={save} disabled={busy || (!edit && !id) || !url}>
+            {busy ? "保存中…" : "保存"}
+          </button>
+          {err && <span className="text-rose-400 text-xs">{err}</span>}
+        </div>
+      </div>
+    </Modal>
   );
 }
 

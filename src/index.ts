@@ -17,6 +17,7 @@ import { openStorage } from "./storage";
 import { RequestLogger } from "./logging/logger";
 import { RoutingController } from "./accounts/routing";
 import { PrewarmScheduler } from "./accounts/prewarm";
+import { McpController } from "./mcp/registry";
 import type { PrewarmResult } from "./providers/types";
 
 function prompt(question: string): Promise<string> {
@@ -272,6 +273,11 @@ async function startServer(): Promise<void> {
   );
   prewarmScheduler.start();
 
+  // MCP aggregation gateway registry. Page-managed (SettingsStore); connects
+  // enabled upstreams in the background.
+  const mcpController = new McpController(storage.settings);
+  mcpController.start();
+
   const app = createServer(
     config,
     registry,
@@ -281,6 +287,7 @@ async function startServer(): Promise<void> {
     requestLogger,
     routingController,
     prewarmScheduler,
+    mcpController,
   );
   const host = config.host || "127.0.0.1";
   const port = config.port;

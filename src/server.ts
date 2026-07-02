@@ -33,6 +33,7 @@ import { loadAllTokens, saveToken } from "./auth/token-storage";
 import { RequestLogger } from "./logging/logger";
 import { RoutingController } from "./accounts/routing";
 import { PrewarmScheduler } from "./accounts/prewarm";
+import { McpController, McpError } from "./mcp/registry";
 import { LoggingConfig, RoutingConfig, PrewarmConfig } from "./config";
 
 // Simple in-memory rate limiter per IP
@@ -86,6 +87,7 @@ export function createServer(
   requestLogger?: RequestLogger,
   routingController?: RoutingController,
   prewarmScheduler?: PrewarmScheduler,
+  mcpController?: McpController,
 ): express.Application {
   const app = express();
   // Stats slots are seeded whenever any subsystem needs them: the recorder
@@ -654,6 +656,56 @@ export function createServer(
         cursor: Number.isFinite(cursor as number) ? cursor : null,
       });
       res.json({ runs: page.rows, nextCursor: page.nextCursor });
+    });
+  }
+
+  // ── MCP aggregation gateway registry (page-managed, admin-only) ──
+  if (mcpController) {
+    const ctrl = mcpController;
+    const handleMcpError = (err: unknown, res: express.Response) => {
+      if (err instanceof McpError) {
+        const status =
+          err.code === "not_found" ? 404 : err.code === "conflict" ? 409 : 400;
+        res.status(status).json({ error: { message: err.message, type: err.code } });
+        return;
+      }
+      console.error("[mcp] unexpected error:", err);
+      res.status(500).json({ error: { message: "internal error" } });
+    };
+
+    // Read: admin + auditor (header values are never returned).
+    app.get("/admin/mcp/servers", requireReadAll, (_req, res) => {
+      res.json({ servers: ctrl.list(), generated_at: new Date().toISOString() });
+    });
+    // Mutations: admin-only. Persisted to SettingsStore + hot-reconnect.
+    app.post("/admin/mcp/servers", requireAdmin, (req, res) => {
+      try {
+        res.status(201).json(ctrl.create((req.body || {}) as any));
+      } catch (err) {
+        handleMcpError(err, res);
+      }
+    });
+    app.put("/admin/mcp/servers/:id", requireAdmin, (req, res) => {
+      try {
+        res.json(ctrl.update(req.params.id, (req.body || {}) as any));
+      } catch (err) {
+        handleMcpError(err, res);
+      }
+    });
+    app.delete("/admin/mcp/servers/:id", requireAdmin, (req, res) => {
+      try {
+        ctrl.remove(req.params.id);
+        res.status(204).end();
+      } catch (err) {
+        handleMcpError(err, res);
+      }
+    });
+    app.post("/admin/mcp/servers/:id/probe", requireAdmin, async (req, res) => {
+      try {
+        res.json(await ctrl.probe(req.params.id));
+      } catch (err) {
+        handleMcpError(err, res);
+      }
     });
   }
 
