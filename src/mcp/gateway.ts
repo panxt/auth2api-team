@@ -40,6 +40,15 @@ export async function handleMcpRpc(
   const id = req?.id ?? null;
   const method = req?.method ?? "";
   const params = req?.params ?? {};
+
+  // Single-upstream keys skip the `<serverId>__` namespace entirely: with only
+  // one authorized upstream there's no name collision, so tools/resources are
+  // exposed under their raw upstream names — a direct connection swapped for
+  // the gateway keeps identical tool ids (drop-in migration, no skill edits).
+  const flatServer =
+    ctx.allowedServerIds.length === 1 ? ctx.allowedServerIds[0] : null;
+  const qualify = (sid: string, name: string) =>
+    flatServer ? name : nsName(sid, name);
   const ok = (result: unknown) => ({ jsonrpc: "2.0", id, result });
   const err = (code: number, message: string) => ({
     jsonrpc: "2.0",
@@ -69,7 +78,7 @@ export async function handleMcpRpc(
         tools: await aggregate(ctx, async (sid, client) =>
           (await client.listTools())
             .filter((t: any) => ctx.isToolAllowed(sid, t.name))
-            .map((t: any) => ({ ...t, name: nsName(sid, t.name) })),
+            .map((t: any) => ({ ...t, name: qualify(sid, t.name) })),
         ),
       });
 
@@ -79,7 +88,7 @@ export async function handleMcpRpc(
           ctx.isServerFull(sid)
             ? (await client.listPrompts()).map((p: any) => ({
                 ...p,
-                name: nsName(sid, p.name),
+                name: qualify(sid, p.name),
               }))
             : [],
         ),
@@ -91,14 +100,14 @@ export async function handleMcpRpc(
           ctx.isServerFull(sid)
             ? (await client.listResources()).map((r: any) => ({
                 ...r,
-                uri: nsName(sid, r.uri),
+                uri: qualify(sid, r.uri),
               }))
             : [],
         ),
       });
 
     case "tools/call": {
-      const route = resolve(ctx, params.name);
+      const route = resolve(ctx, params.name, flatServer);
       if ("error" in route) return err(-32602, route.error);
       if (!ctx.isToolAllowed(route.serverId, route.name)) {
         return err(-32602, `unauthorized tool: ${params.name}`);
@@ -114,7 +123,7 @@ export async function handleMcpRpc(
     }
 
     case "prompts/get": {
-      const route = resolve(ctx, params.name);
+      const route = resolve(ctx, params.name, flatServer);
       if ("error" in route) return err(-32602, route.error);
       if (!ctx.isServerFull(route.serverId)) {
         return err(-32602, `unauthorized prompt: ${params.name}`);
@@ -127,7 +136,7 @@ export async function handleMcpRpc(
     }
 
     case "resources/read": {
-      const route = resolve(ctx, params.uri);
+      const route = resolve(ctx, params.uri, flatServer);
       if ("error" in route) return err(-32602, route.error);
       if (!ctx.isServerFull(route.serverId)) {
         return err(-32602, `unauthorized resource: ${params.uri}`);
@@ -148,8 +157,22 @@ type Route =
   | { serverId: string; name: string; client: NonNullable<ReturnType<McpController["getClient"]>> }
   | { error: string };
 
-function resolve(ctx: GatewayCtx, qualified: unknown): Route {
+function resolve(ctx: GatewayCtx, qualified: unknown, flatServer: string | null): Route {
   if (typeof qualified !== "string") return { error: "missing name/uri" };
+
+  // Flat (single-upstream) mode: the name is the raw upstream tool/uri. Route to
+  // the sole allowed server; tolerate a leading "<serverId>__" in case a client
+  // cached the namespaced form from a multi-upstream key.
+  if (flatServer) {
+    const client = ctx.controller.getClient(flatServer);
+    if (!client) return { error: `unknown server: ${flatServer}` };
+    const prefix = `${flatServer}__`;
+    const name = qualified.startsWith(prefix)
+      ? qualified.slice(prefix.length)
+      : qualified;
+    return { serverId: flatServer, name, client };
+  }
+
   const parsed = parseNs(qualified);
   if (!parsed) return { error: `unqualified name: ${qualified}` };
   if (!ctx.allowedServerIds.includes(parsed.serverId)) {

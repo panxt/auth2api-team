@@ -20,6 +20,7 @@ function ctx(grants: string[]): GatewayCtx {
   const clients: Record<string, any> = {
     gitlab: fakeClient(["create_issue", "list_issues"]),
     jira: fakeClient(["search"]),
+    notion: fakeClient(["read"]),
   };
   const enabled = Object.keys(clients);
   const allowedServerIds = enabled.filter(
@@ -54,10 +55,11 @@ test("notifications get no reply", async () => {
   assert.equal(r, null);
 });
 
-test("tools/list aggregates + namespaces only allowed categories", async () => {
-  const r: any = await handleMcpRpc({ jsonrpc: "2.0", id: 2, method: "tools/list" }, ctx(["gitlab"]));
+test("tools/list aggregates + namespaces only allowed categories (multi-upstream)", async () => {
+  // ≥2 authorized upstreams → namespaced; notion not granted → excluded.
+  const r: any = await handleMcpRpc({ jsonrpc: "2.0", id: 2, method: "tools/list" }, ctx(["gitlab", "jira"]));
   const names = r.result.tools.map((t: any) => t.name).sort();
-  assert.deepEqual(names, ["gitlab__create_issue", "gitlab__list_issues"]);
+  assert.deepEqual(names, ["gitlab__create_issue", "gitlab__list_issues", "jira__search"]);
 });
 
 test("default-deny: empty allowedIds → no tools", async () => {
@@ -73,20 +75,23 @@ test("tools/call routes to owning upstream, strips namespace", async () => {
   assert.match(r.result.content[0].text, /^create_issue:/);
 });
 
-test("tools/call on unauthorized category → JSON-RPC error", async () => {
+test("tools/call on unauthorized category → JSON-RPC error (multi-upstream)", async () => {
+  // gitlab+jira granted (prefixed mode); notion is a registered but ungranted
+  // category → must be rejected.
   const r: any = await handleMcpRpc(
-    { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "jira__search", arguments: {} } },
-    ctx(["gitlab"]), // jira not granted
+    { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "notion__read", arguments: {} } },
+    ctx(["gitlab", "jira"]),
   );
   assert.ok(r.error);
   assert.match(r.error.message, /unauthorized|unknown/);
 });
 
-test("per-tool grant: only the granted tool is listed + callable", async () => {
-  const c = ctx(["gitlab__list_issues"]); // tool-scoped, not whole category
+test("per-tool grant (multi-upstream, prefixed): only the granted tool is listed + callable", async () => {
+  // gitlab tool-scoped + jira whole → 2 servers → prefixed mode.
+  const c = ctx(["gitlab__list_issues", "jira"]);
   const list: any = await handleMcpRpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, c);
-  assert.deepEqual(list.result.tools.map((t: any) => t.name), ["gitlab__list_issues"]);
-  // granted tool callable
+  const gitlabTools = list.result.tools.map((t: any) => t.name).filter((n: string) => n.startsWith("gitlab__"));
+  assert.deepEqual(gitlabTools, ["gitlab__list_issues"]);
   const okCall: any = await handleMcpRpc(
     { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "gitlab__list_issues" } },
     c,
@@ -99,6 +104,43 @@ test("per-tool grant: only the granted tool is listed + callable", async () => {
   );
   assert.ok(bad.error);
   assert.match(bad.error.message, /unauthorized/);
+});
+
+test("single-upstream key → flat mode: tools/list returns un-namespaced names", async () => {
+  const c = ctx(["gitlab"]); // only one server authorized
+  const list: any = await handleMcpRpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, c);
+  const names = list.result.tools.map((t: any) => t.name).sort();
+  // no "gitlab__" prefix — raw upstream tool names
+  assert.deepEqual(names, ["create_issue", "list_issues"]);
+});
+
+test("flat mode: tools/call accepts the bare tool name", async () => {
+  const c = ctx(["gitlab"]);
+  const r: any = await handleMcpRpc(
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "create_issue", arguments: { title: "hi" } } },
+    c,
+  );
+  assert.match(r.result.content[0].text, /^create_issue:/);
+});
+
+test("flat mode: also tolerates a cached namespaced name", async () => {
+  const c = ctx(["gitlab"]);
+  const r: any = await handleMcpRpc(
+    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "gitlab__create_issue", arguments: {} } },
+    c,
+  );
+  assert.match(r.result.content[0].text, /^create_issue:/);
+});
+
+test("flat mode still enforces tool-scoped grants", async () => {
+  const c = ctx(["gitlab__list_issues"]); // single server, one tool
+  const list: any = await handleMcpRpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, c);
+  assert.deepEqual(list.result.tools.map((t: any) => t.name), ["list_issues"]); // un-namespaced
+  const bad: any = await handleMcpRpc(
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "create_issue" } },
+    c,
+  );
+  assert.ok(bad.error); // sibling tool not granted
 });
 
 test("onToolCall metering hook fires with (serverId, tool, ok)", async () => {
