@@ -6,6 +6,7 @@ import {
   createKey,
   updateKey,
   deleteKey,
+  rotateKey,
   UsageKey,
   ManagedKeyView,
   CreateKeyInput,
@@ -38,6 +39,42 @@ function fmtTokens(n: number | undefined): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);
+}
+
+/** Distinct upstream MCP servers a key is granted (grant may be "gitlab" whole
+ *  or "gitlab__tool"). Count决定网关是否加命名空间前缀:1 个→免前缀,≥2→带前缀。 */
+function mcpServersOf(allowedMcp: string[] | null): string[] {
+  if (!allowedMcp || allowedMcp.length === 0) return [];
+  return Array.from(new Set(allowedMcp.map((g) => g.split("__")[0])));
+}
+
+/** Renders a key's MCP grant summary + prefix mode badge for the table. */
+function McpModeCell({ allowedMcp }: { allowedMcp: string[] | null }) {
+  const servers = mcpServersOf(allowedMcp);
+  if (servers.length === 0)
+    return <span className="text-ink-500 text-xs">无(默认拒绝)</span>;
+  const flat = servers.length === 1;
+  return (
+    <div className="flex flex-col gap-1 max-w-[14rem]">
+      <div className="flex flex-wrap gap-1">
+        {servers.map((s) => (
+          <span key={s} className="badge-ok text-xs">
+            {s}
+          </span>
+        ))}
+      </div>
+      <span
+        className={`text-xs ${flat ? "text-emerald-400" : "text-amber-400"}`}
+        title={
+          flat
+            ? "单上游 → 网关不加命名空间前缀,工具名与直连一致,迁移零改动"
+            : "多上游 → 工具名带 <服务>__ 前缀防撞名"
+        }
+      >
+        {flat ? "免前缀(单上游)" : `带前缀(${servers.length} 类)`}
+      </span>
+    </div>
+  );
 }
 
 export function Users() {
@@ -120,6 +157,26 @@ export function Users() {
     }
   }
 
+  async function onRotate(row: MergedRow) {
+    if (!row.managedId) {
+      alert("config.yaml 里的 key 是只读的,无法重置");
+      return;
+    }
+    if (
+      !confirm(
+        `重置 ${row.label || row.apiKeyShort}?\n旧 key 立即失效,所有用它的客户端都要换新 key(名称/角色/配额/MCP 授权不变)。`,
+      )
+    )
+      return;
+    try {
+      const resp = await rotateKey(row.managedId);
+      setCreatedKey(resp); // 复用"仅此一次明文"弹窗
+      load();
+    } catch (e) {
+      alert(`重置失败: ${(e as ApiError).message}`);
+    }
+  }
+
   async function onDelete(row: MergedRow) {
     if (!row.managedId) {
       alert("config.yaml 里的 key 是只读的,删请直接编辑文件并重启服务");
@@ -175,6 +232,7 @@ export function Users() {
                 <th className="px-4 py-3 font-medium">配额(月)</th>
                 <th className="px-4 py-3 font-medium">本月用量</th>
                 <th className="px-4 py-3 font-medium">可用模型</th>
+                <th className="px-4 py-3 font-medium">MCP 授权</th>
                 <th className="px-4 py-3 font-medium">Owner</th>
                 {isAdmin && (
                   <th className="px-4 py-3 font-medium text-right">操作</th>
@@ -270,6 +328,9 @@ export function Users() {
                         <span className="text-ink-500 text-xs">全部</span>
                       )}
                     </td>
+                    <td className="px-4 py-3">
+                      <McpModeCell allowedMcp={row.allowedMcp} />
+                    </td>
                     <td className="px-4 py-3 text-ink-400">
                       {row.owner || "—"}
                     </td>
@@ -282,6 +343,26 @@ export function Users() {
                           title={!row.managedId ? "config 来源,只读" : ""}
                         >
                           编辑
+                        </button>
+                        <button
+                          className={`btn-ghost text-xs ${
+                            row.enabled
+                              ? "text-amber-400 hover:text-amber-300"
+                              : "text-emerald-400 hover:text-emerald-300"
+                          }`}
+                          onClick={() => onToggleEnabled(row)}
+                          disabled={!row.managedId}
+                          title={!row.managedId ? "config 来源,只读" : "启用 / 禁用"}
+                        >
+                          {row.enabled ? "禁用" : "启用"}
+                        </button>
+                        <button
+                          className="btn-ghost text-xs"
+                          onClick={() => onRotate(row)}
+                          disabled={!row.managedId}
+                          title={!row.managedId ? "config 来源,只读" : "重置(换新 key,旧的失效)"}
+                        >
+                          重置
                         </button>
                         <button
                           className="btn-ghost text-xs text-rose-400 hover:text-rose-300"
@@ -299,7 +380,7 @@ export function Users() {
               {rows.length === 0 && (
                 <tr>
                   <td
-                    colSpan={isAdmin ? 9 : 8}
+                    colSpan={isAdmin ? 10 : 9}
                     className="px-4 py-8 text-center text-ink-500"
                   >
                     {isAdmin
@@ -520,7 +601,7 @@ function CreateKeyModal({
         />
         <McpGrantPicker servers={mcpServers} selected={allowedMcp} onChange={setAllowedMcp} />
         {err && <div className="badge-err px-3 py-2 block">{err}</div>}
-        <div className="flex justify-end gap-2 pt-2">
+        <div className="flex justify-end gap-2 pt-3 sticky bottom-0 -mx-5 -mb-5 px-5 py-3 bg-ink-900 border-t border-ink-800">
           <button
             className="btn-secondary"
             onClick={() => {
@@ -654,7 +735,7 @@ function EditKeyModal({
         />
         <McpGrantPicker servers={mcpServers} selected={allowedMcp} onChange={setAllowedMcp} />
         {err && <div className="badge-err px-3 py-2 block">{err}</div>}
-        <div className="flex justify-end gap-2 pt-2">
+        <div className="flex justify-end gap-2 pt-3 sticky bottom-0 -mx-5 -mb-5 px-5 py-3 bg-ink-900 border-t border-ink-800">
           <button className="btn-secondary" onClick={onClose}>
             取消
           </button>
