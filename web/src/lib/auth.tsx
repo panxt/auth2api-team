@@ -14,6 +14,10 @@ export interface WhoAmI {
   admin: boolean;
   role?: "admin" | "auditor" | "member";
   source?: "managed" | "config";
+  /** Public base URL for access docs; null → use window.location.origin. */
+  publicBaseUrl?: string | null;
+  /** https address for Cowork desktop client (cert section of access doc). */
+  coworkBaseUrl?: string | null;
   enabled: boolean;
   apiKeyShort: string;
 }

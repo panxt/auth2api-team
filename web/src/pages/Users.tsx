@@ -17,7 +17,7 @@ import {
 import { ApiError } from "../api/client";
 import { Modal } from "../components/Modal";
 import { useAuth } from "../lib/auth";
-import { buildAccessDoc, downloadAccessDoc } from "../lib/accessDoc";
+import { buildAccessDoc, downloadAccessDoc, renderAccessDocHtml } from "../lib/accessDoc";
 
 interface MergedRow extends UsageKey {
   source: "managed" | "config";
@@ -352,7 +352,7 @@ export function Users() {
                 className="btn-secondary"
                 onClick={() =>
                   navigator.clipboard.writeText(
-                    buildAccessDoc(createdKey.key, createdKey.label),
+                    buildAccessDoc(createdKey.key, createdKey.label, whoami?.publicBaseUrl, whoami?.coworkBaseUrl),
                   )
                 }
               >
@@ -361,7 +361,7 @@ export function Users() {
               <button
                 className="btn-secondary"
                 onClick={() =>
-                  downloadAccessDoc(createdKey.key, createdKey.label, createdKey.id)
+                  downloadAccessDoc(createdKey.key, createdKey.label, createdKey.id, whoami?.publicBaseUrl, whoami?.coworkBaseUrl)
                 }
               >
                 下载文档 (.md)
@@ -373,13 +373,18 @@ export function Users() {
                 我保存好了
               </button>
             </div>
-            <details className="text-sm">
+            <details className="text-sm" open>
               <summary className="cursor-pointer text-ink-400 hover:text-ink-200">
                 预览接入文档
               </summary>
-              <pre className="mt-2 bg-ink-800 p-3 rounded-md text-xs whitespace-pre-wrap max-h-72 overflow-auto">
-                {buildAccessDoc(createdKey.key, createdKey.label)}
-              </pre>
+              <div
+                className="md-body mt-2 bg-ink-900 border border-ink-800 p-4 rounded-md max-h-96 overflow-auto"
+                dangerouslySetInnerHTML={{
+                  __html: renderAccessDocHtml(
+                    buildAccessDoc(createdKey.key, createdKey.label, whoami?.publicBaseUrl, whoami?.coworkBaseUrl),
+                  ),
+                }}
+              />
             </details>
           </div>
         </Modal>

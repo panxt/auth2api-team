@@ -1110,6 +1110,11 @@ export function createServer(
       role: entry.role ?? (entry.admin ? "admin" : "member"),
       source: keyStore?.list().find((k) => k.id === hashApiKey(entry.key).slice(0, 12))?.source ?? "config",
       enabled: entry.enabled,
+      // Public base URL for generated access docs (falls back client-side to
+      // window.location.origin when unset).
+      publicBaseUrl: config["public-base-url"] ?? null,
+      // https address for the Cowork desktop client (cert section of the doc).
+      coworkBaseUrl: config["cowork-base-url"] ?? null,
     });
   });
 

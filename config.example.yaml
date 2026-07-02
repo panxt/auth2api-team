@@ -1,6 +1,18 @@
 host: ""
 port: 8317
 
+# Public-facing base URL that members should use, embedded verbatim into the
+# access docs generated on key creation (Web UI). Set this to the real
+# deployment address (or an https reverse-proxy) so docs are correct even when
+# an admin views the dashboard on localhost. Omit to fall back to the browser's
+# current origin.
+# public-base-url: "http://172.16.13.203:8318"
+
+# https reverse-proxy address for the Claude desktop **Cowork** client (which
+# rejects plain http). Shown in the access doc's certificate section. Omit to
+# render a placeholder that tells members to ask an admin.
+# cowork-base-url: "https://172.16.13.203:8443"
+
 # Directory to store OAuth tokens
 auth-dir: "~/.auth2api"
 

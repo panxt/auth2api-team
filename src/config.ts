@@ -373,6 +373,21 @@ export function resolvePrewarmConfig(
 export interface Config {
   host: string;
   port: number;
+  /**
+   * Public-facing base URL members should use (e.g. the prod address
+   * "http://172.16.13.203:8318" or an https reverse-proxy), used verbatim in
+   * generated access docs. Optional — falls back to the dashboard's own origin
+   * when unset. Lets an admin viewing the UI on localhost still hand out docs
+   * that point at the real deployment.
+   */
+  "public-base-url"?: string;
+  /**
+   * https reverse-proxy address for the Claude desktop **Cowork** client (which
+   * rejects plain http). Used in the access doc's "方式二" cert section. Optional
+   * — when unset the doc shows a placeholder and tells the member to ask an
+   * admin. e.g. "https://172.16.13.203:8443".
+   */
+  "cowork-base-url"?: string;
   "auth-dir": string;
   "api-keys": Map<string, ApiKeyEntry>;
   "body-limit": string;
