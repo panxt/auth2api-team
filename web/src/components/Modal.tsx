@@ -33,16 +33,16 @@ export function Modal({ open, onClose, title, children, size = "md" }: ModalProp
       onClick={onClose}
     >
       <div
-        className={`${sizeClass} w-full rounded-lg border border-ink-700 bg-ink-900 shadow-2xl`}
+        className={`${sizeClass} w-full max-h-[90vh] flex flex-col rounded-lg border border-ink-700 bg-ink-900 shadow-2xl`}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-5 py-3 border-b border-ink-800">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-ink-800 shrink-0">
           <h2 className="text-lg font-medium">{title}</h2>
           <button onClick={onClose} className="btn-ghost text-xl leading-none">
             ×
           </button>
         </div>
-        <div className="p-5">{children}</div>
+        <div className="p-5 overflow-y-auto">{children}</div>
       </div>
     </div>
   );
