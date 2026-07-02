@@ -3,6 +3,21 @@
 本文档记录 `<your-user>/auth2api-team`(fork)在上游 `AmazingAng/auth2api` 基础上的改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.3.1] — 2026-07-02
+
+打磨 v2.3.0 的接入文档生成:预览真正渲染 Markdown、内容大幅充实、地址可配置。基线 = v2.3.0,含 3 个 commit。**向后兼容**,无 schema 变化。
+
+### Added / Changed
+
+- **接入文档渲染 Markdown**(`web/src/lib/accessDoc.ts` + `web/src/index.css`)— 建 key / 自助重置 key 弹窗里的预览从原始 md 文本改为真正渲染(引入 \`marked\` + \`.md-body\` 暗色样式:标题 / 表格 / 代码块 / 引用 / 列表),默认展开。
+- **文档内容充实**— 合并团队现场手册:30 秒自测、Claude Code(安装 + 环境变量 + 弹登录菜单处理 + IDE + 误登录清理)、**Claude 桌面 Cowork 的 macOS + Windows 双端根证书安装步骤**(命令行 + 图形 + 验证 + Firefox 单独导入 + 排错表)、Codex CLI + 第三方 GUI、SDK/curl、看板查用量、模型选择表、常见问题表、安全提醒。
+- **可配置对外地址**(`src/config.ts` + `src/server.ts` whoami)— 新增 \`public-base-url\`(成员使用的对外地址)与 \`cowork-base-url\`(Cowork 的 https 反代地址),经 \`/admin/ui/whoami\` 下发前端;文档地址优先用配置值、否则回退浏览器 origin。管理员在本地看板生成的文档也能正确指向生产地址,而非 localhost。
+
+### Fixed
+
+- **重新认证弹窗卡在「请求中…」**(`web/src/components/AddAccountModal.tsx`)— 自动发起 OAuth 的 useEffect 把 \`busy\` 放进依赖导致自取消,结果被丢弃、状态不复位。改为仅依赖 \`[open, reauthProvider]\`。
+- **账号导出 / 导入找不到 token 文件**— 直接用了未展开 \`~\` 的 auth-dir,改用 \`resolveAuthDir()\`。
+
 ## [2.3.0] — 2026-07-01
 
 在 v2.2.0 基础上把服务从「能用的共享网关」推进到「**多租户 AI 接入平台**」:三角色 RBAC + 成员自助门户(ROADMAP ⑤⑭)、上游账号全生命周期运维(主动续期 / 跨实例迁移 / 重新认证)、5h 窗口暖机内置调度器 + 定时执行审计、5h/7d 额度池汇总、以及配置/日志的权限化重构。基线 = v2.2.0,含 12 个 commit。**向后兼容**:旧 `admin: true` 键自动映射为 `admin` 角色;`prewarm_runs` 表 + `scheduled_time` 列经 `PRAGMA table_info` 轻量迁移自动创建;账号 token 文件格式不变。
