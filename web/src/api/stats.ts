@@ -40,6 +40,13 @@ export interface ClientModelBucket extends BaseBucket {
   provider: string | null;
 }
 
+export interface ClientMcpBucket extends BaseBucket {
+  apiKeyShort: string;
+  server: string;
+  /** Per-tool call/failure counts on this (client, server). */
+  byTool: Record<string, { calls: number; failures: number }>;
+}
+
 export type StatsWindow = "today" | "month" | "all";
 
 export interface StatsSnapshot {
@@ -47,6 +54,7 @@ export interface StatsSnapshot {
   byAccount: Record<string, AccountBucket>;
   byApi: Record<string, ApiBucket>;
   byClientModel: Record<string, ClientModelBucket>;
+  byClientMcp: Record<string, ClientMcpBucket>;
   totals: BaseBucket;
   window: StatsWindow;
   generated_at: string;
@@ -75,6 +83,8 @@ export interface DailyBucket {
     string,
     { requests: number; totalTokens: number; totalCostUsd: number }
   >;
+  /** MCP tool-call counts per upstream server for this day. */
+  mcpByServer?: Record<string, number>;
 }
 
 export interface TimeseriesResp {
