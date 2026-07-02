@@ -35,7 +35,11 @@ import { RoutingController } from "./accounts/routing";
 import { PrewarmScheduler } from "./accounts/prewarm";
 import { McpController, McpError } from "./mcp/registry";
 import { handleMcpRpc } from "./mcp/gateway";
-import { allowedMcpIds } from "./usage/mcp-access";
+import {
+  mcpFanoutServerIds,
+  isMcpToolAllowed,
+  isMcpServerFull,
+} from "./usage/mcp-access";
 import { LoggingConfig, RoutingConfig, PrewarmConfig } from "./config";
 
 // Simple in-memory rate limiter per IP
@@ -709,6 +713,20 @@ export function createServer(
         handleMcpError(err, res);
       }
     });
+    // Tool list for a server (admin+auditor) — powers the UI tool view + the
+    // per-tool grant picker.
+    app.get("/admin/mcp/servers/:id/tools", requireReadAll, async (req, res) => {
+      try {
+        res.json({ tools: await ctrl.tools(req.params.id) });
+      } catch (err) {
+        if (err instanceof McpError) {
+          handleMcpError(err, res);
+        } else {
+          // upstream unreachable → 200 with empty + reason, so UI can show it
+          res.json({ tools: [], error: (err as any)?.message || String(err) });
+        }
+      }
+    });
 
     // Meter one MCP tool call: feed stats + quota + request log, reusing the
     // /v1 event shape (endpoint = "MCP <server>/<tool>", no tokens).
@@ -764,9 +782,10 @@ export function createServer(
     app.use("/mcp", enforceKeyRateLimit);
     app.post("/mcp", async (req, res) => {
       const entry = res.locals.apiKey as ApiKeyEntry | undefined;
-      const allowed = allowedMcpIds(entry, ctrl.enabledIds());
       const gctx = {
-        allowedIds: allowed,
+        allowedServerIds: mcpFanoutServerIds(entry, ctrl.enabledIds()),
+        isToolAllowed: (sid: string, tool: string) => isMcpToolAllowed(entry, sid, tool),
+        isServerFull: (sid: string) => isMcpServerFull(entry, sid),
         controller: ctrl,
         onToolCall: (serverId: string, tool: string, ok: boolean) =>
           recordMcpCall(res, serverId, tool, ok),

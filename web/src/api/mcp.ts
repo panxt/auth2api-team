@@ -44,3 +44,13 @@ export const deleteMcpServer = (id: string) =>
 
 export const probeMcpServer = (id: string) =>
   post<McpServerView>(`/admin/mcp/servers/${encodeURIComponent(id)}/probe`);
+
+export interface McpTool {
+  name: string;
+  description?: string;
+}
+
+export const fetchMcpTools = (id: string) =>
+  get<{ tools: McpTool[]; error?: string }>(
+    `/admin/mcp/servers/${encodeURIComponent(id)}/tools`,
+  );

@@ -94,6 +94,16 @@ export class McpController {
     this.persist();
   }
 
+  /** Tool names + descriptions for one upstream (for the UI tool list + grant
+   *  picker). Throws if the server is unknown; may throw if the upstream is
+   *  unreachable (caller surfaces the error). */
+  async tools(id: string): Promise<{ name: string; description?: string }[]> {
+    const client = this.clients.get(id);
+    if (!client) throw new McpError("not_found", `no MCP server "${id}"`);
+    const list = await client.listTools();
+    return list.map((t: any) => ({ name: t.name, description: t.description }));
+  }
+
   async probe(id: string): Promise<McpServerView> {
     const client = this.clients.get(id);
     const cfg = this.servers.find((s) => s.id === id);

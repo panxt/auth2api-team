@@ -21,9 +21,11 @@ import {
   updateMcpServer,
   deleteMcpServer,
   probeMcpServer,
+  fetchMcpTools,
   McpServerView,
   McpServerInput,
   McpTransport,
+  McpTool,
 } from "../api/mcp";
 import { Modal } from "../components/Modal";
 
@@ -125,7 +127,7 @@ export function Config() {
 /* ─── Routing settings card ──────────────────────────────────── */
 
 function RoutingCard() {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const [cfg, setCfg] = useState<RoutingConfig | null>(null);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -233,7 +235,7 @@ function RoutingCard() {
 /* ─── Prewarm scheduler card ─────────────────────────────────── */
 
 function PrewarmCard() {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const [cfg, setCfg] = useState<PrewarmConfig | null>(null);
   const [runs, setRuns] = useState<PrewarmRun[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
@@ -623,12 +625,13 @@ function mcpHealthBadge(h: McpServerView["health"]): { cls: string; text: string
 }
 
 function McpCard() {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const [servers, setServers] = useState<McpServerView[] | null>(null);
   const [editing, setEditing] = useState<
     { mode: "new" } | { mode: "edit"; server: McpServerView } | null
   >(null);
   const [probing, setProbing] = useState<string | null>(null);
+  const [viewingTools, setViewingTools] = useState<McpServerView | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
 
   const load = useCallback(() => {
@@ -725,6 +728,12 @@ function McpCard() {
                           </button>
                           <button
                             className="btn-ghost text-xs"
+                            onClick={() => setViewingTools(s)}
+                          >
+                            工具
+                          </button>
+                          <button
+                            className="btn-ghost text-xs"
                             onClick={() => setEditing({ mode: "edit", server: s })}
                           >
                             编辑
@@ -763,7 +772,58 @@ function McpCard() {
           }}
         />
       )}
+      {viewingTools && (
+        <McpToolsModal server={viewingTools} onClose={() => setViewingTools(null)} />
+      )}
     </div>
+  );
+}
+
+function McpToolsModal({
+  server,
+  onClose,
+}: {
+  server: McpServerView;
+  onClose: () => void;
+}) {
+  const [tools, setTools] = useState<McpTool[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    fetchMcpTools(server.id)
+      .then((r) => {
+        setTools(r.tools);
+        if (r.error) setErr(r.error);
+      })
+      .catch((e) => setErr((e as ApiError).message));
+  }, [server.id]);
+  return (
+    <Modal open onClose={onClose} title={`${server.label} 的工具`} size="lg">
+      <div className="text-sm space-y-2">
+        {tools === null && !err && <div className="text-ink-500">加载中…</div>}
+        {err && <div className="text-rose-400 text-xs">上游返回:{err}</div>}
+        {tools && tools.length === 0 && !err && (
+          <div className="text-ink-500">该服务未暴露工具。</div>
+        )}
+        {tools && tools.length > 0 && (
+          <>
+            <div className="text-xs text-ink-500">
+              共 {tools.length} 个。工具名对外形如{" "}
+              <code>{server.id}__&lt;工具&gt;</code>。授权时可整类目或按单个工具勾选(在「用户」页)。
+            </div>
+            <div className="max-h-96 overflow-auto divide-y divide-ink-800/60">
+              {tools.map((t) => (
+                <div key={t.name} className="py-1.5">
+                  <div className="font-mono text-ink-200 text-xs">{t.name}</div>
+                  {t.description && (
+                    <div className="text-ink-500 text-xs mt-0.5 line-clamp-2">{t.description}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </Modal>
   );
 }
 
@@ -782,8 +842,53 @@ function McpServerModal({
   const [url, setUrl] = useState(edit?.url ?? "");
   const [headersText, setHeadersText] = useState("");
   const [enabled, setEnabled] = useState(edit?.enabled ?? true);
+  const [jsonText, setJsonText] = useState("");
+  const [jsonMsg, setJsonMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // Parse common MCP config JSON shapes and fill the form. Accepts a full
+  // { "mcpServers": { "<id>": {...} } } object, or a single server object.
+  function importFromJson() {
+    setJsonMsg(null);
+    let obj: any;
+    try {
+      obj = JSON.parse(jsonText);
+    } catch {
+      setJsonMsg("JSON 解析失败");
+      return;
+    }
+    let sid = "";
+    let s: any = obj;
+    if (obj && obj.mcpServers && typeof obj.mcpServers === "object") {
+      const keys = Object.keys(obj.mcpServers);
+      if (keys.length === 0) {
+        setJsonMsg("mcpServers 为空");
+        return;
+      }
+      sid = keys[0];
+      s = obj.mcpServers[sid];
+    } else if (obj && typeof obj === "object" && obj.id) {
+      sid = String(obj.id);
+    }
+    const rawUrl = s.url || s.serverUrl || s.base_url || s.baseUrl || s.href;
+    if (!rawUrl) {
+      setJsonMsg("未找到 url(支持 url / serverUrl / base_url)");
+      return;
+    }
+    const rawType = String(s.type || s.transport || "").toLowerCase();
+    const tp: McpTransport = rawType.includes("sse") ? "sse" : "streamable-http";
+    const hdrs = s.headers || s.env_http_headers || s.env || {};
+    if (!edit && sid) setId(sid);
+    if (sid) setLabel((l) => l || sid);
+    setUrl(rawUrl);
+    setTransport(tp);
+    if (hdrs && typeof hdrs === "object") {
+      const lines = Object.entries(hdrs).map(([k, v]) => `${k}: ${v}`);
+      if (lines.length) setHeadersText(lines.join("\n"));
+    }
+    setJsonMsg("已填充,请核对下方字段(尤其密钥)后保存");
+  }
 
   function parseHeaders(): Record<string, string> | undefined {
     const lines = headersText.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -821,6 +926,25 @@ function McpServerModal({
   return (
     <Modal open onClose={onClose} title={edit ? `编辑 MCP 服务 ${edit.id}` : "新增 MCP 服务"} size="lg">
       <div className="space-y-3 text-sm">
+        <details className="rounded-md border border-ink-800 p-2">
+          <summary className="cursor-pointer text-ink-400 hover:text-ink-200 text-xs">
+            📋 从 JSON 粘贴导入(mcpServers 配置 / 单个服务对象)
+          </summary>
+          <div className="mt-2 space-y-2">
+            <textarea
+              className="input w-full font-mono text-xs h-24"
+              placeholder={'{"mcpServers":{"gitlab":{"url":"http://.../mcp","headers":{"Private-Token":"glpat-xxx"}}}}'}
+              value={jsonText}
+              onChange={(e) => setJsonText(e.target.value)}
+            />
+            <div className="flex items-center gap-2">
+              <button className="btn-secondary text-xs" onClick={importFromJson} disabled={!jsonText.trim()}>
+                解析并填充
+              </button>
+              {jsonMsg && <span className="text-ink-400 text-xs">{jsonMsg}</span>}
+            </div>
+          </div>
+        </details>
         <div>
           <label className="block text-xs text-ink-500 mb-1">类目 id(小写字母/数字/-_,创建后不可改)</label>
           <input

@@ -14,7 +14,7 @@ import {
   KeyModelQuota,
   KeyRole,
 } from "../api/keys";
-import { fetchMcpServers, McpServerView } from "../api/mcp";
+import { fetchMcpServers, fetchMcpTools, McpServerView, McpTool } from "../api/mcp";
 import { ApiError } from "../api/client";
 import { Modal } from "../components/Modal";
 import { useAuth } from "../lib/auth";
@@ -859,39 +859,87 @@ function McpGrantPicker({
   selected: string[];
   onChange: (v: string[]) => void;
 }) {
-  function toggle(id: string) {
-    onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [toolsCache, setToolsCache] = useState<Record<string, McpTool[]>>({});
+
+  const has = (v: string) => selected.includes(v);
+  const set = (v: string, on: boolean) =>
+    onChange(on ? [...selected, v] : selected.filter((x) => x !== v));
+
+  function toggleWhole(id: string) {
+    const on = !has(id);
+    // granting whole category clears any tool-scoped entries for it
+    const cleaned = selected.filter((x) => x !== id && !x.startsWith(`${id}__`));
+    onChange(on ? [...cleaned, id] : cleaned);
   }
+
+  function expand(id: string) {
+    setExpanded((cur) => (cur === id ? null : id));
+    if (!toolsCache[id]) {
+      fetchMcpTools(id)
+        .then((r) => setToolsCache((c) => ({ ...c, [id]: r.tools })))
+        .catch(() => setToolsCache((c) => ({ ...c, [id]: [] })));
+    }
+  }
+
   return (
     <div>
       <label className="block text-xs text-ink-500 mb-1">
-        允许的 MCP 类目{" "}
-        <span className="text-ink-600">(默认拒绝:不勾选则该 key 看不到任何 MCP)</span>
+        允许的 MCP 类目 / 工具{" "}
+        <span className="text-ink-600">(默认拒绝:不勾选则看不到任何 MCP)</span>
       </label>
       {servers.length === 0 ? (
         <div className="text-xs text-ink-600">
           尚未注册 MCP 服务 —— 先到「设置 → MCP 服务」添加。
         </div>
       ) : (
-        <div className="flex flex-wrap gap-2">
+        <div className="space-y-1.5 border border-ink-800 rounded-md p-2">
           {servers.map((s) => {
-            const on = selected.includes(s.id);
+            const whole = has(s.id);
+            const toolGrants = selected.filter((x) => x.startsWith(`${s.id}__`));
+            const isOpen = expanded === s.id;
             return (
-              <button
-                key={s.id}
-                type="button"
-                onClick={() => toggle(s.id)}
-                className={`text-xs px-2 py-1 rounded border ${
-                  on
-                    ? "border-emerald-500 bg-emerald-900/40 text-emerald-200"
-                    : "border-ink-700 text-ink-400 hover:border-ink-500"
-                }`}
-                title={s.url}
-              >
-                {on ? "✓ " : ""}
-                {s.label}
-                <span className="text-ink-500 ml-1">({s.id})</span>
-              </button>
+              <div key={s.id}>
+                <div className="flex items-center gap-2 text-sm">
+                  <label className="flex items-center gap-1.5">
+                    <input type="checkbox" checked={whole} onChange={() => toggleWhole(s.id)} />
+                    <span className="text-ink-200">{s.label}</span>
+                    <span className="text-ink-500 text-xs">({s.id} · 整个类目)</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="text-ink-500 hover:text-ink-300 text-xs ml-auto"
+                    onClick={() => expand(s.id)}
+                  >
+                    {isOpen ? "收起工具" : `按工具${toolGrants.length ? ` (${toolGrants.length})` : ""}`}
+                  </button>
+                </div>
+                {isOpen && (
+                  <div className="ml-6 mt-1 max-h-48 overflow-auto space-y-0.5">
+                    {!toolsCache[s.id] && <div className="text-ink-600 text-xs">加载工具…</div>}
+                    {toolsCache[s.id]?.length === 0 && (
+                      <div className="text-ink-600 text-xs">无工具或上游不可用。</div>
+                    )}
+                    {toolsCache[s.id]?.map((t) => {
+                      const key = `${s.id}__${t.name}`;
+                      return (
+                        <label key={key} className="flex items-center gap-1.5 text-xs">
+                          <input
+                            type="checkbox"
+                            checked={whole || has(key)}
+                            disabled={whole}
+                            onChange={(e) => set(key, e.target.checked)}
+                          />
+                          <span className="font-mono text-ink-300">{t.name}</span>
+                        </label>
+                      );
+                    })}
+                    {whole && (
+                      <div className="text-ink-600 text-xs">(已授权整个类目,含全部工具)</div>
+                    )}
+                  </div>
+                )}
+              </div>
             );
           })}
         </div>

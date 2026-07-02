@@ -15,13 +15,21 @@ function fakeClient(tools: string[]) {
   };
 }
 
-function ctx(allowedIds: string[]): GatewayCtx {
+// Build a ctx from a grant list (entries: "gitlab" whole, or "gitlab__tool").
+function ctx(grants: string[]): GatewayCtx {
   const clients: Record<string, any> = {
     gitlab: fakeClient(["create_issue", "list_issues"]),
     jira: fakeClient(["search"]),
   };
+  const enabled = Object.keys(clients);
+  const allowedServerIds = enabled.filter(
+    (id) => grants.includes(id) || grants.some((g) => g.startsWith(`${id}__`)),
+  );
   return {
-    allowedIds,
+    allowedServerIds,
+    isToolAllowed: (sid, tool) =>
+      grants.includes(sid) || grants.includes(`${sid}__${tool}`),
+    isServerFull: (sid) => grants.includes(sid),
     controller: { getClient: (id: string) => clients[id] } as any,
   };
 }
@@ -72,6 +80,25 @@ test("tools/call on unauthorized category → JSON-RPC error", async () => {
   );
   assert.ok(r.error);
   assert.match(r.error.message, /unauthorized|unknown/);
+});
+
+test("per-tool grant: only the granted tool is listed + callable", async () => {
+  const c = ctx(["gitlab__list_issues"]); // tool-scoped, not whole category
+  const list: any = await handleMcpRpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, c);
+  assert.deepEqual(list.result.tools.map((t: any) => t.name), ["gitlab__list_issues"]);
+  // granted tool callable
+  const okCall: any = await handleMcpRpc(
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "gitlab__list_issues" } },
+    c,
+  );
+  assert.ok(okCall.result);
+  // sibling tool (same category) NOT granted → error
+  const bad: any = await handleMcpRpc(
+    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "gitlab__create_issue" } },
+    c,
+  );
+  assert.ok(bad.error);
+  assert.match(bad.error.message, /unauthorized/);
 });
 
 test("onToolCall metering hook fires with (serverId, tool, ok)", async () => {

@@ -21,9 +21,14 @@ export interface JsonRpcRequest {
 }
 
 export interface GatewayCtx {
-  allowedIds: string[];
+  /** Categories to fan out to (this key has some grant on them). */
+  allowedServerIds: string[];
+  /** Per-tool gate (whole-category or tool-scoped grant). */
+  isToolAllowed: (serverId: string, tool: string) => boolean;
+  /** Whole-category gate (prompts/resources are category-scoped). */
+  isServerFull: (serverId: string) => boolean;
   controller: McpController;
-  /** Called once per successful tools/call for usage/metering (P3). */
+  /** Called once per successful tools/call for usage/metering. */
   onToolCall?: (serverId: string, tool: string, ok: boolean) => void;
 }
 
@@ -62,36 +67,42 @@ export async function handleMcpRpc(
     case "tools/list":
       return ok({
         tools: await aggregate(ctx, async (sid, client) =>
-          (await client.listTools()).map((t: any) => ({
-            ...t,
-            name: nsName(sid, t.name),
-          })),
+          (await client.listTools())
+            .filter((t: any) => ctx.isToolAllowed(sid, t.name))
+            .map((t: any) => ({ ...t, name: nsName(sid, t.name) })),
         ),
       });
 
     case "prompts/list":
       return ok({
         prompts: await aggregate(ctx, async (sid, client) =>
-          (await client.listPrompts()).map((p: any) => ({
-            ...p,
-            name: nsName(sid, p.name),
-          })),
+          ctx.isServerFull(sid)
+            ? (await client.listPrompts()).map((p: any) => ({
+                ...p,
+                name: nsName(sid, p.name),
+              }))
+            : [],
         ),
       });
 
     case "resources/list":
       return ok({
         resources: await aggregate(ctx, async (sid, client) =>
-          (await client.listResources()).map((r: any) => ({
-            ...r,
-            uri: nsName(sid, r.uri),
-          })),
+          ctx.isServerFull(sid)
+            ? (await client.listResources()).map((r: any) => ({
+                ...r,
+                uri: nsName(sid, r.uri),
+              }))
+            : [],
         ),
       });
 
     case "tools/call": {
       const route = resolve(ctx, params.name);
       if ("error" in route) return err(-32602, route.error);
+      if (!ctx.isToolAllowed(route.serverId, route.name)) {
+        return err(-32602, `unauthorized tool: ${params.name}`);
+      }
       try {
         const result = await route.client.callTool(route.name, params.arguments);
         ctx.onToolCall?.(route.serverId, route.name, true);
@@ -105,6 +116,9 @@ export async function handleMcpRpc(
     case "prompts/get": {
       const route = resolve(ctx, params.name);
       if ("error" in route) return err(-32602, route.error);
+      if (!ctx.isServerFull(route.serverId)) {
+        return err(-32602, `unauthorized prompt: ${params.name}`);
+      }
       try {
         return ok(await route.client.getPrompt(route.name, params.arguments));
       } catch (e: any) {
@@ -115,6 +129,9 @@ export async function handleMcpRpc(
     case "resources/read": {
       const route = resolve(ctx, params.uri);
       if ("error" in route) return err(-32602, route.error);
+      if (!ctx.isServerFull(route.serverId)) {
+        return err(-32602, `unauthorized resource: ${params.uri}`);
+      }
       try {
         return ok(await route.client.readResource(route.name));
       } catch (e: any) {
@@ -135,7 +152,7 @@ function resolve(ctx: GatewayCtx, qualified: unknown): Route {
   if (typeof qualified !== "string") return { error: "missing name/uri" };
   const parsed = parseNs(qualified);
   if (!parsed) return { error: `unqualified name: ${qualified}` };
-  if (!ctx.allowedIds.includes(parsed.serverId)) {
+  if (!ctx.allowedServerIds.includes(parsed.serverId)) {
     return { error: `unauthorized or unknown category: ${parsed.serverId}` };
   }
   const client = ctx.controller.getClient(parsed.serverId);
@@ -150,7 +167,7 @@ async function aggregate<T>(
   fn: (serverId: string, client: NonNullable<ReturnType<McpController["getClient"]>>) => Promise<T[]>,
 ): Promise<T[]> {
   const out: T[] = [];
-  for (const sid of ctx.allowedIds) {
+  for (const sid of ctx.allowedServerIds) {
     const client = ctx.controller.getClient(sid);
     if (!client) continue;
     try {
