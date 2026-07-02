@@ -209,6 +209,8 @@ export interface LoggingConfig {
     policy: boolean;
     /** 客户端断开/坏请求 — 默认不记 */
     client: boolean;
+    /** MCP 网关工具调用(审计留痕)— 默认记,不受 capture=failures 限制 */
+    mcp: boolean;
   };
   retention: {
     /** Delete records older than this many days (0 = no age limit). */
@@ -232,6 +234,7 @@ export const DEFAULT_LOGGING_CONFIG: LoggingConfig = {
     service: true, // 本服务报错 — 记
     policy: false, // 策略拒绝 — 默认不记(非真错)
     client: false, // 客户端断开/坏请求 — 默认不记(非真错)
+    mcp: true, // MCP 工具调用 — 默认记(审计留痕)
   },
   retention: {
     "max-age-days": 14,

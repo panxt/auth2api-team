@@ -329,6 +329,52 @@ test("RequestLogger: capture=failures skips successes; snippet truncates; redact
   }
 });
 
+test("RequestLogger: MCP tool calls are logged as 'mcp' even under capture=failures", () => {
+  const file = dbPath();
+  try {
+    const s = new SqliteStorage(file);
+    const logger = new RequestLogger(s.requestLog, s.settings, { capture: "failures" });
+    const base = {
+      ts: new Date().toISOString(),
+      apiKeyHash: "h".repeat(64),
+      ip: "1",
+      model: null,
+      provider: null,
+      accountEmail: null,
+      latencyMs: 0,
+      inputTokens: null,
+      outputTokens: null,
+      requestId: null,
+    };
+    // A successful MCP tool call — would be dropped as "ok" under capture=failures,
+    // but MCP endpoints bypass that and are tagged "mcp".
+    logger.record({
+      ...base,
+      endpoint: "MCP gitlab/list_projects",
+      status: "success",
+      statusCode: 200,
+      failureKind: null,
+      category: "mcp",
+    });
+    // A plain successful model call is still skipped.
+    logger.record({
+      ...base,
+      endpoint: "POST /v1/messages",
+      status: "success",
+      statusCode: 200,
+      failureKind: null,
+    });
+    const all = s.requestLog.query({ limit: 100 }).rows;
+    assert.equal(all.length, 1);
+    assert.equal(all[0].category, "mcp");
+    assert.equal(all[0].endpoint, "MCP gitlab/list_projects");
+    // filterable by the mcp category
+    assert.equal(s.requestLog.query({ limit: 100, category: "mcp" }).rows.length, 1);
+  } finally {
+    fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  }
+});
+
 test("RequestLogger: category gate drops policy/client, keeps upstream/service", () => {
   const file = dbPath();
   try {

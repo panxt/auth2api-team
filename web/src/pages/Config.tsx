@@ -1121,6 +1121,7 @@ function LoggingCard() {
                 ["service", "本服务报错"],
                 ["policy", "策略拒绝(配额/白名单/限流)"],
                 ["client", "客户端断开/坏请求"],
+                ["mcp", "MCP 工具调用(审计留痕)"],
               ] as const).map(([k, txt]) => (
                 <label key={k} className="flex items-center gap-1.5">
                   <input

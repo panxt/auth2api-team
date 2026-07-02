@@ -23,6 +23,7 @@ const CAT_META: Record<LogCategory, { label: string; cls: string }> = {
   policy: { label: "策略", cls: "badge-muted" },
   client: { label: "客户端", cls: "badge-muted" },
   ok: { label: "成功", cls: "badge-ok" },
+  mcp: { label: "MCP", cls: "badge-ok" },
 };
 
 export function Logs() {
@@ -160,6 +161,7 @@ export function Logs() {
             <option value="service">本服务</option>
             <option value="policy">策略</option>
             <option value="client">客户端</option>
+            <option value="mcp">MCP</option>
           </select>
         </div>
         {seeAll && (
