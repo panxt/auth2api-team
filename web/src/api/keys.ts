@@ -63,6 +63,7 @@ export interface ManagedKeyView {
   "rate-limit": KeyRateLimit | null;
   "allowed-models": string[] | null;
   "denied-models": string[] | null;
+  "allowed-mcp": string[] | null;
   source: "managed" | "config";
 }
 
@@ -91,6 +92,7 @@ export interface CreateKeyInput {
   "rate-limit"?: KeyRateLimit;
   "allowed-models"?: string[];
   "denied-models"?: string[];
+  "allowed-mcp"?: string[];
 }
 
 export type PatchKeyInput = CreateKeyInput;

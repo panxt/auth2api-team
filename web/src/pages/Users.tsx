@@ -14,6 +14,7 @@ import {
   KeyModelQuota,
   KeyRole,
 } from "../api/keys";
+import { fetchMcpServers, McpServerView } from "../api/mcp";
 import { ApiError } from "../api/client";
 import { Modal } from "../components/Modal";
 import { useAuth } from "../lib/auth";
@@ -25,6 +26,7 @@ interface MergedRow extends UsageKey {
   role: KeyRole | null;       // from managed view; null for config-only
   allowedModels: string[] | null; // model allowlist (managed keys only)
   deniedModels: string[] | null;  // model denylist (managed keys only)
+  allowedMcp: string[] | null;    // MCP category grants (managed keys only)
 }
 
 function fmtUSD(n: number | undefined): string {
@@ -46,6 +48,7 @@ export function Users() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [models, setModels] = useState<string[]>([]); // for the allowlist picker
+  const [mcpServers, setMcpServers] = useState<McpServerView[]>([]); // MCP categories
 
   const [showCreate, setShowCreate] = useState(false);
   const [editing, setEditing] = useState<MergedRow | null>(null);
@@ -76,6 +79,7 @@ export function Users() {
           role: m ? m.role : null,
           allowedModels: m ? m["allowed-models"] : null,
           deniedModels: m ? m["denied-models"] : null,
+          allowedMcp: m ? m["allowed-mcp"] : null,
         };
       });
       setRows(merged);
@@ -91,12 +95,16 @@ export function Users() {
     load();
   }, [load]);
 
-  // Fetch the available model list once (admin only) for the allowlist picker.
+  // Fetch the available model list + registered MCP categories once (admin
+  // only) for the allowlist / MCP-grant pickers.
   useEffect(() => {
     if (!isAdmin) return;
     listModels()
       .then((r) => setModels(r.data.map((m) => m.id)))
       .catch(() => setModels([]));
+    fetchMcpServers()
+      .then((r) => setMcpServers(r.servers))
+      .catch(() => setMcpServers([]));
   }, [isAdmin]);
 
   async function onToggleEnabled(row: MergedRow) {
@@ -308,6 +316,7 @@ export function Users() {
       <CreateKeyModal
         open={showCreate}
         models={models}
+        mcpServers={mcpServers}
         onClose={() => setShowCreate(false)}
         onCreated={(resp) => {
           setShowCreate(false);
@@ -319,6 +328,7 @@ export function Users() {
       <EditKeyModal
         row={editing}
         models={models}
+        mcpServers={mcpServers}
         onClose={() => setEditing(null)}
         onSaved={() => {
           setEditing(null);
@@ -398,11 +408,13 @@ export function Users() {
 function CreateKeyModal({
   open,
   models,
+  mcpServers,
   onClose,
   onCreated,
 }: {
   open: boolean;
   models: string[];
+  mcpServers: McpServerView[];
   onClose: () => void;
   onCreated: (resp: CreateKeyResponse) => void;
 }) {
@@ -412,6 +424,7 @@ function CreateKeyModal({
   const [quota, setQuota] = useState<KeyQuota>({});
   const [allowedModels, setAllowedModels] = useState<string[]>([]);
   const [deniedModels, setDeniedModels] = useState<string[]>([]);
+  const [allowedMcp, setAllowedMcp] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -422,6 +435,7 @@ function CreateKeyModal({
     setQuota({});
     setAllowedModels([]);
     setDeniedModels([]);
+    setAllowedMcp([]);
     setErr(null);
   }
 
@@ -435,6 +449,7 @@ function CreateKeyModal({
       if (cleaned) input.quota = cleaned;
       if (allowedModels.length > 0) input["allowed-models"] = allowedModels;
       if (deniedModels.length > 0) input["denied-models"] = deniedModels;
+      if (allowedMcp.length > 0) input["allowed-mcp"] = allowedMcp;
       const resp = await createKey(input);
       reset();
       onCreated(resp);
@@ -503,6 +518,7 @@ function CreateKeyModal({
           hint="(列出的一律 403,优先级高于白名单)"
           accent="rose"
         />
+        <McpGrantPicker servers={mcpServers} selected={allowedMcp} onChange={setAllowedMcp} />
         {err && <div className="badge-err px-3 py-2 block">{err}</div>}
         <div className="flex justify-end gap-2 pt-2">
           <button
@@ -532,11 +548,13 @@ function CreateKeyModal({
 function EditKeyModal({
   row,
   models,
+  mcpServers,
   onClose,
   onSaved,
 }: {
   row: MergedRow | null;
   models: string[];
+  mcpServers: McpServerView[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -546,6 +564,7 @@ function EditKeyModal({
   const [quota, setQuota] = useState<KeyQuota>({});
   const [allowedModels, setAllowedModels] = useState<string[]>([]);
   const [deniedModels, setDeniedModels] = useState<string[]>([]);
+  const [allowedMcp, setAllowedMcp] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -557,6 +576,7 @@ function EditKeyModal({
       setQuota(row.quota ?? {});
       setAllowedModels(row.allowedModels ?? []);
       setDeniedModels(row.deniedModels ?? []);
+      setAllowedMcp(row.allowedMcp ?? []);
       setErr(null);
     }
   }, [row]);
@@ -577,6 +597,7 @@ function EditKeyModal({
         // Always send: an empty array clears the list.
         "allowed-models": allowedModels,
         "denied-models": deniedModels,
+        "allowed-mcp": allowedMcp,
       });
       onSaved();
     } catch (e) {
@@ -631,6 +652,7 @@ function EditKeyModal({
           hint="(列出的一律 403,优先级高于白名单)"
           accent="rose"
         />
+        <McpGrantPicker servers={mcpServers} selected={allowedMcp} onChange={setAllowedMcp} />
         {err && <div className="badge-err px-3 py-2 block">{err}</div>}
         <div className="flex justify-end gap-2 pt-2">
           <button className="btn-secondary" onClick={onClose}>
@@ -822,6 +844,58 @@ function QuotaEditor({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ─── MCP 类目授权(默认拒绝)──────────────────────────────── */
+
+function McpGrantPicker({
+  servers,
+  selected,
+  onChange,
+}: {
+  servers: McpServerView[];
+  selected: string[];
+  onChange: (v: string[]) => void;
+}) {
+  function toggle(id: string) {
+    onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+  }
+  return (
+    <div>
+      <label className="block text-xs text-ink-500 mb-1">
+        允许的 MCP 类目{" "}
+        <span className="text-ink-600">(默认拒绝:不勾选则该 key 看不到任何 MCP)</span>
+      </label>
+      {servers.length === 0 ? (
+        <div className="text-xs text-ink-600">
+          尚未注册 MCP 服务 —— 先到「设置 → MCP 服务」添加。
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {servers.map((s) => {
+            const on = selected.includes(s.id);
+            return (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => toggle(s.id)}
+                className={`text-xs px-2 py-1 rounded border ${
+                  on
+                    ? "border-emerald-500 bg-emerald-900/40 text-emerald-200"
+                    : "border-ink-700 text-ink-400 hover:border-ink-500"
+                }`}
+                title={s.url}
+              >
+                {on ? "✓ " : ""}
+                {s.label}
+                <span className="text-ink-500 ml-1">({s.id})</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
