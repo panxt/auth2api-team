@@ -548,7 +548,7 @@ export function createServer(
       const cursor = Number.isFinite(cursorRaw) ? cursorRaw : undefined;
       const str = (v: unknown) =>
         typeof v === "string" && v.length ? v : undefined;
-      const validCats = ["upstream", "service", "policy", "client", "ok"];
+      const validCats = ["upstream", "service", "policy", "client", "ok", "mcp"];
 
       // hash → human name (label || owner). Keys are few; rebuild per request
       // so renames/new keys reflect immediately.
@@ -768,7 +768,7 @@ export function createServer(
         status: input.status,
         statusCode: input.statusCode,
         failureKind: input.failureKind,
-        category: ok ? "ok" : "upstream",
+        category: "mcp", // logger tags MCP by endpoint regardless; explicit here
         latencyMs: 0,
         inputTokens: null,
         outputTokens: null,
@@ -852,6 +852,9 @@ export function createServer(
         quota: q ?? null,
         consumed,
         usage,
+        // Month-to-date MCP tool-call counts per upstream server (call-count
+        // metering; no tokens). Empty object when the key made no MCP calls.
+        mcp: quotaTracker ? quotaTracker.mcpConsumed(hashApiKey(entry.key)) : {},
       });
     }
     res.json({
@@ -927,6 +930,17 @@ export function createServer(
     app.patch("/admin/keys/:id", requireAdmin, (req, res) => {
       try {
         res.json(store.update(req.params.id, req.body || {}));
+      } catch (err) {
+        handleKeyError(err, res);
+      }
+    });
+
+    // POST /admin/keys/:id/rotate — admin reissues ANY managed key with a fresh
+    // secret (same label/owner/role/quota/grants); old secret dies immediately.
+    // Returns the new raw key once. For "suspected leak" resets by an operator.
+    app.post("/admin/keys/:id/rotate", requireAdmin, (req, res) => {
+      try {
+        res.json(keyCreateResponse(store.rotate(req.params.id)));
       } catch (err) {
         handleKeyError(err, res);
       }
