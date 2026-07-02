@@ -1,6 +1,6 @@
 import { get, put } from "./client";
 
-export type LogCategory = "upstream" | "service" | "policy" | "client" | "ok";
+export type LogCategory = "upstream" | "service" | "policy" | "client" | "ok" | "mcp";
 
 export interface LogRow {
   id: number;
@@ -77,6 +77,7 @@ export interface LoggingConfig {
     service: boolean;
     policy: boolean;
     client: boolean;
+    mcp: boolean;
   };
   retention: {
     "max-age-days": number;

@@ -33,6 +33,13 @@ import { loadAllTokens, saveToken } from "./auth/token-storage";
 import { RequestLogger } from "./logging/logger";
 import { RoutingController } from "./accounts/routing";
 import { PrewarmScheduler } from "./accounts/prewarm";
+import { McpController, McpError } from "./mcp/registry";
+import { handleMcpRpc } from "./mcp/gateway";
+import {
+  mcpFanoutServerIds,
+  isMcpToolAllowed,
+  isMcpServerFull,
+} from "./usage/mcp-access";
 import { LoggingConfig, RoutingConfig, PrewarmConfig } from "./config";
 
 // Simple in-memory rate limiter per IP
@@ -86,6 +93,7 @@ export function createServer(
   requestLogger?: RequestLogger,
   routingController?: RoutingController,
   prewarmScheduler?: PrewarmScheduler,
+  mcpController?: McpController,
 ): express.Application {
   const app = express();
   // Stats slots are seeded whenever any subsystem needs them: the recorder
@@ -540,7 +548,7 @@ export function createServer(
       const cursor = Number.isFinite(cursorRaw) ? cursorRaw : undefined;
       const str = (v: unknown) =>
         typeof v === "string" && v.length ? v : undefined;
-      const validCats = ["upstream", "service", "policy", "client", "ok"];
+      const validCats = ["upstream", "service", "policy", "client", "ok", "mcp"];
 
       // hash → human name (label || owner). Keys are few; rebuild per request
       // so renames/new keys reflect immediately.
@@ -657,6 +665,161 @@ export function createServer(
     });
   }
 
+  // ── MCP aggregation gateway registry (page-managed, admin-only) ──
+  if (mcpController) {
+    const ctrl = mcpController;
+    const handleMcpError = (err: unknown, res: express.Response) => {
+      if (err instanceof McpError) {
+        const status =
+          err.code === "not_found" ? 404 : err.code === "conflict" ? 409 : 400;
+        res.status(status).json({ error: { message: err.message, type: err.code } });
+        return;
+      }
+      console.error("[mcp] unexpected error:", err);
+      res.status(500).json({ error: { message: "internal error" } });
+    };
+
+    // Read: admin + auditor (header values are never returned).
+    app.get("/admin/mcp/servers", requireReadAll, (_req, res) => {
+      res.json({ servers: ctrl.list(), generated_at: new Date().toISOString() });
+    });
+    // Mutations: admin-only. Persisted to SettingsStore + hot-reconnect.
+    app.post("/admin/mcp/servers", requireAdmin, (req, res) => {
+      try {
+        res.status(201).json(ctrl.create((req.body || {}) as any));
+      } catch (err) {
+        handleMcpError(err, res);
+      }
+    });
+    app.put("/admin/mcp/servers/:id", requireAdmin, (req, res) => {
+      try {
+        res.json(ctrl.update(req.params.id, (req.body || {}) as any));
+      } catch (err) {
+        handleMcpError(err, res);
+      }
+    });
+    app.delete("/admin/mcp/servers/:id", requireAdmin, (req, res) => {
+      try {
+        ctrl.remove(req.params.id);
+        res.status(204).end();
+      } catch (err) {
+        handleMcpError(err, res);
+      }
+    });
+    app.post("/admin/mcp/servers/:id/probe", requireAdmin, async (req, res) => {
+      try {
+        res.json(await ctrl.probe(req.params.id));
+      } catch (err) {
+        handleMcpError(err, res);
+      }
+    });
+    // Tool list for a server (admin+auditor) — powers the UI tool view + the
+    // per-tool grant picker.
+    app.get("/admin/mcp/servers/:id/tools", requireReadAll, async (req, res) => {
+      try {
+        res.json({ tools: await ctrl.tools(req.params.id) });
+      } catch (err) {
+        if (err instanceof McpError) {
+          handleMcpError(err, res);
+        } else {
+          // upstream unreachable → 200 with empty + reason, so UI can show it
+          res.json({ tools: [], error: (err as any)?.message || String(err) });
+        }
+      }
+    });
+
+    // Meter one MCP tool call: feed stats + quota + request log, reusing the
+    // /v1 event shape (endpoint = "MCP <server>/<tool>", no tokens).
+    const recordMcpCall = (
+      res: express.Response,
+      serverId: string,
+      tool: string,
+      ok: boolean,
+    ) => {
+      const entry = res.locals.apiKey as ApiKeyEntry | undefined;
+      if (!entry) return;
+      const req = res.req;
+      const input = {
+        apiKeyHash: hashApiKey(entry.key),
+        ip: req.ip || req.socket?.remoteAddress || "unknown",
+        ua: (req.headers["user-agent"] as string) || "",
+        endpoint: `MCP ${serverId}/${tool}`,
+        model: null,
+        provider: null,
+        accountEmail: null,
+        status: (ok ? "success" : "failure") as "success" | "failure",
+        failureKind: ok ? null : "mcp_error",
+        statusCode: ok ? 200 : 502,
+        latencyMs: 0,
+        usage: null,
+      };
+      const ev = statsRecorder
+        ? statsRecorder.record(input)
+        : { v: 1 as const, ts: new Date().toISOString(), ...input };
+      quotaTracker?.record(ev);
+      requestLogger?.record({
+        ts: ev.ts,
+        apiKeyHash: input.apiKeyHash,
+        ip: input.ip,
+        endpoint: input.endpoint,
+        model: null,
+        provider: null,
+        accountEmail: null,
+        status: input.status,
+        statusCode: input.statusCode,
+        failureKind: input.failureKind,
+        category: "mcp", // logger tags MCP by endpoint regardless; explicit here
+        latencyMs: 0,
+        inputTokens: null,
+        outputTokens: null,
+      });
+    };
+
+    // ── Client-facing unified MCP endpoint (Streamable HTTP, stateless JSON) ──
+    // Any valid key; per-key default-deny filtering by allowed-mcp; per-key
+    // rate limit reused. GET/DELETE unsupported (no server-initiated stream).
+    app.use("/mcp", requireApiKey);
+    app.use("/mcp", enforceKeyRateLimit);
+    app.post("/mcp", async (req, res) => {
+      const entry = res.locals.apiKey as ApiKeyEntry | undefined;
+      const gctx = {
+        allowedServerIds: mcpFanoutServerIds(entry, ctrl.enabledIds()),
+        isToolAllowed: (sid: string, tool: string) => isMcpToolAllowed(entry, sid, tool),
+        isServerFull: (sid: string) => isMcpServerFull(entry, sid),
+        controller: ctrl,
+        onToolCall: (serverId: string, tool: string, ok: boolean) =>
+          recordMcpCall(res, serverId, tool, ok),
+      };
+      try {
+        const body = req.body;
+        if (Array.isArray(body)) {
+          const out = [];
+          for (const r of body) {
+            const resp = await handleMcpRpc(r, gctx);
+            if (resp) out.push(resp);
+          }
+          res.json(out);
+        } else {
+          const resp = await handleMcpRpc(body || {}, gctx);
+          if (resp === null) res.status(202).end();
+          else res.json(resp);
+        }
+      } catch (e: any) {
+        res.status(500).json({
+          jsonrpc: "2.0",
+          id: (req.body && req.body.id) ?? null,
+          error: { code: -32603, message: e?.message || "internal error" },
+        });
+      }
+    });
+    app.get("/mcp", (_req, res) =>
+      res
+        .status(405)
+        .json({ error: { message: "SSE stream not supported (stateless JSON mode)" } }),
+    );
+    app.delete("/mcp", (_req, res) => res.status(204).end());
+  }
+
   // GET /admin/usage/keys — month-to-date consumption per API key vs its
   // quota. An admin key sees every key; a non-admin key sees only itself.
   // Raw keys are never returned — only the sha256 short prefix, plus the
@@ -689,6 +852,9 @@ export function createServer(
         quota: q ?? null,
         consumed,
         usage,
+        // Month-to-date MCP tool-call counts per upstream server (call-count
+        // metering; no tokens). Empty object when the key made no MCP calls.
+        mcp: quotaTracker ? quotaTracker.mcpConsumed(hashApiKey(entry.key)) : {},
       });
     }
     res.json({
@@ -764,6 +930,17 @@ export function createServer(
     app.patch("/admin/keys/:id", requireAdmin, (req, res) => {
       try {
         res.json(store.update(req.params.id, req.body || {}));
+      } catch (err) {
+        handleKeyError(err, res);
+      }
+    });
+
+    // POST /admin/keys/:id/rotate — admin reissues ANY managed key with a fresh
+    // secret (same label/owner/role/quota/grants); old secret dies immediately.
+    // Returns the new raw key once. For "suspected leak" resets by an operator.
+    app.post("/admin/keys/:id/rotate", requireAdmin, (req, res) => {
+      try {
+        res.json(keyCreateResponse(store.rotate(req.params.id)));
       } catch (err) {
         handleKeyError(err, res);
       }

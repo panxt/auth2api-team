@@ -134,6 +134,12 @@ export interface ApiKeyEntry {
    * Use this for "allow everything except X". Same alias-insensitive matching.
    */
   "denied-models"?: string[];
+  /**
+   * MCP 类目授权(聚合网关)。**默认拒绝**:未设 / 空数组 = 看不到任何上游 MCP。
+   * 值为已注册的 MCP server id。与 allowed-models「空=全允许」相反(MCP 工具多为
+   * 写操作,默认拒绝更安全)。
+   */
+  "allowed-mcp"?: string[];
 }
 
 /** Raw object form of an api-key entry as parsed from YAML (before defaults). */
@@ -148,6 +154,7 @@ interface RawApiKeyEntry {
   "rate-limit"?: ApiKeyRateLimit;
   "allowed-models"?: string[];
   "denied-models"?: string[];
+  "allowed-mcp"?: string[];
 }
 
 /** Effective role of a key, with back-compat: an explicit role wins, else
@@ -202,6 +209,8 @@ export interface LoggingConfig {
     policy: boolean;
     /** 客户端断开/坏请求 — 默认不记 */
     client: boolean;
+    /** MCP 网关工具调用(审计留痕)— 默认记,不受 capture=failures 限制 */
+    mcp: boolean;
   };
   retention: {
     /** Delete records older than this many days (0 = no age limit). */
@@ -225,6 +234,7 @@ export const DEFAULT_LOGGING_CONFIG: LoggingConfig = {
     service: true, // 本服务报错 — 记
     policy: false, // 策略拒绝 — 默认不记(非真错)
     client: false, // 客户端断开/坏请求 — 默认不记(非真错)
+    mcp: true, // MCP 工具调用 — 默认记(审计留痕)
   },
   retention: {
     "max-age-days": 14,
@@ -442,6 +452,7 @@ export function normalizeApiKeys(
         "rate-limit": item["rate-limit"],
         "allowed-models": item["allowed-models"],
         "denied-models": item["denied-models"],
+        "allowed-mcp": item["allowed-mcp"],
       });
     } else {
       // Don't silently lose a misconfigured entry — a dropped key would just

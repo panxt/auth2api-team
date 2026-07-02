@@ -129,6 +129,55 @@ export function Self() {
         {err && <div className="text-rose-400 text-sm mt-2">{err}</div>}
       </div>
 
+      {/* MCP 调用(按次数,不计 token / 成本;按不同 MCP 分开)*/}
+      {mine && (
+        <div className="card mb-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm font-medium">MCP 调用(本月)</div>
+            <div className="text-xs text-ink-500">按调用次数计</div>
+          </div>
+          {(() => {
+            const mcp = mine.mcp ?? {};
+            const entries = Object.entries(mcp).sort((a, b) => b[1] - a[1]);
+            const total = entries.reduce((s, [, n]) => s + n, 0);
+            if (entries.length === 0) {
+              return (
+                <div className="text-ink-500 text-sm">
+                  本月暂无 MCP 调用。授权的 MCP 类目 / 工具经 /mcp 端点调用后在此按次数统计。
+                </div>
+              );
+            }
+            return (
+              <div className="space-y-2">
+                <div className="flex items-baseline gap-2">
+                  <span className="text-2xl font-bold text-cyan-300">{total}</span>
+                  <span className="text-xs text-ink-500">总调用次数</span>
+                </div>
+                <div className="divide-y divide-ink-800">
+                  {entries.map(([server, n]) => {
+                    const pct = total ? (n / total) * 100 : 0;
+                    return (
+                      <div key={server} className="flex items-center gap-3 py-1.5 text-sm">
+                        <span className="font-mono text-ink-200 w-32 truncate">{server}</span>
+                        <div className="h-2 bg-ink-800 rounded-full overflow-hidden flex-1">
+                          <div
+                            className="h-full bg-cyan-500"
+                            style={{ width: `${Math.min(100, pct)}%` }}
+                          />
+                        </div>
+                        <span className="text-cyan-300 tabular-nums w-16 text-right">
+                          {n} 次
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
       {/* 重置 key */}
       <div className="card">
         <div className="text-sm font-medium mb-1">重置我的 key</div>

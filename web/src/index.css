@@ -2,8 +2,40 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Neutral ramp ("ink") as CSS variables ──────────────────────────────
+   Light mode is the default (:root); dark mode overrides under `.dark`
+   (Tailwind darkMode:"class"). In LIGHT mode the ramp is reversed + mint-
+   tinted so that 950 = page bg (#F7FBFA), 900 = card (#FFFFFF), 700/800 =
+   borders, 500 = 浅文字 (#7C8B88), 100/200 = 文字 (#2E3A38). Every existing
+   `ink-*` utility re-themes automatically — no per-component edits. */
 :root {
-  color-scheme: dark light;
+  color-scheme: light;
+  --ink-50: 30 39 38; /* #1E2726 strongest text */
+  --ink-100: 46 58 56; /* #2E3A38 文字 */
+  --ink-200: 46 58 56; /* #2E3A38 */
+  --ink-300: 69 81 79; /* #45514F */
+  --ink-400: 106 122 119; /* #6A7A77 secondary text */
+  --ink-500: 124 139 136; /* #7C8B88 浅文字 */
+  --ink-600: 184 206 200; /* #B8CEC8 strong border / icon */
+  --ink-700: 215 231 226; /* #D7E7E2 border */
+  --ink-800: 237 245 242; /* #EDF5F2 subtle bg / hover */
+  --ink-900: 255 255 255; /* #FFFFFF card */
+  --ink-950: 247 251 250; /* #F7FBFA page bg */
+}
+
+.dark {
+  color-scheme: dark;
+  --ink-50: 250 250 250;
+  --ink-100: 244 244 245;
+  --ink-200: 228 228 231;
+  --ink-300: 212 212 216;
+  --ink-400: 161 161 170;
+  --ink-500: 113 113 122;
+  --ink-600: 82 82 91;
+  --ink-700: 63 63 70;
+  --ink-800: 39 39 42;
+  --ink-900: 24 24 27;
+  --ink-950: 9 9 11;
 }
 
 body {
@@ -40,14 +72,18 @@ body {
            focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500;
   }
   .card {
-    @apply rounded-lg border border-ink-800 bg-ink-900/50 p-5;
+    @apply rounded-lg border border-ink-800 bg-ink-900/50 dark:bg-ink-900/50 p-5;
+  }
+  /* Light mode: solid white cards on the mint-paper page for clear separation. */
+  :root:not(.dark) .card {
+    @apply bg-ink-900 shadow-sm;
   }
   .badge {
     @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium;
   }
-  .badge-ok { @apply badge bg-emerald-900/60 text-emerald-300; }
-  .badge-warn { @apply badge bg-amber-900/60 text-amber-300; }
-  .badge-err { @apply badge bg-rose-900/60 text-rose-300; }
+  .badge-ok { @apply badge bg-emerald-500/15 text-emerald-700 dark:text-emerald-300; }
+  .badge-warn { @apply badge bg-amber-500/15 text-amber-700 dark:text-amber-300; }
+  .badge-err { @apply badge bg-rose-500/15 text-rose-700 dark:text-rose-300; }
   .badge-muted { @apply badge bg-ink-800 text-ink-400; }
 }
 

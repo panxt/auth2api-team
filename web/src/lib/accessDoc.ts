@@ -220,6 +220,23 @@ print(resp.choices[0].message.content)
 
 ---
 
+## 🧩 MCP 工具(聚合网关)
+
+auth2api 还暴露一个**统一 MCP 端点**,聚合团队注册的多个 MCP 服务(GitLab、Jira…)。你用同一个 key 接入,能用到的「类目」由管理员按 key 授权(**默认拒绝**,需管理员勾选)。
+
+- MCP 端点:\`${base}/mcp\`(Streamable HTTP)
+- 鉴权:\`Authorization: Bearer ${key}\`
+
+**Claude Code 添加**:
+\`\`\`bash
+claude mcp add --transport http auth2api ${base}/mcp \\
+  --header "Authorization: Bearer ${key}"
+\`\`\`
+
+**通用客户端**:MCP 类型选 Streamable HTTP,URL 填 \`${base}/mcp\`,加头 \`Authorization: Bearer ${key}\`。工具名形如 \`<类目>__<工具>\`(如 \`gitlab__create_issue\`)。看不到工具通常是**未被授权任何类目** —— 找管理员在「用户」页给你的 key 勾选。
+
+---
+
 ## 📊 查自己的用量
 
 浏览器打开 **\`${base}/ui\`**,用你的 API Key 登录 →「我的」页看请求数、Token、成本(普通成员只读)。命令行:

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, Fragment } from "react";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -20,6 +20,7 @@ import {
   DailyBucket,
 } from "../api/stats";
 import { listUsage, UsageKey } from "../api/keys";
+import { useTheme } from "../lib/theme";
 import { listAccounts, AccountSnapshot } from "../api/accounts";
 import { ApiError } from "../api/client";
 
@@ -55,21 +56,49 @@ function fmtInt(n: number): string {
   return n.toLocaleString();
 }
 
+/* ── MCP endpoint helpers ────────────────────────────────────────────── */
+// MCP 网关的每次 tools/call 记为 endpoint = "MCP <server>/<tool>"(无 token/成本)。
+// 看板据此把 MCP 调用从模型调用中拆出来单独统计。
+
+const MCP_PREFIX = "MCP ";
+const isMcpEndpoint = (endpoint: string) => endpoint.startsWith(MCP_PREFIX);
+
+function parseMcpEndpoint(
+  endpoint: string,
+): { server: string; tool: string } | null {
+  if (!isMcpEndpoint(endpoint)) return null;
+  const rest = endpoint.slice(MCP_PREFIX.length);
+  const slash = rest.indexOf("/");
+  if (slash < 0) return { server: rest, tool: "" };
+  return { server: rest.slice(0, slash), tool: rest.slice(slash + 1) };
+}
+
 /* ── color palette ───────────────────────────────────────────────────── */
 
+// 图显色系:亮橙主导,配以薄荷绿及暖色补色(明/暗两种主题下都清晰)。
 const PALETTE = [
-  "#10b981", // emerald
-  "#3b82f6", // blue
-  "#a855f7", // purple
-  "#f59e0b", // amber
-  "#ef4444", // rose
-  "#06b6d4", // cyan
-  "#ec4899", // pink
-  "#84cc16", // lime
-  "#f97316", // orange
-  "#8b5cf6", // violet
+  "#FF8A3D", // bright orange 亮橙(主)
+  "#5FC9B0", // mint 薄荷
+  "#FFB067", // light orange
+  "#3C9C86", // deep mint
+  "#F97316", // orange
+  "#A8E0D2", // pale mint
+  "#FF6B35", // red-orange
+  "#2E7D6B", // teal
+  "#FFC999", // apricot
+  "#8AD8C4", // aqua mint
 ];
 const colorAt = (i: number) => PALETTE[i % PALETTE.length];
+
+/** Read a CSS `--ink-N` variable off <html> as a concrete rgb() string, so
+ *  chart canvas colors (which can't use CSS vars) follow the active theme. */
+function inkColor(n: number, alpha = 1): string {
+  if (typeof window === "undefined") return `rgb(0 0 0 / ${alpha})`;
+  const v = getComputedStyle(document.documentElement)
+    .getPropertyValue(`--ink-${n}`)
+    .trim();
+  return v ? `rgb(${v} / ${alpha})` : `rgb(0 0 0 / ${alpha})`;
+}
 
 /* ── chart common options ────────────────────────────────────────────── */
 
@@ -101,6 +130,7 @@ const COMMON_CHART_OPTS = {
 /* ── component ─────────────────────────────────────────────────────── */
 
 export function Stats() {
+  const { pref: themePref } = useTheme();
   const [stats, setStats] = useState<StatsSnapshot | null>(null);
   const [daily, setDaily] = useState<DailyBucket[]>([]);
   const [usage, setUsage] = useState<UsageKey[]>([]);
@@ -110,6 +140,10 @@ export function Stats() {
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   // 时间窗口:预设(当天/当月/全部)或自定义区间;作用全页。
   const [mode, setMode] = useState<"today" | "month" | "all" | "custom">("month");
+  // 视图:模型调用 vs MCP 调用 —— 两类分开看,不混在一起。
+  const [view, setView] = useState<"model" | "mcp">("model");
+  // 下钻展开的 key:"tool:<server>:<tool>"(看谁调的)或 "who:<short>:<server>"(看调了哪些工具)
+  const [drill, setDrill] = useState<string | null>(null);
   // committed custom range (drives fetches); drafts live in the inputs below.
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
@@ -192,6 +226,7 @@ export function Stats() {
     if (!stats) return null;
     const acc = new Map<string, number>();
     for (const b of Object.values(stats.byApi)) {
+      if (isMcpEndpoint(b.endpoint)) continue; // MCP 调用单独统计,不混入模型成本
       acc.set(b.model, (acc.get(b.model) ?? 0) + b.totalCostUsd);
     }
     const sorted = Array.from(acc.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8);
@@ -201,12 +236,12 @@ export function Stats() {
         {
           data: sorted.map(([, v]) => Number(v.toFixed(4))),
           backgroundColor: sorted.map((_, i) => colorAt(i)),
-          borderColor: "#18181b",
+          borderColor: inkColor(900), // 分段间隙用卡片色,随主题切换
           borderWidth: 2,
         },
       ],
     };
-  }, [stats]);
+  }, [stats, themePref]);
 
   /* ── derive: requests-by-endpoint doughnut ──────────────────────── */
 
@@ -214,6 +249,7 @@ export function Stats() {
     if (!stats) return null;
     const acc = new Map<string, number>();
     for (const b of Object.values(stats.byApi)) {
+      if (isMcpEndpoint(b.endpoint)) continue; // MCP 调用单独统计
       acc.set(b.endpoint, (acc.get(b.endpoint) ?? 0) + b.requests);
     }
     const sorted = Array.from(acc.entries()).sort((a, b) => b[1] - a[1]);
@@ -223,11 +259,68 @@ export function Stats() {
         {
           data: sorted.map(([, v]) => v),
           backgroundColor: sorted.map((_, i) => colorAt(i + 3)),
-          borderColor: "#18181b",
+          borderColor: inkColor(900), // 分段间隙用卡片色,随主题切换
           borderWidth: 2,
         },
       ],
     };
+  }, [stats, themePref]);
+
+  /* ── derive: MCP 调用统计(按次数,独立于模型调用)──────────────── */
+
+  const mcpStats = useMemo(() => {
+    if (!stats) return null;
+    // 每条 byApi 桶的 endpoint 形如 "MCP <server>/<tool>"。按 server 汇总,
+    // 并保留每个 tool 的调用次数;成本/token 不参与(MCP 计量口径 = 次数)。
+    const servers = new Map<
+      string,
+      {
+        server: string;
+        calls: number;
+        successes: number;
+        failures: number;
+        lastSeenAt: string;
+        tools: Map<string, { tool: string; calls: number; failures: number }>;
+      }
+    >();
+    let totalCalls = 0;
+    let totalFailures = 0;
+    for (const b of Object.values(stats.byApi)) {
+      const parsed = parseMcpEndpoint(b.endpoint);
+      if (!parsed) continue;
+      totalCalls += b.requests;
+      totalFailures += b.failures;
+      let g = servers.get(parsed.server);
+      if (!g) {
+        g = {
+          server: parsed.server,
+          calls: 0,
+          successes: 0,
+          failures: 0,
+          lastSeenAt: b.lastSeenAt,
+          tools: new Map(),
+        };
+        servers.set(parsed.server, g);
+      }
+      g.calls += b.requests;
+      g.successes += b.successes;
+      g.failures += b.failures;
+      if (b.lastSeenAt > g.lastSeenAt) g.lastSeenAt = b.lastSeenAt;
+      let t = g.tools.get(parsed.tool);
+      if (!t) {
+        t = { tool: parsed.tool, calls: 0, failures: 0 };
+        g.tools.set(parsed.tool, t);
+      }
+      t.calls += b.requests;
+      t.failures += b.failures;
+    }
+    const rows = Array.from(servers.values())
+      .map((s) => ({
+        ...s,
+        tools: Array.from(s.tools.values()).sort((a, b) => b.calls - a.calls),
+      }))
+      .sort((a, b) => b.calls - a.calls);
+    return { totalCalls, totalFailures, servers: rows };
   }, [stats]);
 
   /* ── label lookup: apiKeyShort → human label ─────────────────────── */
@@ -241,6 +334,156 @@ export function Stats() {
     },
     [usage],
   );
+
+  // 管理员视角:key 的 owner(用户名 / 邮箱),无则空。
+  const ownerFor = useCallback(
+    (short: string) => {
+      for (const u of usage) {
+        if (u.apiKeyShort === short) return u.owner || "";
+      }
+      return "";
+    },
+    [usage],
+  );
+
+  // 客户端标识渲染:label · owner · 指纹(owner 存在才显示)。
+  const ClientCell = useCallback(
+    ({ short, label }: { short: string; label: string }) => {
+      const owner = ownerFor(short);
+      return (
+        <>
+          {label}
+          {owner && (
+            <span className="text-xs text-emerald-400 ml-2">{owner}</span>
+          )}
+          <span className="text-xs text-ink-500 ml-2">{short}</span>
+        </>
+      );
+    },
+    [ownerFor],
+  );
+
+  /* ── derive: MCP 调用「谁在调用」(按客户端 × MCP 服务)──────────── */
+
+  const mcpByClient = useMemo(() => {
+    if (!stats?.byClientMcp) return [];
+    const clients = new Map<
+      string,
+      {
+        short: string;
+        total: number;
+        failures: number;
+        servers: Array<{
+          server: string;
+          calls: number;
+          failures: number;
+          tools: Array<{ tool: string; calls: number; failures: number }>;
+        }>;
+      }
+    >();
+    for (const b of Object.values(stats.byClientMcp)) {
+      let g = clients.get(b.apiKeyShort);
+      if (!g) {
+        g = { short: b.apiKeyShort, total: 0, failures: 0, servers: [] };
+        clients.set(b.apiKeyShort, g);
+      }
+      g.total += b.requests;
+      g.failures += b.failures;
+      const tools = Object.entries(b.byTool ?? {})
+        .map(([tool, v]) => ({ tool, calls: v.calls, failures: v.failures }))
+        .sort((a, b) => b.calls - a.calls);
+      g.servers.push({ server: b.server, calls: b.requests, failures: b.failures, tools });
+    }
+    const rows = Array.from(clients.values()).map((c) => ({
+      ...c,
+      label: labelFor(c.short),
+      servers: c.servers.sort((a, b) => b.calls - a.calls),
+    }));
+    rows.sort((a, b) => b.total - a.total);
+    return rows;
+  }, [stats, labelFor]);
+
+  // 反向索引:某个 (服务, 工具) 被哪些客户端各调了多少次 —— 供「MCP 调用统计」
+  // 卡里点击工具次数时下钻「谁调的」。
+  const mcpToolCallers = useMemo(() => {
+    const idx: Record<string, Record<string, Array<{ short: string; label: string; calls: number }>>> = {};
+    if (!stats?.byClientMcp) return idx;
+    for (const b of Object.values(stats.byClientMcp)) {
+      for (const [tool, v] of Object.entries(b.byTool ?? {})) {
+        ((idx[b.server] ??= {})[tool] ??= []).push({
+          short: b.apiKeyShort,
+          label: labelFor(b.apiKeyShort),
+          calls: v.calls,
+        });
+      }
+    }
+    for (const srv of Object.values(idx))
+      for (const arr of Object.values(srv)) arr.sort((a, b) => b.calls - a.calls);
+    return idx;
+  }, [stats, labelFor]);
+
+  /* ── derive: MCP 每日调用趋势(按服务堆叠)──────────────────────── */
+
+  const mcpLineData = useMemo(() => {
+    if (!daily.length) return null;
+    const servers = new Set<string>();
+    for (const d of daily) for (const s of Object.keys(d.mcpByServer ?? {})) servers.add(s);
+    if (servers.size === 0) return null;
+    const labels = daily.map((d) => d.date.slice(5));
+    const list = Array.from(servers);
+    return {
+      labels,
+      datasets: list.map((srv, i) => ({
+        label: srv,
+        data: daily.map((d) => d.mcpByServer?.[srv] ?? 0),
+        backgroundColor: colorAt(i),
+        borderColor: colorAt(i),
+        borderWidth: 2,
+        fill: true,
+        tension: 0.3,
+        pointRadius: 3,
+      })),
+    };
+  }, [daily]);
+
+  /* ── derive: MCP 调用分布 · 按服务 / 按工具 doughnuts ────────────── */
+
+  const mcpServerDoughnut = useMemo(() => {
+    if (!mcpStats || mcpStats.servers.length === 0) return null;
+    const rows = mcpStats.servers;
+    return {
+      labels: rows.map((s) => s.server),
+      datasets: [
+        {
+          data: rows.map((s) => s.calls),
+          backgroundColor: rows.map((_, i) => colorAt(i)),
+          borderColor: inkColor(900),
+          borderWidth: 2,
+        },
+      ],
+    };
+  }, [mcpStats, themePref]);
+
+  const mcpToolDoughnut = useMemo(() => {
+    if (!mcpStats || mcpStats.servers.length === 0) return null;
+    const tools: Array<{ name: string; calls: number }> = [];
+    for (const s of mcpStats.servers)
+      for (const t of s.tools) tools.push({ name: `${s.server}/${t.tool}`, calls: t.calls });
+    tools.sort((a, b) => b.calls - a.calls);
+    const top = tools.slice(0, 8);
+    if (top.length === 0) return null;
+    return {
+      labels: top.map((t) => t.name),
+      datasets: [
+        {
+          data: top.map((t) => t.calls),
+          backgroundColor: top.map((_, i) => colorAt(i + 2)),
+          borderColor: inkColor(900),
+          borderWidth: 2,
+        },
+      ],
+    };
+  }, [mcpStats, themePref]);
 
   /* ── derive: top 10 clients by cost (cost + tokens + requests) ───── */
 
@@ -279,6 +522,9 @@ export function Stats() {
       }
     >();
     for (const b of Object.values(stats.byClientModel)) {
+      // MCP 调用记为 model="unknown"(无 token/成本),不进模型明细表 —— 见下方
+      // 独立的「MCP 调用」卡。真实代理调用一律带模型名。
+      if (b.model === "unknown") continue;
       let g = byClient.get(b.apiKeyShort);
       if (!g) {
         g = { label: labelFor(b.apiKeyShort), short: b.apiKeyShort, totalCost: 0, models: [] };
@@ -316,16 +562,18 @@ export function Stats() {
     const avgLatency = t.requests
       ? Math.round(t.totalLatencyMs / t.requests)
       : 0;
+    // 模型请求数 = 总请求 - MCP 调用(MCP 单独统计,不计入成本类指标)
+    const mcpCalls = mcpStats?.totalCalls ?? 0;
     return {
       cost: t.totalCostUsd,
       tokens,
-      requests: t.requests,
+      requests: Math.max(0, t.requests - mcpCalls),
       successRate,
       avgLatency,
       accountsHealthy: accounts.filter((a) => a.available).length,
       accountsTotal: accounts.length,
     };
-  }, [stats, accounts]);
+  }, [stats, accounts, mcpStats]);
 
   /* ── render ─────────────────────────────────────────────────────── */
 
@@ -357,6 +605,25 @@ export function Stats() {
         </div>
         <div className="flex flex-col items-end gap-2">
           <div className="flex items-center gap-3">
+            {/* 视图段控:模型调用 vs MCP 调用 */}
+            <div className="inline-flex rounded-md border border-ink-700 overflow-hidden text-sm">
+              {([
+                ["model", "模型调用"],
+                ["mcp", "MCP 调用"],
+              ] as const).map(([v, txt]) => (
+                <button
+                  key={v}
+                  onClick={() => setView(v)}
+                  className={`px-3 py-1.5 ${
+                    view === v
+                      ? "bg-emerald-600 text-white"
+                      : "text-ink-300 hover:bg-ink-800"
+                  }`}
+                >
+                  {txt}
+                </button>
+              ))}
+            </div>
             {/* 时间窗口段控 */}
             <div className="inline-flex rounded-md border border-ink-700 overflow-hidden text-sm">
               {([
@@ -414,12 +681,14 @@ export function Stats() {
         </div>
       </header>
 
+      {view === "model" && (
+      <>
       {/* KPI row */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <Kpi
           label="总成本"
           value={fmtUsd(kpi.cost)}
-          sub={`${fmtInt(kpi.requests)} 次请求`}
+          sub={`${fmtInt(kpi.requests)} 次模型请求`}
           tint="text-emerald-300"
         />
         <Kpi
@@ -552,7 +821,326 @@ export function Stats() {
           </div>
         </section>
       </div>
+      </>
+      )}
 
+      {view === "mcp" && (
+      <>
+      {/* MCP KPI row */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <Kpi
+          label="MCP 总调用"
+          value={fmtInt(mcpStats?.totalCalls ?? 0)}
+          sub="按调用次数计"
+          tint="text-cyan-300"
+        />
+        <Kpi
+          label="失败"
+          value={fmtInt(mcpStats?.totalFailures ?? 0)}
+          sub="上游错误 / 被拒"
+          tint={mcpStats && mcpStats.totalFailures > 0 ? "text-rose-300" : "text-emerald-300"}
+        />
+        <Kpi
+          label="MCP 服务"
+          value={fmtInt(mcpStats?.servers.length ?? 0)}
+          sub="已被调用的类目"
+          tint="text-emerald-300"
+        />
+        <Kpi
+          label="调用方"
+          value={fmtInt(mcpByClient.length)}
+          sub="发起调用的 key"
+          tint="text-blue-300"
+        />
+      </div>
+
+      {/* MCP 每日调用趋势(按服务堆叠) */}
+      <section className="card">
+        <h2 className="text-lg font-medium mb-3">
+          每日 MCP 调用(按服务分组)·{" "}
+          {mode === "today"
+            ? "今天"
+            : mode === "month"
+              ? "本月"
+              : mode === "all"
+                ? "近 365 天"
+                : from && to
+                  ? `${from} ~ ${to}`
+                  : "本月"}
+        </h2>
+        <div className="h-72">
+          {mcpLineData ? (
+            <Line
+              data={mcpLineData}
+              options={{
+                ...COMMON_CHART_OPTS,
+                scales: {
+                  ...COMMON_CHART_OPTS.scales,
+                  y: {
+                    ...COMMON_CHART_OPTS.scales.y,
+                    stacked: true,
+                    title: { display: true, text: "调用次数", color: "#a1a1aa" },
+                  },
+                  x: { ...COMMON_CHART_OPTS.scales.x, stacked: true },
+                },
+              }}
+            />
+          ) : (
+            <div className="h-full grid place-items-center text-ink-500">
+              暂无 MCP 调用
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* MCP 分布环形图:按服务 / 按工具 */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <section className="card">
+          <h2 className="text-lg font-medium mb-3">调用分布 · 按 MCP 服务</h2>
+          <div className="h-72">
+            {mcpServerDoughnut ? (
+              <Doughnut
+                data={mcpServerDoughnut}
+                options={{
+                  responsive: true,
+                  maintainAspectRatio: false,
+                  plugins: {
+                    legend: {
+                      position: "right",
+                      labels: { color: "#a1a1aa", font: { size: 11 }, boxWidth: 14 },
+                    },
+                    tooltip: COMMON_CHART_OPTS.plugins.tooltip,
+                  },
+                }}
+              />
+            ) : (
+              <div className="h-full grid place-items-center text-ink-500">
+                暂无数据
+              </div>
+            )}
+          </div>
+        </section>
+        <section className="card">
+          <h2 className="text-lg font-medium mb-3">调用分布 · 按工具 Top 8</h2>
+          <div className="h-72">
+            {mcpToolDoughnut ? (
+              <Doughnut
+                data={mcpToolDoughnut}
+                options={{
+                  responsive: true,
+                  maintainAspectRatio: false,
+                  plugins: {
+                    legend: {
+                      position: "right",
+                      labels: { color: "#a1a1aa", font: { size: 11 }, boxWidth: 14 },
+                    },
+                    tooltip: COMMON_CHART_OPTS.plugins.tooltip,
+                  },
+                }}
+              />
+            ) : (
+              <div className="h-full grid place-items-center text-ink-500">
+                暂无数据
+              </div>
+            )}
+          </div>
+        </section>
+      </div>
+
+      {/* MCP 调用 — 独立于模型调用,计量口径 = 调用次数 */}
+      <section className="card p-0">
+        <div className="px-5 py-3 border-b border-ink-800 flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-medium">MCP 调用统计</h2>
+            <p className="text-xs text-ink-500 mt-0.5">
+              MCP 网关按「调用次数」计量(不计 token / 成本),与模型调用分开统计。
+            </p>
+          </div>
+          <div className="text-right">
+            <div className="text-2xl font-bold text-cyan-300">
+              {fmtInt(mcpStats?.totalCalls ?? 0)}
+            </div>
+            <div className="text-xs text-ink-500">
+              总调用
+              {mcpStats && mcpStats.totalFailures > 0 && (
+                <span className="text-rose-400 ml-1">
+                  / {fmtInt(mcpStats.totalFailures)} 失败
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+        {mcpStats && mcpStats.servers.length > 0 ? (
+          <div className="divide-y divide-ink-800">
+            {mcpStats.servers.map((s) => (
+              <div key={s.server} className="px-5 py-3">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="font-medium">
+                    <span className="font-mono text-ink-200">{s.server}</span>
+                    <span className="text-xs text-ink-500 ml-2">
+                      {s.tools.length} 个工具
+                    </span>
+                  </div>
+                  <div className="text-sm tabular-nums">
+                    <span className="text-cyan-300 font-medium">
+                      {fmtInt(s.calls)}
+                    </span>
+                    <span className="text-ink-500"> 次</span>
+                    {s.failures > 0 && (
+                      <span className="text-rose-400 ml-2">
+                        {fmtInt(s.failures)} 失败
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-x-4 gap-y-1">
+                  {s.tools.map((t) => {
+                    const key = `tool:${s.server}:${t.tool}`;
+                    const open = drill === key;
+                    return (
+                      <button
+                        key={t.tool}
+                        type="button"
+                        onClick={() => setDrill(open ? null : key)}
+                        className={`text-xs tabular-nums rounded px-1 -mx-1 hover:bg-ink-800 ${
+                          open ? "bg-ink-800" : ""
+                        }`}
+                        title="点击看谁调用了这个工具"
+                      >
+                        <span className="font-mono text-ink-300">{t.tool}</span>
+                        <span className="text-cyan-400 ml-1.5 underline decoration-dotted">
+                          {fmtInt(t.calls)}
+                        </span>
+                        {t.failures > 0 && (
+                          <span className="text-rose-400 ml-1">✕{fmtInt(t.failures)}</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+                {/* 下钻:某工具被谁调用了多少次 */}
+                {s.tools.map((t) => {
+                  const key = `tool:${s.server}:${t.tool}`;
+                  if (drill !== key) return null;
+                  const callers = mcpToolCallers[s.server]?.[t.tool] ?? [];
+                  return (
+                    <div key={`d-${t.tool}`} className="mt-2 ml-3 pl-3 border-l-2 border-cyan-800 space-y-1">
+                      <div className="text-xs text-ink-500">
+                        <span className="font-mono text-ink-300">{t.tool}</span> 谁调用了:
+                      </div>
+                      {callers.map((c) => (
+                        <div key={c.short} className="text-xs flex items-center gap-2">
+                          <span className="text-ink-200">{c.label}</span>
+                          <span className="text-ink-500">{c.short}</span>
+                          <span className="text-cyan-300 tabular-nums ml-auto">
+                            {fmtInt(c.calls)} 次
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="px-5 py-6 text-center text-ink-500 text-sm">
+            本窗口暂无 MCP 调用。给 key 授权 MCP 类目 / 工具后,通过 /mcp
+            端点发起的调用会在这里按次数统计。
+          </div>
+        )}
+      </section>
+
+      {/* MCP 谁在调用 — 按客户端 × MCP 服务 */}
+      <section className="card overflow-x-auto p-0">
+        <div className="px-5 py-3 border-b border-ink-800">
+          <h2 className="text-lg font-medium">谁在调用 · 按客户端 × MCP 服务</h2>
+          <p className="text-xs text-ink-500 mt-0.5">
+            每个 key 调用了哪些 MCP 服务、各多少次(随时间窗口联动)。
+          </p>
+        </div>
+        <table className="w-full text-sm">
+          <thead className="bg-ink-900 text-ink-400">
+            <tr className="text-left">
+              <th className="px-4 py-2 font-medium">客户端</th>
+              <th className="px-4 py-2 font-medium">MCP 服务</th>
+              <th className="px-4 py-2 font-medium text-right">调用次数</th>
+              <th className="px-4 py-2 font-medium text-right">失败</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-ink-800">
+            {mcpByClient.flatMap((c) =>
+              c.servers.map((s, si) => {
+                const key = `who:${c.short}:${s.server}`;
+                const open = drill === key;
+                return (
+                  <Fragment key={key}>
+                    <tr className="hover:bg-ink-900/50">
+                      <td className="px-4 py-2 font-medium">
+                        {si === 0 ? (
+                          <ClientCell short={c.short} label={c.label} />
+                        ) : (
+                          <span className="text-ink-700">↳</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-2 font-mono text-ink-300">{s.server}</td>
+                      <td className="px-4 py-2 text-right">
+                        <button
+                          type="button"
+                          onClick={() => setDrill(open ? null : key)}
+                          className="text-cyan-300 tabular-nums underline decoration-dotted hover:text-cyan-200"
+                          title="点击看这个 key 在该 MCP 上调了哪些工具"
+                        >
+                          {fmtInt(s.calls)}
+                        </button>
+                      </td>
+                      <td className="px-4 py-2 text-right">
+                        {s.failures > 0 ? (
+                          <span className="text-rose-400">{fmtInt(s.failures)}</span>
+                        ) : (
+                          <span className="text-ink-600">0</span>
+                        )}
+                      </td>
+                    </tr>
+                    {open && (
+                      <tr className="bg-ink-900/40">
+                        <td colSpan={4} className="px-4 py-2">
+                          <div className="ml-3 pl-3 border-l-2 border-cyan-800 flex flex-wrap gap-x-4 gap-y-1">
+                            {s.tools.map((t) => (
+                              <div key={t.tool} className="text-xs tabular-nums">
+                                <span className="font-mono text-ink-300">{t.tool}</span>
+                                <span className="text-cyan-400 ml-1.5">{fmtInt(t.calls)}</span>
+                                {t.failures > 0 && (
+                                  <span className="text-rose-400 ml-1">✕{fmtInt(t.failures)}</span>
+                                )}
+                              </div>
+                            ))}
+                            {s.tools.length === 0 && (
+                              <span className="text-xs text-ink-500">无明细</span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              }),
+            )}
+            {mcpByClient.length === 0 && (
+              <tr>
+                <td colSpan={4} className="px-4 py-6 text-center text-ink-500">
+                  本窗口暂无 MCP 调用。
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </section>
+      </>
+      )}
+
+      {view === "model" && (
+      <>
       {/* Top clients — cost + tokens + requests */}
       <section className="card overflow-x-auto p-0">
         <div className="px-5 py-3 border-b border-ink-800">
@@ -578,8 +1166,7 @@ export function Stats() {
                 <tr key={c.short} className="hover:bg-ink-900/50">
                   <td className="px-4 py-2 text-ink-500">{i + 1}</td>
                   <td className="px-4 py-2 font-medium">
-                    {c.label}
-                    <span className="text-xs text-ink-500 ml-2">{c.short}</span>
+                    <ClientCell short={c.short} label={c.label} />
                   </td>
                   <td className="px-4 py-2 text-right text-emerald-300">{fmtUsd(c.cost)}</td>
                   <td className="px-4 py-2 text-right text-blue-300">{fmtTokens(c.tokens)}</td>
@@ -635,10 +1222,7 @@ export function Stats() {
                 <tr key={`${r.short}|${m.model}`} className="hover:bg-ink-900/50">
                   <td className="px-4 py-2 font-medium">
                     {mi === 0 ? (
-                      <>
-                        {r.label}
-                        <span className="text-xs text-ink-500 ml-2">{r.short}</span>
-                      </>
+                      <ClientCell short={r.short} label={r.label} />
                     ) : (
                       <span className="text-ink-700">↳</span>
                     )}
@@ -768,6 +1352,8 @@ export function Stats() {
           </tbody>
         </table>
       </section>
+      </>
+      )}
     </div>
   );
 }

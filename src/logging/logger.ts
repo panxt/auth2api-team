@@ -112,17 +112,23 @@ export class RequestLogger {
   record(input: RequestLogInput): void {
     const cfg = this.config;
     if (!cfg.enabled) return;
-    if (cfg.capture === "failures" && input.status !== "failure") return;
+
+    // MCP gateway tool calls form an audit trail (call-count metering), so they
+    // get their own "mcp" category and are always recorded — independent of
+    // capture=failures and of the success→"ok" rule below.
+    const isMcp = (input.endpoint ?? "").startsWith("MCP ");
+    if (!isMcp && cfg.capture === "failures" && input.status !== "failure") return;
 
     // A successful request is never an error, even if an earlier failover
     // attempt tagged a category. Otherwise honor the explicit tag, else derive.
-    const category: LogCategory =
-      input.status === "success"
+    const category: LogCategory = isMcp
+      ? "mcp"
+      : input.status === "success"
         ? "ok"
         : (input.category ??
           deriveCategory(input.status, input.statusCode, input.failureKind));
-    // Category gate (benign noise like policy/client off by default). "ok" only
-    // appears under capture=all and is always allowed through.
+    // Category gate (benign noise like policy/client off by default). "ok" is
+    // always allowed through; "mcp" honors its config toggle (default on).
     if (category !== "ok" && !cfg.categories[category]) return;
 
     let errorDetail: string | null = null;

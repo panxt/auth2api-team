@@ -6,6 +6,7 @@ import {
   createKey,
   updateKey,
   deleteKey,
+  rotateKey,
   UsageKey,
   ManagedKeyView,
   CreateKeyInput,
@@ -14,6 +15,7 @@ import {
   KeyModelQuota,
   KeyRole,
 } from "../api/keys";
+import { fetchMcpServers, fetchMcpTools, McpServerView, McpTool } from "../api/mcp";
 import { ApiError } from "../api/client";
 import { Modal } from "../components/Modal";
 import { useAuth } from "../lib/auth";
@@ -25,6 +27,7 @@ interface MergedRow extends UsageKey {
   role: KeyRole | null;       // from managed view; null for config-only
   allowedModels: string[] | null; // model allowlist (managed keys only)
   deniedModels: string[] | null;  // model denylist (managed keys only)
+  allowedMcp: string[] | null;    // MCP category grants (managed keys only)
 }
 
 function fmtUSD(n: number | undefined): string {
@@ -38,6 +41,42 @@ function fmtTokens(n: number | undefined): string {
   return String(n);
 }
 
+/** Distinct upstream MCP servers a key is granted (grant may be "gitlab" whole
+ *  or "gitlab__tool"). Count决定网关是否加命名空间前缀:1 个→免前缀,≥2→带前缀。 */
+function mcpServersOf(allowedMcp: string[] | null): string[] {
+  if (!allowedMcp || allowedMcp.length === 0) return [];
+  return Array.from(new Set(allowedMcp.map((g) => g.split("__")[0])));
+}
+
+/** Renders a key's MCP grant summary + prefix mode badge for the table. */
+function McpModeCell({ allowedMcp }: { allowedMcp: string[] | null }) {
+  const servers = mcpServersOf(allowedMcp);
+  if (servers.length === 0)
+    return <span className="text-ink-500 text-xs">无(默认拒绝)</span>;
+  const flat = servers.length === 1;
+  return (
+    <div className="flex flex-col gap-1 max-w-[14rem]">
+      <div className="flex flex-wrap gap-1">
+        {servers.map((s) => (
+          <span key={s} className="badge-ok text-xs">
+            {s}
+          </span>
+        ))}
+      </div>
+      <span
+        className={`text-xs ${flat ? "text-emerald-400" : "text-amber-400"}`}
+        title={
+          flat
+            ? "单上游 → 网关不加命名空间前缀,工具名与直连一致,迁移零改动"
+            : "多上游 → 工具名带 <服务>__ 前缀防撞名"
+        }
+      >
+        {flat ? "免前缀(单上游)" : `带前缀(${servers.length} 类)`}
+      </span>
+    </div>
+  );
+}
+
 export function Users() {
   const { whoami } = useAuth();
   const isAdmin = !!whoami?.admin;
@@ -46,6 +85,7 @@ export function Users() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [models, setModels] = useState<string[]>([]); // for the allowlist picker
+  const [mcpServers, setMcpServers] = useState<McpServerView[]>([]); // MCP categories
 
   const [showCreate, setShowCreate] = useState(false);
   const [editing, setEditing] = useState<MergedRow | null>(null);
@@ -76,6 +116,7 @@ export function Users() {
           role: m ? m.role : null,
           allowedModels: m ? m["allowed-models"] : null,
           deniedModels: m ? m["denied-models"] : null,
+          allowedMcp: m ? m["allowed-mcp"] : null,
         };
       });
       setRows(merged);
@@ -91,12 +132,16 @@ export function Users() {
     load();
   }, [load]);
 
-  // Fetch the available model list once (admin only) for the allowlist picker.
+  // Fetch the available model list + registered MCP categories once (admin
+  // only) for the allowlist / MCP-grant pickers.
   useEffect(() => {
     if (!isAdmin) return;
     listModels()
       .then((r) => setModels(r.data.map((m) => m.id)))
       .catch(() => setModels([]));
+    fetchMcpServers()
+      .then((r) => setMcpServers(r.servers))
+      .catch(() => setMcpServers([]));
   }, [isAdmin]);
 
   async function onToggleEnabled(row: MergedRow) {
@@ -109,6 +154,26 @@ export function Users() {
       load();
     } catch (e) {
       alert(`操作失败: ${(e as ApiError).message}`);
+    }
+  }
+
+  async function onRotate(row: MergedRow) {
+    if (!row.managedId) {
+      alert("config.yaml 里的 key 是只读的,无法重置");
+      return;
+    }
+    if (
+      !confirm(
+        `重置 ${row.label || row.apiKeyShort}?\n旧 key 立即失效,所有用它的客户端都要换新 key(名称/角色/配额/MCP 授权不变)。`,
+      )
+    )
+      return;
+    try {
+      const resp = await rotateKey(row.managedId);
+      setCreatedKey(resp); // 复用"仅此一次明文"弹窗
+      load();
+    } catch (e) {
+      alert(`重置失败: ${(e as ApiError).message}`);
     }
   }
 
@@ -167,6 +232,7 @@ export function Users() {
                 <th className="px-4 py-3 font-medium">配额(月)</th>
                 <th className="px-4 py-3 font-medium">本月用量</th>
                 <th className="px-4 py-3 font-medium">可用模型</th>
+                <th className="px-4 py-3 font-medium">MCP 授权</th>
                 <th className="px-4 py-3 font-medium">Owner</th>
                 {isAdmin && (
                   <th className="px-4 py-3 font-medium text-right">操作</th>
@@ -262,6 +328,9 @@ export function Users() {
                         <span className="text-ink-500 text-xs">全部</span>
                       )}
                     </td>
+                    <td className="px-4 py-3">
+                      <McpModeCell allowedMcp={row.allowedMcp} />
+                    </td>
                     <td className="px-4 py-3 text-ink-400">
                       {row.owner || "—"}
                     </td>
@@ -274,6 +343,26 @@ export function Users() {
                           title={!row.managedId ? "config 来源,只读" : ""}
                         >
                           编辑
+                        </button>
+                        <button
+                          className={`btn-ghost text-xs ${
+                            row.enabled
+                              ? "text-amber-400 hover:text-amber-300"
+                              : "text-emerald-400 hover:text-emerald-300"
+                          }`}
+                          onClick={() => onToggleEnabled(row)}
+                          disabled={!row.managedId}
+                          title={!row.managedId ? "config 来源,只读" : "启用 / 禁用"}
+                        >
+                          {row.enabled ? "禁用" : "启用"}
+                        </button>
+                        <button
+                          className="btn-ghost text-xs"
+                          onClick={() => onRotate(row)}
+                          disabled={!row.managedId}
+                          title={!row.managedId ? "config 来源,只读" : "重置(换新 key,旧的失效)"}
+                        >
+                          重置
                         </button>
                         <button
                           className="btn-ghost text-xs text-rose-400 hover:text-rose-300"
@@ -291,7 +380,7 @@ export function Users() {
               {rows.length === 0 && (
                 <tr>
                   <td
-                    colSpan={isAdmin ? 9 : 8}
+                    colSpan={isAdmin ? 10 : 9}
                     className="px-4 py-8 text-center text-ink-500"
                   >
                     {isAdmin
@@ -308,6 +397,7 @@ export function Users() {
       <CreateKeyModal
         open={showCreate}
         models={models}
+        mcpServers={mcpServers}
         onClose={() => setShowCreate(false)}
         onCreated={(resp) => {
           setShowCreate(false);
@@ -319,6 +409,7 @@ export function Users() {
       <EditKeyModal
         row={editing}
         models={models}
+        mcpServers={mcpServers}
         onClose={() => setEditing(null)}
         onSaved={() => {
           setEditing(null);
@@ -398,11 +489,13 @@ export function Users() {
 function CreateKeyModal({
   open,
   models,
+  mcpServers,
   onClose,
   onCreated,
 }: {
   open: boolean;
   models: string[];
+  mcpServers: McpServerView[];
   onClose: () => void;
   onCreated: (resp: CreateKeyResponse) => void;
 }) {
@@ -412,6 +505,7 @@ function CreateKeyModal({
   const [quota, setQuota] = useState<KeyQuota>({});
   const [allowedModels, setAllowedModels] = useState<string[]>([]);
   const [deniedModels, setDeniedModels] = useState<string[]>([]);
+  const [allowedMcp, setAllowedMcp] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -422,6 +516,7 @@ function CreateKeyModal({
     setQuota({});
     setAllowedModels([]);
     setDeniedModels([]);
+    setAllowedMcp([]);
     setErr(null);
   }
 
@@ -435,6 +530,7 @@ function CreateKeyModal({
       if (cleaned) input.quota = cleaned;
       if (allowedModels.length > 0) input["allowed-models"] = allowedModels;
       if (deniedModels.length > 0) input["denied-models"] = deniedModels;
+      if (allowedMcp.length > 0) input["allowed-mcp"] = allowedMcp;
       const resp = await createKey(input);
       reset();
       onCreated(resp);
@@ -503,8 +599,9 @@ function CreateKeyModal({
           hint="(列出的一律 403,优先级高于白名单)"
           accent="rose"
         />
+        <McpGrantPicker servers={mcpServers} selected={allowedMcp} onChange={setAllowedMcp} />
         {err && <div className="badge-err px-3 py-2 block">{err}</div>}
-        <div className="flex justify-end gap-2 pt-2">
+        <div className="flex justify-end gap-2 pt-3 sticky bottom-0 -mx-5 -mb-5 px-5 py-3 bg-ink-900 border-t border-ink-800">
           <button
             className="btn-secondary"
             onClick={() => {
@@ -532,11 +629,13 @@ function CreateKeyModal({
 function EditKeyModal({
   row,
   models,
+  mcpServers,
   onClose,
   onSaved,
 }: {
   row: MergedRow | null;
   models: string[];
+  mcpServers: McpServerView[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -546,6 +645,7 @@ function EditKeyModal({
   const [quota, setQuota] = useState<KeyQuota>({});
   const [allowedModels, setAllowedModels] = useState<string[]>([]);
   const [deniedModels, setDeniedModels] = useState<string[]>([]);
+  const [allowedMcp, setAllowedMcp] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -557,6 +657,7 @@ function EditKeyModal({
       setQuota(row.quota ?? {});
       setAllowedModels(row.allowedModels ?? []);
       setDeniedModels(row.deniedModels ?? []);
+      setAllowedMcp(row.allowedMcp ?? []);
       setErr(null);
     }
   }, [row]);
@@ -577,6 +678,7 @@ function EditKeyModal({
         // Always send: an empty array clears the list.
         "allowed-models": allowedModels,
         "denied-models": deniedModels,
+        "allowed-mcp": allowedMcp,
       });
       onSaved();
     } catch (e) {
@@ -631,8 +733,9 @@ function EditKeyModal({
           hint="(列出的一律 403,优先级高于白名单)"
           accent="rose"
         />
+        <McpGrantPicker servers={mcpServers} selected={allowedMcp} onChange={setAllowedMcp} />
         {err && <div className="badge-err px-3 py-2 block">{err}</div>}
-        <div className="flex justify-end gap-2 pt-2">
+        <div className="flex justify-end gap-2 pt-3 sticky bottom-0 -mx-5 -mb-5 px-5 py-3 bg-ink-900 border-t border-ink-800">
           <button className="btn-secondary" onClick={onClose}>
             取消
           </button>
@@ -822,6 +925,106 @@ function QuotaEditor({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ─── MCP 类目授权(默认拒绝)──────────────────────────────── */
+
+function McpGrantPicker({
+  servers,
+  selected,
+  onChange,
+}: {
+  servers: McpServerView[];
+  selected: string[];
+  onChange: (v: string[]) => void;
+}) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [toolsCache, setToolsCache] = useState<Record<string, McpTool[]>>({});
+
+  const has = (v: string) => selected.includes(v);
+  const set = (v: string, on: boolean) =>
+    onChange(on ? [...selected, v] : selected.filter((x) => x !== v));
+
+  function toggleWhole(id: string) {
+    const on = !has(id);
+    // granting whole category clears any tool-scoped entries for it
+    const cleaned = selected.filter((x) => x !== id && !x.startsWith(`${id}__`));
+    onChange(on ? [...cleaned, id] : cleaned);
+  }
+
+  function expand(id: string) {
+    setExpanded((cur) => (cur === id ? null : id));
+    if (!toolsCache[id]) {
+      fetchMcpTools(id)
+        .then((r) => setToolsCache((c) => ({ ...c, [id]: r.tools })))
+        .catch(() => setToolsCache((c) => ({ ...c, [id]: [] })));
+    }
+  }
+
+  return (
+    <div>
+      <label className="block text-xs text-ink-500 mb-1">
+        允许的 MCP 类目 / 工具{" "}
+        <span className="text-ink-600">(默认拒绝:不勾选则看不到任何 MCP)</span>
+      </label>
+      {servers.length === 0 ? (
+        <div className="text-xs text-ink-600">
+          尚未注册 MCP 服务 —— 先到「设置 → MCP 服务」添加。
+        </div>
+      ) : (
+        <div className="space-y-1.5 border border-ink-800 rounded-md p-2">
+          {servers.map((s) => {
+            const whole = has(s.id);
+            const toolGrants = selected.filter((x) => x.startsWith(`${s.id}__`));
+            const isOpen = expanded === s.id;
+            return (
+              <div key={s.id}>
+                <div className="flex items-center gap-2 text-sm">
+                  <label className="flex items-center gap-1.5">
+                    <input type="checkbox" checked={whole} onChange={() => toggleWhole(s.id)} />
+                    <span className="text-ink-200">{s.label}</span>
+                    <span className="text-ink-500 text-xs">({s.id} · 整个类目)</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="text-ink-500 hover:text-ink-300 text-xs ml-auto"
+                    onClick={() => expand(s.id)}
+                  >
+                    {isOpen ? "收起工具" : `按工具${toolGrants.length ? ` (${toolGrants.length})` : ""}`}
+                  </button>
+                </div>
+                {isOpen && (
+                  <div className="ml-6 mt-1 max-h-48 overflow-auto space-y-0.5">
+                    {!toolsCache[s.id] && <div className="text-ink-600 text-xs">加载工具…</div>}
+                    {toolsCache[s.id]?.length === 0 && (
+                      <div className="text-ink-600 text-xs">无工具或上游不可用。</div>
+                    )}
+                    {toolsCache[s.id]?.map((t) => {
+                      const key = `${s.id}__${t.name}`;
+                      return (
+                        <label key={key} className="flex items-center gap-1.5 text-xs">
+                          <input
+                            type="checkbox"
+                            checked={whole || has(key)}
+                            disabled={whole}
+                            onChange={(e) => set(key, e.target.checked)}
+                          />
+                          <span className="font-mono text-ink-300">{t.name}</span>
+                        </label>
+                      );
+                    })}
+                    {whole && (
+                      <div className="text-ink-600 text-xs">(已授权整个类目,含全部工具)</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

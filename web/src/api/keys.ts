@@ -39,6 +39,9 @@ export interface UsageKey {
     tokens?: { used: number; limit: number; pct: number };
     cost?: { used: number; limit: number; pct: number };
   } | null;
+  /** Month-to-date MCP tool-call counts per upstream server id (call-count
+   *  metering; no tokens). Empty/absent when the key made no MCP calls. */
+  mcp?: Record<string, number>;
 }
 
 export interface UsageKeysResp {
@@ -63,6 +66,7 @@ export interface ManagedKeyView {
   "rate-limit": KeyRateLimit | null;
   "allowed-models": string[] | null;
   "denied-models": string[] | null;
+  "allowed-mcp": string[] | null;
   source: "managed" | "config";
 }
 
@@ -91,6 +95,7 @@ export interface CreateKeyInput {
   "rate-limit"?: KeyRateLimit;
   "allowed-models"?: string[];
   "denied-models"?: string[];
+  "allowed-mcp"?: string[];
 }
 
 export type PatchKeyInput = CreateKeyInput;
@@ -123,3 +128,7 @@ export const updateKey = (id: string, input: PatchKeyInput) =>
   patch<ManagedKeyView>(`/admin/keys/${id}`, input);
 
 export const deleteKey = (id: string) => del<null>(`/admin/keys/${id}`);
+
+/** Admin: rotate ANY managed key — reissue with a fresh secret. */
+export const rotateKey = (id: string) =>
+  post<CreateKeyResponse>(`/admin/keys/${id}/rotate`);

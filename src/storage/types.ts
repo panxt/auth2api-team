@@ -38,8 +38,15 @@ export interface KeyRepository {
  *   - "policy":  a deliberate rejection (quota, model allow/deny, per-key rate).
  *   - "client":  client side (disconnect, bad request).
  *   - "ok":      success (only logged when capture=all).
+ *   - "mcp":     MCP gateway tool call (audit trail; always logged when enabled).
  */
-export type LogCategory = "upstream" | "service" | "policy" | "client" | "ok";
+export type LogCategory =
+  | "upstream"
+  | "service"
+  | "policy"
+  | "client"
+  | "ok"
+  | "mcp";
 
 export interface RequestLogRecord {
   ts: string; // ISO8601 UTC
@@ -153,5 +160,6 @@ export function normalizeKeyEntry(v: any): ApiKeyEntry | null {
     // silently dropped when managed keys are reloaded from disk on restart.
     "allowed-models": v["allowed-models"],
     "denied-models": v["denied-models"],
+    "allowed-mcp": v["allowed-mcp"],
   };
 }

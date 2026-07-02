@@ -66,6 +66,35 @@ export interface ClientModelBucket extends BaseBucket {
   provider: ProviderId | null;
 }
 
+/** Cross-axis: one bucket per (client, MCP server). Powers the "who called
+ *  which MCP" breakdown. MCP calls carry no tokens/cost — only counts matter. */
+export interface ClientMcpBucket extends BaseBucket {
+  apiKeyShort: string;
+  server: string;
+  /** Per-tool call/failure counts on this (client, server) — powers the
+   *  "which methods did this client call, how many times" drill-down. */
+  byTool: Record<string, { calls: number; failures: number }>;
+}
+
+/** MCP gateway records each tool call as endpoint "MCP <server>/<tool>".
+ *  Extract the upstream server id, or null for non-MCP endpoints. */
+export function mcpServerOfEndpoint(endpoint: string): string | null {
+  const PREFIX = "MCP ";
+  if (!endpoint.startsWith(PREFIX)) return null;
+  const rest = endpoint.slice(PREFIX.length);
+  const slash = rest.indexOf("/");
+  return slash < 0 ? rest : rest.slice(0, slash);
+}
+
+/** Tool part of an "MCP <server>/<tool>" endpoint, or "" if none. */
+export function mcpToolOfEndpoint(endpoint: string): string {
+  const server = mcpServerOfEndpoint(endpoint);
+  if (server === null) return "";
+  const rest = endpoint.slice("MCP ".length);
+  const slash = rest.indexOf("/");
+  return slash < 0 ? "" : rest.slice(slash + 1);
+}
+
 /** Time window for a snapshot. "all" = cumulative since recorder start;
  *  "today"/"month" = rolled up from per-day facts (UTC); "range" = an explicit
  *  [from,to] date range (see getSnapshotRange). */
@@ -76,6 +105,7 @@ export interface StatsSnapshot {
   byAccount: Record<string, AccountBucket>;
   byApi: Record<string, ApiBucket>;
   byClientModel: Record<string, ClientModelBucket>;
+  byClientMcp: Record<string, ClientMcpBucket>;
   totals: BaseBucket;
   /** Echoes the window this snapshot was computed for. */
   window: StatsWindow;
@@ -155,6 +185,9 @@ export interface DailyBucket {
     string,
     { requests: number; totalTokens: number; totalCostUsd: number }
   >;
+  /** MCP tool-call counts per upstream server for this day (call-count only;
+   *  powers the MCP-view daily trend line). */
+  mcpByServer: Record<string, number>;
 }
 
 /**
@@ -193,6 +226,7 @@ export class StatsRecorder {
   private byAccount = new Map<string, AccountBucket>();
   private byApi = new Map<string, ApiBucket>();
   private byClientModel = new Map<string, ClientModelBucket>();
+  private byClientMcp = new Map<string, ClientMcpBucket>();
   private daily = new Map<string, DailyBucket>();
   /** Fine-grained per-day facts, key = date|hash|endpoint|model|provider|email. */
   private dayFacts = new Map<string, DayFactBucket>();
@@ -279,6 +313,7 @@ export class StatsRecorder {
         byAccount: Object.fromEntries(this.byAccount),
         byApi: Object.fromEntries(this.byApi),
         byClientModel: Object.fromEntries(this.byClientModel),
+        byClientMcp: Object.fromEntries(this.byClientMcp),
         totals: { ...this.totals },
         window,
       };
@@ -312,6 +347,7 @@ export class StatsRecorder {
     const byClient = new Map<string, ClientBucket>();
     const byApi = new Map<string, ApiBucket>();
     const byClientModel = new Map<string, ClientModelBucket>();
+    const byClientMcp = new Map<string, ClientMcpBucket>();
     const byAccount = new Map<string, AccountBucket>();
     const totals = emptyBucket(nowIso);
 
@@ -344,6 +380,22 @@ export class StatsRecorder {
       }
       mergeBase(cm, f);
 
+      const mcpServer = mcpServerOfEndpoint(f.endpoint);
+      if (mcpServer) {
+        const cmcKey = `${f.apiKeyHash}|${mcpServer}`;
+        let cmc = byClientMcp.get(cmcKey);
+        if (!cmc) {
+          cmc = { ...emptyBucket(f.firstSeenAt), apiKeyShort: f.apiKeyShort, server: mcpServer, byTool: {} };
+          byClientMcp.set(cmcKey, cmc);
+        }
+        mergeBase(cmc, f);
+        // Each dayFact is already scoped to one endpoint (= one tool).
+        const tool = mcpToolOfEndpoint(f.endpoint);
+        const t = (cmc.byTool[tool] ??= { calls: 0, failures: 0 });
+        t.calls += f.requests;
+        t.failures += f.failures;
+      }
+
       if (f.provider && f.accountEmail) {
         const accKey = `${f.provider}:${f.accountEmail}`;
         let ab = byAccount.get(accKey);
@@ -360,6 +412,7 @@ export class StatsRecorder {
       byAccount: Object.fromEntries(byAccount),
       byApi: Object.fromEntries(byApi),
       byClientModel: Object.fromEntries(byClientModel),
+      byClientMcp: Object.fromEntries(byClientMcp),
       totals,
       window,
     };
@@ -382,6 +435,7 @@ export class StatsRecorder {
     this.byAccount.clear();
     this.byApi.clear();
     this.byClientModel.clear();
+    this.byClientMcp.clear();
     this.dayFacts.clear();
     this.latestFactDate = "";
     this.daily.clear();
@@ -452,6 +506,27 @@ export class StatsRecorder {
     }
     applyBaseDelta(cm, ev, cost);
 
+    // Cumulative client × MCP-server cross-axis ("who called which MCP").
+    const mcpServer = mcpServerOfEndpoint(ev.endpoint);
+    if (mcpServer) {
+      const cmcKey = `${clientKey}|${mcpServer}`;
+      let cmc = this.byClientMcp.get(cmcKey);
+      if (!cmc) {
+        cmc = {
+          ...emptyBucket(ev.ts),
+          apiKeyShort: ev.apiKeyHash.slice(0, 12),
+          server: mcpServer,
+          byTool: {},
+        };
+        this.byClientMcp.set(cmcKey, cmc);
+      }
+      applyBaseDelta(cmc, ev, cost);
+      const tool = mcpToolOfEndpoint(ev.endpoint);
+      const t = (cmc.byTool[tool] ??= { calls: 0, failures: 0 });
+      t.calls += 1;
+      if (ev.status !== "success") t.failures += 1;
+    }
+
     // Fine-grained per-day fact — the single source windowed snapshots roll
     // up from. Pruned to DAY_FACT_RETENTION days on date rollover.
     const factDate = ev.ts.slice(0, 10);
@@ -492,8 +567,12 @@ export class StatsRecorder {
         totalTokens: 0,
         totalCostUsd: 0,
         byProvider: {},
+        mcpByServer: {},
       };
       this.daily.set(date, db);
+    }
+    if (mcpServer) {
+      db.mcpByServer[mcpServer] = (db.mcpByServer[mcpServer] ?? 0) + 1;
     }
     const tokens =
       (ev.usage?.inputTokens ?? 0) +

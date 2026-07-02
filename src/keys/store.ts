@@ -24,6 +24,7 @@ export interface KeyInput {
   "rate-limit"?: ApiKeyEntry["rate-limit"];
   "allowed-models"?: ApiKeyEntry["allowed-models"];
   "denied-models"?: ApiKeyEntry["denied-models"];
+  "allowed-mcp"?: ApiKeyEntry["allowed-mcp"];
 }
 
 /** A key as shown to the UI — never includes the raw secret, only its id. */
@@ -39,6 +40,7 @@ export interface KeyView {
   "rate-limit": ApiKeyEntry["rate-limit"] | null;
   "allowed-models": ApiKeyEntry["allowed-models"] | null;
   "denied-models": ApiKeyEntry["denied-models"] | null;
+  "allowed-mcp": ApiKeyEntry["allowed-mcp"] | null;
 }
 
 function keyId(key: string): string {
@@ -61,6 +63,7 @@ function normalizeEntry(v: any): ApiKeyEntry {
     "rate-limit": v["rate-limit"],
     "allowed-models": v["allowed-models"],
     "denied-models": v["denied-models"],
+    "allowed-mcp": v["allowed-mcp"],
   };
 }
 
@@ -77,6 +80,7 @@ function toView(entry: ApiKeyEntry, source: "config" | "managed"): KeyView {
     "rate-limit": entry["rate-limit"] ?? null,
     "allowed-models": entry["allowed-models"] ?? null,
     "denied-models": entry["denied-models"] ?? null,
+    "allowed-mcp": entry["allowed-mcp"] ?? null,
   };
 }
 
@@ -139,6 +143,7 @@ export class ManagedKeyStore {
       "rate-limit": input["rate-limit"],
       "allowed-models": input["allowed-models"],
       "denied-models": input["denied-models"],
+      "allowed-mcp": input["allowed-mcp"],
     };
     this.managed.set(key, entry);
     this.live.set(key, entry);
@@ -184,6 +189,8 @@ export class ManagedKeyStore {
       entry["allowed-models"] = patch["allowed-models"];
     if (patch["denied-models"] !== undefined)
       entry["denied-models"] = patch["denied-models"];
+    if (patch["allowed-mcp"] !== undefined)
+      entry["allowed-mcp"] = patch["allowed-mcp"];
     this.live.set(entry.key, entry);
     this.persist();
     return toView(entry, "managed");

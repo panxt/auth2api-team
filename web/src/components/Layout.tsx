@@ -1,5 +1,27 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
+import { useTheme, ThemePref } from "../lib/theme";
+
+const THEME_META: Record<ThemePref, { icon: string; label: string }> = {
+  system: { icon: "🖥️", label: "跟随系统" },
+  light: { icon: "☀️", label: "明亮" },
+  dark: { icon: "🌙", label: "暗黑" },
+};
+
+function ThemeToggle() {
+  const { pref, cycle } = useTheme();
+  const m = THEME_META[pref];
+  return (
+    <button
+      onClick={cycle}
+      className="mt-2 w-full btn-secondary text-xs"
+      title="切换主题:跟随系统 → 明亮 → 暗黑"
+    >
+      <span aria-hidden>{m.icon}</span>
+      <span className="ml-1">主题 · {m.label}</span>
+    </button>
+  );
+}
 
 interface NavItem {
   to: string;
@@ -16,8 +38,8 @@ const NAV: NavItemDef[] = [
   { to: "/stats", label: "看板", icon: "📊" },
   { to: "/users", label: "用户", icon: "👥" },
   { to: "/accounts", label: "账号", icon: "🔌" },
-  { to: "/logs", label: "日志", icon: "📜" },
   { to: "/config", label: "设置", icon: "⚙️", adminOnly: true },
+  { to: "/logs", label: "日志", icon: "📜" },
 ];
 
 export function Layout() {
@@ -68,6 +90,7 @@ export function Layout() {
               <span className="ml-1 badge-muted">只读</span>
             )}
           </div>
+          <ThemeToggle />
           <button
             onClick={onLogout}
             className="mt-2 w-full btn-secondary text-xs"

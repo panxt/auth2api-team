@@ -45,6 +45,16 @@ function emptyConsumption(): Consumption {
   return { tokens: 0, costUsd: 0 };
 }
 
+/** MCP gateway records each tool call as endpoint "MCP <server>/<tool>". Pull
+ *  the upstream server id back out, or null for non-MCP endpoints. */
+function mcpServerOf(endpoint: string): string | null {
+  const PREFIX = "MCP ";
+  if (!endpoint.startsWith(PREFIX)) return null;
+  const rest = endpoint.slice(PREFIX.length);
+  const slash = rest.indexOf("/");
+  return slash < 0 ? rest : rest.slice(0, slash);
+}
+
 /**
  * Token + cost consumption per API key, tracked on two windows (current UTC
  * month and current UTC day) and at two grains (per-key total and
@@ -63,6 +73,10 @@ export class QuotaTracker {
   private monthByKeyModel = new Map<string, Consumption>();
   private dayByKey = new Map<string, Consumption>();
   private dayByKeyModel = new Map<string, Consumption>();
+  // Per-key MCP call counts (month window), broken down by upstream server id.
+  // MCP tool calls carry no token usage, so they're tracked separately from
+  // Consumption (which is token/cost only) — count only, keyed apiKeyHash→(server→n).
+  private monthMcpByKey = new Map<string, Map<string, number>>();
   private overrides?: Record<string, ModelPrice>;
 
   constructor(pricingOverrides?: Record<string, ModelPrice>) {
@@ -106,6 +120,14 @@ export class QuotaTracker {
     return map.get(apiKeyHash) ?? emptyConsumption();
   }
 
+  /** Month-to-date MCP tool-call counts for one API key, keyed by upstream
+   *  server id. Empty object when the key made no MCP calls this month. */
+  mcpConsumed(apiKeyHash: string): Record<string, number> {
+    this.rollIfNeeded();
+    const m = this.monthMcpByKey.get(apiKeyHash);
+    return m ? Object.fromEntries(m) : {};
+  }
+
   /** Drop accumulated counts when the wall clock crosses a window boundary. */
   private rollIfNeeded(): void {
     const now = new Date();
@@ -114,6 +136,7 @@ export class QuotaTracker {
       this.monthKey = mk;
       this.monthByKey.clear();
       this.monthByKeyModel.clear();
+      this.monthMcpByKey.clear();
     }
     const dk = dayKeyOf(now);
     if (dk !== this.dayKey) {
@@ -136,11 +159,26 @@ export class QuotaTracker {
    * events with no usage (failures, disconnects before any token) are skipped.
    */
   private applyEvent(ev: StatsEvent): void {
-    if (!ev.usage) return;
     const evDate = new Date(ev.ts);
     const inMonth = monthKeyOf(evDate) === this.monthKey;
     const inDay = dayKeyOf(evDate) === this.dayKey;
     if (!inMonth && !inDay) return;
+
+    // MCP tool calls have no token usage — count them (per key × server) and
+    // return, since the token/cost aggregation below is a no-op for them.
+    const mcpServer = mcpServerOf(ev.endpoint);
+    if (mcpServer) {
+      if (inMonth) {
+        let m = this.monthMcpByKey.get(ev.apiKeyHash);
+        if (!m) {
+          m = new Map();
+          this.monthMcpByKey.set(ev.apiKeyHash, m);
+        }
+        m.set(mcpServer, (m.get(mcpServer) ?? 0) + 1);
+      }
+      return;
+    }
+    if (!ev.usage) return;
 
     const provider = (ev.provider ?? undefined) as ProviderId | undefined;
     const tokens = billableTokens(ev.usage, provider);
