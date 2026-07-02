@@ -1113,6 +1113,8 @@ export function createServer(
       // Public base URL for generated access docs (falls back client-side to
       // window.location.origin when unset).
       publicBaseUrl: config["public-base-url"] ?? null,
+      // https address for the Cowork desktop client (cert section of the doc).
+      coworkBaseUrl: config["cowork-base-url"] ?? null,
     });
   });
 

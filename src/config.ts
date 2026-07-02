@@ -381,6 +381,13 @@ export interface Config {
    * that point at the real deployment.
    */
   "public-base-url"?: string;
+  /**
+   * https reverse-proxy address for the Claude desktop **Cowork** client (which
+   * rejects plain http). Used in the access doc's "方式二" cert section. Optional
+   * — when unset the doc shows a placeholder and tells the member to ask an
+   * admin. e.g. "https://172.16.13.203:8443".
+   */
+  "cowork-base-url"?: string;
   "auth-dir": string;
   "api-keys": Map<string, ApiKeyEntry>;
   "body-limit": string;

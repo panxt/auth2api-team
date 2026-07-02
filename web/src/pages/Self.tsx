@@ -197,7 +197,7 @@ export function Self() {
                 className="btn-secondary"
                 onClick={() =>
                   navigator.clipboard.writeText(
-                    buildAccessDoc(rotated.key, rotated.label, whoami?.publicBaseUrl),
+                    buildAccessDoc(rotated.key, rotated.label, whoami?.publicBaseUrl, whoami?.coworkBaseUrl),
                   )
                 }
               >
@@ -205,7 +205,7 @@ export function Self() {
               </button>
               <button
                 className="btn-secondary"
-                onClick={() => downloadAccessDoc(rotated.key, rotated.label, rotated.id, whoami?.publicBaseUrl)}
+                onClick={() => downloadAccessDoc(rotated.key, rotated.label, rotated.id, whoami?.publicBaseUrl, whoami?.coworkBaseUrl)}
               >
                 下载文档 (.md)
               </button>
@@ -221,7 +221,7 @@ export function Self() {
                 className="md-body mt-2 bg-ink-900 border border-ink-800 p-4 rounded-md max-h-96 overflow-auto"
                 dangerouslySetInnerHTML={{
                   __html: renderAccessDocHtml(
-                    buildAccessDoc(rotated.key, rotated.label, whoami?.publicBaseUrl),
+                    buildAccessDoc(rotated.key, rotated.label, whoami?.publicBaseUrl, whoami?.coworkBaseUrl),
                   ),
                 }}
               />

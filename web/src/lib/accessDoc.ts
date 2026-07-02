@@ -13,8 +13,10 @@ export function buildAccessDoc(
   key: string,
   label: string | null,
   baseUrl?: string | null,
+  coworkBaseUrl?: string | null,
 ): string {
   const base = baseUrl || window.location.origin;
+  const cowork = coworkBaseUrl || "https://<管理员提供的-https-地址>";
   const who = label ? `(${label})` : "";
   return `# 🚀 auth2api 接入与使用手册 ${who}
 
@@ -96,10 +98,71 @@ export ANTHROPIC_AUTH_TOKEN="${key}"
 
 > 仅适用新版 Claude 桌面客户端的 **Cowork / 3P enterprise** 模式(支持自定义服务地址);普通 Claude.ai 聊天 App 没有该设置项。
 
-⚠️ Cowork **强制 https**,会拒绝明文 \`http://\` 地址并报 \`baseUrl: must use https\`。这条路需**管理员提供一个 https 地址 + 根证书**:
-1. 装管理员发的根证书(macOS 拖进「系统」钥匙串设「始终信任」,或 \`sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain <cert>\`;Windows 以管理员 PowerShell \`Import-Certificate -CertStoreLocation Cert:\\LocalMachine\\Root\`)。
-2. 客户端 baseUrl 填管理员给的 https 地址(必须完全一致,否则证书 SAN 对不上报 hostname mismatch),API Key 填你的 Key。
-> Firefox 用自己的证书库需单独导入;Chrome / Edge / Safari / Cowork 走系统库。找不到 https 地址就联系管理员。
+⚠️ Cowork **强制 https**,会拒绝明文 \`http://\` 地址并报 \`baseUrl: must use https\`。所以要走这条路,需用 **https 地址**(\`${cowork}\`)+ 安装**根证书**(向管理员索取证书文件,如 \`auth2api-aicoding.crt\`)。
+
+### 第 1 步:安装并信任根证书
+
+#### 🍎 macOS
+
+**方法 A — 命令行(最快)**
+\`\`\`bash
+sudo security add-trusted-cert -d -r trustRoot \\
+  -k /Library/Keychains/System.keychain \\
+  ~/Downloads/auth2api-aicoding.crt
+\`\`\`
+输开机密码即可(\`-r trustRoot\` = 作为受信任根证书)。
+
+**方法 B — 图形界面**
+1. 双击 \`auth2api-aicoding.crt\` → 打开「钥匙串访问」
+2. 左侧选 **「系统」(System)** 钥匙串(**不要**选「登录」),把证书拖进去
+3. 双击该证书 → 展开「信任」→「使用此证书时」改为 **「始终信任」**
+4. 关窗口,输密码确认
+
+**验证**
+\`\`\`bash
+curl -s ${cowork}/health
+# 不加 -k 也返回 {"status":"ok"} 即成功
+\`\`\`
+浏览器打开 \`${cowork}/health\`,地址栏锁头无红叉(Chrome / Safari 需**完全退出重开**才会重读系统证书)。
+
+#### 🪟 Windows
+
+**方法 A — PowerShell(必须「以管理员身份运行」)**
+\`\`\`powershell
+Import-Certificate -FilePath "$env:USERPROFILE\\Downloads\\auth2api-aicoding.crt" -CertStoreLocation Cert:\\LocalMachine\\Root
+\`\`\`
+不是管理员身份的话写不进 \`LocalMachine\`,会失败。
+
+**方法 B — 图形界面**
+1. 双击 \`auth2api-aicoding.crt\` →「安装证书」
+2. 存储位置选 **「本地计算机」(Local Machine)** → 下一步(弹 UAC,同意)
+3. 选「将所有的证书放入下列存储」→ 浏览 → 选 **「受信任的根证书颁发机构」**
+4. 下一步 → 完成 → 安全警告点「是」
+
+**验证**
+\`\`\`powershell
+curl.exe -s ${cowork}/health
+# 返回 {"status":"ok"} 即成功(注意是 curl.exe,不是 curl 别名)
+\`\`\`
+Edge / Chrome 打开 \`${cowork}/health\` 锁头正常(浏览器需**重启**才会重读系统证书)。
+
+> **Firefox** 用自己的证书库,不读系统的:设置 → 隐私与安全 → 证书 → 查看证书 → 证书颁发机构 → 导入,勾「信任此 CA 标识网站」。Chrome / Edge / Safari / Cowork 走系统库,按上面做即可。
+
+### 第 2 步:在 Cowork 里填服务地址 + Key
+
+- **Base URL**:\`${cowork}\`(必须带 https、用这个完整地址;填别的 IP 或 http 会报 \`hostname mismatch\` 或 \`must use https\`)
+- **API Key**:你的 Key(见文首)
+
+填完点 Save / Apply。
+
+### 排错
+
+| 现象 | 处理 |
+|---|---|
+| 还报 \`must use https\` | baseUrl 没改成 https,或没点 Save / Apply |
+| \`cert invalid / untrusted\` | 根证书没装或没信任,回第 1 步 |
+| \`hostname mismatch\` | 证书域名与所填地址不一致,找管理员确认 |
+| 流式输出卡住 | 找管理员检查反代(Caddy)配置 |
 
 ---
 
@@ -211,8 +274,9 @@ export function downloadAccessDoc(
   label: string | null,
   idForName: string,
   baseUrl?: string | null,
+  coworkBaseUrl?: string | null,
 ): void {
-  const md = buildAccessDoc(key, label, baseUrl);
+  const md = buildAccessDoc(key, label, baseUrl, coworkBaseUrl);
   const blob = new Blob([md], { type: "text/markdown" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
