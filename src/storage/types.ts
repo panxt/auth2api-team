@@ -161,5 +161,7 @@ export function normalizeKeyEntry(v: any): ApiKeyEntry | null {
     "allowed-models": v["allowed-models"],
     "denied-models": v["denied-models"],
     "allowed-mcp": v["allowed-mcp"],
+    "expires-at": v["expires-at"],
+    "mcp-quota": v["mcp-quota"],
   };
 }

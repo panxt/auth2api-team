@@ -19,6 +19,7 @@ import { RoutingController } from "./accounts/routing";
 import { PrewarmScheduler } from "./accounts/prewarm";
 import { McpController } from "./mcp/registry";
 import { Notifier } from "./notify/notifier";
+import { ExpirySweep } from "./keys/expiry-sweep";
 import type { PrewarmResult } from "./providers/types";
 
 function prompt(question: string): Promise<string> {
@@ -281,6 +282,11 @@ async function startServer(): Promise<void> {
 
   // Outbound notifier (飞书). Default-disabled; opt-in via UI. External egress.
   const notifier = new Notifier(storage.settings, config.notify);
+
+  // Key-expiry sweep: disables expired managed keys + fires advance/expired
+  // alerts. Hourly; also runs once at startup.
+  const expirySweep = new ExpirySweep(keyStore, notifier);
+  expirySweep.start();
 
   const app = createServer(
     config,

@@ -39,6 +39,7 @@ import {
   mcpFanoutServerIds,
   isMcpToolAllowed,
   isMcpServerFull,
+  mcpQuotaError,
 } from "./usage/mcp-access";
 import { LoggingConfig, RoutingConfig, PrewarmConfig, NotifyConfig } from "./config";
 import { Notifier } from "./notify/notifier";
@@ -168,6 +169,15 @@ export function createServer(
     if (!entry || !entry.enabled) {
       res.status(403).json({ error: { message: "Invalid or disabled API key" } });
       return;
+    }
+    // Absolute expiry — reject at/after expires-at (401, distinct from disabled).
+    const exp = entry["expires-at"];
+    if (exp) {
+      const t = Date.parse(exp);
+      if (!Number.isNaN(t) && Date.now() >= t) {
+        res.status(401).json({ error: { message: "API key expired" } });
+        return;
+      }
     }
     // Make the key's identity/policy available to downstream middleware
     // (quota, per-key rate limit) and handlers.
@@ -812,6 +822,10 @@ export function createServer(
         isToolAllowed: (sid: string, tool: string) => isMcpToolAllowed(entry, sid, tool),
         isServerFull: (sid: string) => isMcpServerFull(entry, sid),
         controller: ctrl,
+        overQuota: (sid: string) =>
+          entry
+            ? mcpQuotaError(entry, sid, hashApiKey(entry.key), quotaTracker)
+            : null,
         onToolCall: (serverId: string, tool: string, ok: boolean) =>
           recordMcpCall(res, serverId, tool, ok),
       };

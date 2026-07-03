@@ -14,6 +14,7 @@ import {
   KeyQuota,
   KeyModelQuota,
   KeyRole,
+  McpQuota,
 } from "../api/keys";
 import { fetchMcpServers, fetchMcpTools, McpServerView, McpTool } from "../api/mcp";
 import { ApiError } from "../api/client";
@@ -28,6 +29,8 @@ interface MergedRow extends UsageKey {
   allowedModels: string[] | null; // model allowlist (managed keys only)
   deniedModels: string[] | null;  // model denylist (managed keys only)
   allowedMcp: string[] | null;    // MCP category grants (managed keys only)
+  expiresAt: string | null;       // ISO expiry (managed keys only)
+  mcpQuota: McpQuota | null;      // MCP call-count quota (managed keys only)
 }
 
 function fmtUSD(n: number | undefined): string {
@@ -117,6 +120,8 @@ export function Users() {
           allowedModels: m ? m["allowed-models"] : null,
           deniedModels: m ? m["denied-models"] : null,
           allowedMcp: m ? m["allowed-mcp"] : null,
+          expiresAt: m ? m["expires-at"] : null,
+          mcpQuota: m ? m["mcp-quota"] : null,
         };
       });
       setRows(merged);
@@ -506,6 +511,8 @@ function CreateKeyModal({
   const [allowedModels, setAllowedModels] = useState<string[]>([]);
   const [deniedModels, setDeniedModels] = useState<string[]>([]);
   const [allowedMcp, setAllowedMcp] = useState<string[]>([]);
+  const [expiresAt, setExpiresAt] = useState("");
+  const [mcpQuota, setMcpQuota] = useState<McpQuota>({});
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -517,6 +524,8 @@ function CreateKeyModal({
     setAllowedModels([]);
     setDeniedModels([]);
     setAllowedMcp([]);
+    setExpiresAt("");
+    setMcpQuota({});
     setErr(null);
   }
 
@@ -531,6 +540,8 @@ function CreateKeyModal({
       if (allowedModels.length > 0) input["allowed-models"] = allowedModels;
       if (deniedModels.length > 0) input["denied-models"] = deniedModels;
       if (allowedMcp.length > 0) input["allowed-mcp"] = allowedMcp;
+      if (expiresAt) input["expires-at"] = `${expiresAt}T23:59:59Z`;
+      if (Object.keys(mcpQuota).length > 0) input["mcp-quota"] = mcpQuota;
       const resp = await createKey(input);
       reset();
       onCreated(resp);
@@ -600,6 +611,8 @@ function CreateKeyModal({
           accent="rose"
         />
         <McpGrantPicker servers={mcpServers} selected={allowedMcp} onChange={setAllowedMcp} />
+        <McpQuotaEditor servers={mcpServers} value={mcpQuota} onChange={setMcpQuota} />
+        <ExpiryField value={expiresAt} onChange={setExpiresAt} />
         {err && <div className="badge-err px-3 py-2 block">{err}</div>}
         <div className="flex justify-end gap-2 pt-3 sticky bottom-0 -mx-5 -mb-5 px-5 py-3 bg-ink-900 border-t border-ink-800">
           <button
@@ -646,6 +659,8 @@ function EditKeyModal({
   const [allowedModels, setAllowedModels] = useState<string[]>([]);
   const [deniedModels, setDeniedModels] = useState<string[]>([]);
   const [allowedMcp, setAllowedMcp] = useState<string[]>([]);
+  const [expiresAt, setExpiresAt] = useState("");
+  const [mcpQuota, setMcpQuota] = useState<McpQuota>({});
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -658,6 +673,8 @@ function EditKeyModal({
       setAllowedModels(row.allowedModels ?? []);
       setDeniedModels(row.deniedModels ?? []);
       setAllowedMcp(row.allowedMcp ?? []);
+      setExpiresAt(row.expiresAt ? row.expiresAt.slice(0, 10) : "");
+      setMcpQuota(row.mcpQuota ?? {});
       setErr(null);
     }
   }, [row]);
@@ -679,6 +696,9 @@ function EditKeyModal({
         "allowed-models": allowedModels,
         "denied-models": deniedModels,
         "allowed-mcp": allowedMcp,
+        // Always send so clearing works: "" → null (never expires); {} → null.
+        "expires-at": expiresAt ? `${expiresAt}T23:59:59Z` : null,
+        "mcp-quota": Object.keys(mcpQuota).length > 0 ? mcpQuota : null,
       });
       onSaved();
     } catch (e) {
@@ -734,6 +754,8 @@ function EditKeyModal({
           accent="rose"
         />
         <McpGrantPicker servers={mcpServers} selected={allowedMcp} onChange={setAllowedMcp} />
+        <McpQuotaEditor servers={mcpServers} value={mcpQuota} onChange={setMcpQuota} />
+        <ExpiryField value={expiresAt} onChange={setExpiresAt} />
         {err && <div className="badge-err px-3 py-2 block">{err}</div>}
         <div className="flex justify-end gap-2 pt-3 sticky bottom-0 -mx-5 -mb-5 px-5 py-3 bg-ink-900 border-t border-ink-800">
           <button className="btn-secondary" onClick={onClose}>
@@ -930,6 +952,124 @@ function QuotaEditor({
 }
 
 /* ─── MCP 类目授权(默认拒绝)──────────────────────────────── */
+
+/* ─── Expiry date field ──────────────────────────────────────── */
+
+function ExpiryField({
+  value,
+  onChange,
+}: {
+  value: string; // "YYYY-MM-DD" or ""
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div>
+      <label className="block text-sm text-ink-400 mb-1.5">
+        过期时间{" "}
+        <span className="text-ink-500">(留空 = 永不过期;到期当天结束后该 key 立即 401)</span>
+      </label>
+      <input
+        type="date"
+        className="input !py-1"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </div>
+  );
+}
+
+/* ─── MCP call-count quota editor ────────────────────────────── */
+
+function McpQuotaEditor({
+  servers,
+  value,
+  onChange,
+}: {
+  servers: McpServerView[];
+  value: McpQuota;
+  onChange: (v: McpQuota) => void;
+}) {
+  const num = (s: string): number | undefined => {
+    const n = Number(s);
+    return s.trim() === "" || !Number.isFinite(n) || n <= 0 ? undefined : n;
+  };
+  const setOverall = (k: "daily-calls" | "monthly-calls", s: string) => {
+    const next = { ...value };
+    const v = num(s);
+    if (v === undefined) delete next[k];
+    else next[k] = v;
+    onChange(next);
+  };
+  const setPer = (id: string, k: "daily" | "monthly", s: string) => {
+    const per = { ...(value["per-server"] ?? {}) };
+    const cur = { ...(per[id] ?? {}) };
+    const v = num(s);
+    if (v === undefined) delete cur[k];
+    else cur[k] = v;
+    if (Object.keys(cur).length === 0) delete per[id];
+    else per[id] = cur;
+    const next = { ...value };
+    if (Object.keys(per).length === 0) delete next["per-server"];
+    else next["per-server"] = per;
+    onChange(next);
+  };
+  const per = value["per-server"] ?? {};
+  return (
+    <div>
+      <label className="block text-sm text-ink-400 mb-1.5">
+        MCP 调用次数配额{" "}
+        <span className="text-ink-500">(留空 = 不限制;按 UTC 日/月计数)</span>
+      </label>
+      <div className="border border-ink-800 rounded-md p-2 space-y-2">
+        <div className="flex items-center gap-2 text-sm">
+          <span className="text-ink-400 w-16">整体</span>
+          <input
+            className="input !py-1 text-sm"
+            placeholder="日上限"
+            type="number"
+            min="1"
+            value={value["daily-calls"] ?? ""}
+            onChange={(e) => setOverall("daily-calls", e.target.value)}
+          />
+          <input
+            className="input !py-1 text-sm"
+            placeholder="月上限"
+            type="number"
+            min="1"
+            value={value["monthly-calls"] ?? ""}
+            onChange={(e) => setOverall("monthly-calls", e.target.value)}
+          />
+        </div>
+        {servers.length > 0 && (
+          <div className="text-xs text-ink-500">按单个 MCP(可选,优先于整体):</div>
+        )}
+        {servers.map((s) => (
+          <div key={s.id} className="flex items-center gap-2 text-sm">
+            <span className="font-mono text-ink-300 w-16 truncate" title={s.id}>
+              {s.id}
+            </span>
+            <input
+              className="input !py-1 text-sm"
+              placeholder="日上限"
+              type="number"
+              min="1"
+              value={per[s.id]?.daily ?? ""}
+              onChange={(e) => setPer(s.id, "daily", e.target.value)}
+            />
+            <input
+              className="input !py-1 text-sm"
+              placeholder="月上限"
+              type="number"
+              min="1"
+              value={per[s.id]?.monthly ?? ""}
+              onChange={(e) => setPer(s.id, "monthly", e.target.value)}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function McpGrantPicker({
   servers,

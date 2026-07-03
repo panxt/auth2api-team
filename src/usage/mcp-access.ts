@@ -1,4 +1,5 @@
 import type { ApiKeyEntry } from "../config";
+import type { QuotaTracker } from "./quota";
 
 /**
  * MCP authorization — **default-deny**, with optional per-tool granularity.
@@ -46,4 +47,33 @@ export function isMcpServerFull(
   serverId: string,
 ): boolean {
   return grants(entry).includes(serverId);
+}
+
+/**
+ * MCP call-count quota check. Returns a human error string if calling a tool of
+ * `serverId` now would exceed a cap (per-server first, then overall), else null.
+ * Uses the CURRENT counts (before this call), so caps are inclusive: at count
+ * == cap the next call is refused. Unset caps = unlimited.
+ */
+export function mcpQuotaError(
+  entry: ApiKeyEntry | undefined,
+  serverId: string,
+  apiKeyHash: string,
+  tracker: QuotaTracker | undefined,
+): string | null {
+  const q = entry?.["mcp-quota"];
+  if (!q || !tracker) return null;
+  const ps = q["per-server"]?.[serverId];
+  const checks: Array<{ cap?: number; window: "day" | "month"; server?: string; label: string }> = [
+    { cap: ps?.daily, window: "day", server: serverId, label: `${serverId} 日调用` },
+    { cap: ps?.monthly, window: "month", server: serverId, label: `${serverId} 月调用` },
+    { cap: q["daily-calls"], window: "day", label: "MCP 日调用总量" },
+    { cap: q["monthly-calls"], window: "month", label: "MCP 月调用总量" },
+  ];
+  for (const c of checks) {
+    if (c.cap == null) continue;
+    const used = tracker.mcpCallCount(apiKeyHash, c.window, c.server);
+    if (used >= c.cap) return `${c.label}配额已用尽 (${used}/${c.cap})`;
+  }
+  return null;
 }

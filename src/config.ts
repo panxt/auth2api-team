@@ -140,6 +140,25 @@ export interface ApiKeyEntry {
    * 写操作,默认拒绝更安全)。
    */
   "allowed-mcp"?: string[];
+  /**
+   * Absolute expiry (ISO date/datetime). At/after this instant the key is
+   * rejected with 401. Unset = never expires. A daily sweep also disables
+   * expired keys and sends an advance-notice alert `expiry-warn-days` before.
+   */
+  "expires-at"?: string;
+  /**
+   * Per-key MCP call-count quota (gateway). Unset = unlimited. Enforced per UTC
+   * day/month; `per-server` caps a specific upstream, checked before the
+   * overall caps. All optional — omit to not limit that dimension.
+   */
+  "mcp-quota"?: McpQuota;
+}
+
+/** MCP call-count quota (counts only; no tokens). All caps optional. */
+export interface McpQuota {
+  "daily-calls"?: number;
+  "monthly-calls"?: number;
+  "per-server"?: Record<string, { daily?: number; monthly?: number }>;
 }
 
 /** Raw object form of an api-key entry as parsed from YAML (before defaults). */
@@ -155,6 +174,8 @@ interface RawApiKeyEntry {
   "allowed-models"?: string[];
   "denied-models"?: string[];
   "allowed-mcp"?: string[];
+  "expires-at"?: string;
+  "mcp-quota"?: McpQuota;
 }
 
 /** Effective role of a key, with back-compat: an explicit role wins, else
@@ -527,6 +548,8 @@ export function normalizeApiKeys(
         "allowed-models": item["allowed-models"],
         "denied-models": item["denied-models"],
         "allowed-mcp": item["allowed-mcp"],
+        "expires-at": item["expires-at"],
+        "mcp-quota": item["mcp-quota"],
       });
     } else {
       // Don't silently lose a misconfigured entry — a dropped key would just
