@@ -47,24 +47,27 @@ export class ExpirySweep {
       if (Number.isNaN(t)) continue;
       const who = `${v.label || "(unlabeled)"} · ${v.id}`;
       if (now >= t) {
+        // Alert only on the actual enabled→disabled transition, so an
+        // already-disabled expired key doesn't re-alert every tick (dedup is
+        // in-memory and resets on restart / cooldown).
         if (v.enabled) {
           try {
             this.keyStore.update(v.id, { enabled: false });
             disabled++;
+            this.notifier.send({
+              kind: "key-expiry",
+              dedupKey: `expiry:expired:${v.id}`,
+              title: "🔑 API key 已过期并停用",
+              color: "red",
+              fields: [
+                { label: "Key", value: who },
+                { label: "到期时间", value: v["expires-at"]! },
+              ],
+            });
           } catch {
             /* ignore — config key or gone */
           }
         }
-        this.notifier.send({
-          kind: "key-expiry",
-          dedupKey: `expiry:expired:${v.id}`,
-          title: "🔑 API key 已过期并停用",
-          color: "red",
-          fields: [
-            { label: "Key", value: who },
-            { label: "到期时间", value: v["expires-at"]! },
-          ],
-        });
       } else if (warnMs > 0 && t - now <= warnMs) {
         const days = Math.ceil((t - now) / DAY_MS);
         this.notifier.send({

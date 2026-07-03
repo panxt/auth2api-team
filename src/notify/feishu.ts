@@ -70,14 +70,17 @@ export async function sendFeishu(
     });
     const text = await resp.text();
     if (!resp.ok) throw new Error(`feishu HTTP ${resp.status}: ${text.slice(0, 200)}`);
-    // 飞书 returns {code:0,...} on success; non-zero code = logical error.
+    // 飞书 returns {code:0,...} on success; non-zero code = logical error even on
+    // HTTP 200. Parse defensively (a non-JSON 2xx body is treated as success),
+    // but a parsed non-zero code MUST surface — keep it out of the parse catch.
+    let parsed: any = null;
     try {
-      const j = JSON.parse(text);
-      if (typeof j.code === "number" && j.code !== 0) {
-        throw new Error(`feishu code ${j.code}: ${j.msg || text.slice(0, 200)}`);
-      }
+      parsed = JSON.parse(text);
     } catch {
-      /* non-JSON 2xx — treat as success */
+      parsed = null; // non-JSON 2xx — treat as success
+    }
+    if (parsed && typeof parsed.code === "number" && parsed.code !== 0) {
+      throw new Error(`feishu code ${parsed.code}: ${parsed.msg || text.slice(0, 200)}`);
     }
   } finally {
     clearTimeout(t);
