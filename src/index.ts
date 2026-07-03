@@ -18,6 +18,9 @@ import { RequestLogger } from "./logging/logger";
 import { RoutingController } from "./accounts/routing";
 import { PrewarmScheduler } from "./accounts/prewarm";
 import { McpController } from "./mcp/registry";
+import { Notifier } from "./notify/notifier";
+import { ExpirySweep } from "./keys/expiry-sweep";
+import { HealthMonitor } from "./monitor/health-monitor";
 import type { PrewarmResult } from "./providers/types";
 
 function prompt(question: string): Promise<string> {
@@ -232,6 +235,10 @@ async function startServer(): Promise<void> {
   );
   requestLogger.startCleanup();
 
+  // Outbound notifier (飞书). Default-disabled; opt-in via UI. External egress.
+  // Constructed early so schedulers below can reference it.
+  const notifier = new Notifier(storage.settings, config.notify);
+
   // Account-selection / load-balancing policy. Resolves defaults < yaml <
   // persisted, and pushes it into every provider's manager (hot-swappable).
   const routingController = new RoutingController(
@@ -263,6 +270,28 @@ async function startServer(): Promise<void> {
         console.error(`[prewarm] ${p.id} failed:`, err?.message || err);
       }
     }
+    // Alert on any prewarm failures (per-account error or empty result).
+    const fails = out.flatMap((r) =>
+      (r.results ?? []).filter((x: any) => x && x.ok === false),
+    );
+    if (fails.length > 0) {
+      notifier.send({
+        kind: "prewarm-fail",
+        dedupKey: `prewarm:${new Date().toISOString().slice(0, 13)}`,
+        title: "🔥 暖机失败",
+        color: "orange",
+        fields: [
+          { label: "失败数", value: String(fails.length) },
+          {
+            label: "账号",
+            value: fails
+              .map((f: any) => f.email || f.account || "?")
+              .slice(0, 8)
+              .join(", "),
+          },
+        ],
+      });
+    }
     return out;
   };
   prewarmScheduler = new PrewarmScheduler(
@@ -278,6 +307,15 @@ async function startServer(): Promise<void> {
   const mcpController = new McpController(storage.settings);
   mcpController.start();
 
+  // Key-expiry sweep: disables expired managed keys + fires advance/expired
+  // alerts. Hourly; also runs once at startup.
+  const expirySweep = new ExpirySweep(keyStore, notifier);
+  expirySweep.start();
+
+  // Health monitor: edge-triggered 飞书 alerts on account-down / MCP probe fail.
+  const healthMonitor = new HealthMonitor(registry, mcpController, notifier);
+  healthMonitor.start();
+
   const app = createServer(
     config,
     registry,
@@ -288,6 +326,7 @@ async function startServer(): Promise<void> {
     routingController,
     prewarmScheduler,
     mcpController,
+    notifier,
   );
   const host = config.host || "127.0.0.1";
   const port = config.port;

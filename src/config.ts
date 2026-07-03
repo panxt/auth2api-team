@@ -140,6 +140,25 @@ export interface ApiKeyEntry {
    * 写操作,默认拒绝更安全)。
    */
   "allowed-mcp"?: string[];
+  /**
+   * Absolute expiry (ISO date/datetime). At/after this instant the key is
+   * rejected with 401. Unset = never expires. A daily sweep also disables
+   * expired keys and sends an advance-notice alert `expiry-warn-days` before.
+   */
+  "expires-at"?: string;
+  /**
+   * Per-key MCP call-count quota (gateway). Unset = unlimited. Enforced per UTC
+   * day/month; `per-server` caps a specific upstream, checked before the
+   * overall caps. All optional — omit to not limit that dimension.
+   */
+  "mcp-quota"?: McpQuota;
+}
+
+/** MCP call-count quota (counts only; no tokens). All caps optional. */
+export interface McpQuota {
+  "daily-calls"?: number;
+  "monthly-calls"?: number;
+  "per-server"?: Record<string, { daily?: number; monthly?: number }>;
 }
 
 /** Raw object form of an api-key entry as parsed from YAML (before defaults). */
@@ -155,6 +174,8 @@ interface RawApiKeyEntry {
   "allowed-models"?: string[];
   "denied-models"?: string[];
   "allowed-mcp"?: string[];
+  "expires-at"?: string;
+  "mcp-quota"?: McpQuota;
 }
 
 /** Effective role of a key, with back-compat: an explicit role wins, else
@@ -242,6 +263,78 @@ export const DEFAULT_LOGGING_CONFIG: LoggingConfig = {
     "cleanup-interval-minutes": 60,
   },
 };
+
+/**
+ * Outbound notification policy (飞书 / Lark). NEW external egress — default OFF
+ * to preserve the "no external egress" baseline. Webhook + optional HMAC sign;
+ * content is redacted (key label + hash prefix only, never the raw secret).
+ * Persisted to SettingsStore (key "notify"); UI-editable, hot-reloaded.
+ */
+export interface NotifyConfig {
+  /** Master switch. When false, Notifier.send() is a no-op. */
+  enabled: boolean;
+  feishu: {
+    /** Custom-bot incoming webhook URL. */
+    "webhook-url": string;
+    /** Optional signing secret (飞书 加签); empty = no signature. */
+    secret: string;
+  };
+  /** Which alert sources fire. */
+  alerts: {
+    /** Cost/token quota crossing these percent thresholds (e.g. [80,100]). */
+    "quota-thresholds": number[];
+    /** Upstream account went unavailable / needs re-auth. */
+    "account-down": boolean;
+    /** Daily prewarm run had failures. */
+    "prewarm-fail": boolean;
+    /** A registered MCP upstream failed health/probe. */
+    "mcp-probe-fail": boolean;
+    /** Key nearing expiry (advance notice) + expired sweep. */
+    "key-expiry": boolean;
+  };
+  /** Advance-notice lead time for key expiry, in days (0 = only on expiry). */
+  "expiry-warn-days": number;
+  /** Per-(type|subject|period) dedup cooldown, minutes. */
+  "dedup-minutes": number;
+}
+
+export const DEFAULT_NOTIFY_CONFIG: NotifyConfig = {
+  enabled: false, // OFF by default — external egress is opt-in
+  feishu: { "webhook-url": "", secret: "" },
+  alerts: {
+    "quota-thresholds": [80, 100],
+    "account-down": true,
+    "prewarm-fail": true,
+    "mcp-probe-fail": true,
+    "key-expiry": true,
+  },
+  "expiry-warn-days": 7,
+  "dedup-minutes": 360,
+};
+
+/** Merge notify config: defaults < config.yaml `notify:` < persisted override.
+ *  Deep-merges nested feishu/alerts. */
+export function resolveNotifyConfig(
+  ...layers: (Partial<NotifyConfig> | undefined | null)[]
+): NotifyConfig {
+  const out: NotifyConfig = {
+    ...DEFAULT_NOTIFY_CONFIG,
+    feishu: { ...DEFAULT_NOTIFY_CONFIG.feishu },
+    alerts: { ...DEFAULT_NOTIFY_CONFIG.alerts },
+  };
+  for (const layer of layers) {
+    if (!layer) continue;
+    for (const [k, v] of Object.entries(layer)) {
+      if (v === undefined) continue;
+      if ((k === "feishu" || k === "alerts") && v && typeof v === "object") {
+        (out as any)[k] = { ...(out as any)[k], ...(v as object) };
+      } else {
+        (out as any)[k] = v;
+      }
+    }
+  }
+  return out;
+}
 
 /**
  * Merge logging config sources in precedence order:
@@ -416,6 +509,8 @@ export interface Config {
   routing?: Partial<RoutingConfig>;
   /** Optional seed for the daily window-prewarm scheduler. */
   prewarm?: Partial<PrewarmConfig>;
+  /** Optional seed for outbound notifications (飞书). */
+  notify?: Partial<NotifyConfig>;
   debug: DebugMode;
 }
 
@@ -453,6 +548,8 @@ export function normalizeApiKeys(
         "allowed-models": item["allowed-models"],
         "denied-models": item["denied-models"],
         "allowed-mcp": item["allowed-mcp"],
+        "expires-at": item["expires-at"],
+        "mcp-quota": item["mcp-quota"],
       });
     } else {
       // Don't silently lose a misconfigured entry — a dropped key would just

@@ -25,6 +25,8 @@ export interface KeyInput {
   "allowed-models"?: ApiKeyEntry["allowed-models"];
   "denied-models"?: ApiKeyEntry["denied-models"];
   "allowed-mcp"?: ApiKeyEntry["allowed-mcp"];
+  "expires-at"?: ApiKeyEntry["expires-at"] | null;
+  "mcp-quota"?: ApiKeyEntry["mcp-quota"] | null;
 }
 
 /** A key as shown to the UI — never includes the raw secret, only its id. */
@@ -41,6 +43,8 @@ export interface KeyView {
   "allowed-models": ApiKeyEntry["allowed-models"] | null;
   "denied-models": ApiKeyEntry["denied-models"] | null;
   "allowed-mcp": ApiKeyEntry["allowed-mcp"] | null;
+  "expires-at": ApiKeyEntry["expires-at"] | null;
+  "mcp-quota": ApiKeyEntry["mcp-quota"] | null;
 }
 
 function keyId(key: string): string {
@@ -64,6 +68,8 @@ function normalizeEntry(v: any): ApiKeyEntry {
     "allowed-models": v["allowed-models"],
     "denied-models": v["denied-models"],
     "allowed-mcp": v["allowed-mcp"],
+    "expires-at": v["expires-at"],
+    "mcp-quota": v["mcp-quota"],
   };
 }
 
@@ -81,6 +87,8 @@ function toView(entry: ApiKeyEntry, source: "config" | "managed"): KeyView {
     "allowed-models": entry["allowed-models"] ?? null,
     "denied-models": entry["denied-models"] ?? null,
     "allowed-mcp": entry["allowed-mcp"] ?? null,
+    "expires-at": entry["expires-at"] ?? null,
+    "mcp-quota": entry["mcp-quota"] ?? null,
   };
 }
 
@@ -144,6 +152,8 @@ export class ManagedKeyStore {
       "allowed-models": input["allowed-models"],
       "denied-models": input["denied-models"],
       "allowed-mcp": input["allowed-mcp"],
+      "expires-at": input["expires-at"] ?? undefined,
+      "mcp-quota": input["mcp-quota"] ?? undefined,
     };
     this.managed.set(key, entry);
     this.live.set(key, entry);
@@ -191,6 +201,10 @@ export class ManagedKeyStore {
       entry["denied-models"] = patch["denied-models"];
     if (patch["allowed-mcp"] !== undefined)
       entry["allowed-mcp"] = patch["allowed-mcp"];
+    if (patch["expires-at"] !== undefined)
+      entry["expires-at"] = patch["expires-at"] ?? undefined;
+    if (patch["mcp-quota"] !== undefined)
+      entry["mcp-quota"] = patch["mcp-quota"] ?? undefined;
     this.live.set(entry.key, entry);
     this.persist();
     return toView(entry, "managed");

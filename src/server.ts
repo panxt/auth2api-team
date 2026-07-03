@@ -39,8 +39,10 @@ import {
   mcpFanoutServerIds,
   isMcpToolAllowed,
   isMcpServerFull,
+  mcpQuotaError,
 } from "./usage/mcp-access";
-import { LoggingConfig, RoutingConfig, PrewarmConfig } from "./config";
+import { LoggingConfig, RoutingConfig, PrewarmConfig, NotifyConfig } from "./config";
+import { Notifier } from "./notify/notifier";
 
 // Simple in-memory rate limiter per IP
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -94,6 +96,7 @@ export function createServer(
   routingController?: RoutingController,
   prewarmScheduler?: PrewarmScheduler,
   mcpController?: McpController,
+  notifier?: Notifier,
 ): express.Application {
   const app = express();
   // Stats slots are seeded whenever any subsystem needs them: the recorder
@@ -167,6 +170,15 @@ export function createServer(
       res.status(403).json({ error: { message: "Invalid or disabled API key" } });
       return;
     }
+    // Absolute expiry — reject at/after expires-at (401, distinct from disabled).
+    const exp = entry["expires-at"];
+    if (exp) {
+      const t = Date.parse(exp);
+      if (!Number.isNaN(t) && Date.now() >= t) {
+        res.status(401).json({ error: { message: "API key expired" } });
+        return;
+      }
+    }
     // Make the key's identity/policy available to downstream middleware
     // (quota, per-key rate limit) and handlers.
     res.locals.apiKey = entry;
@@ -193,6 +205,50 @@ export function createServer(
       };
     }
     next();
+  };
+
+  // Fire a飞书 quota alert when a key crosses a configured usage threshold
+  // (e.g. 80% / 100%) on any configured cost/token cap. Dedup (per key|metric|
+  // window|threshold|period) keeps it to once per crossing. No-op if notifier
+  // disabled or the key has no quota.
+  const checkQuotaAlerts = (entry: ApiKeyEntry | undefined): void => {
+    if (!notifier || !quotaTracker || !entry?.quota) return;
+    const thresholds = notifier.quotaThresholds();
+    if (!thresholds.length) return;
+    const hash = hashApiKey(entry.key);
+    const q = entry.quota;
+    const month = quotaTracker.consumed(hash, { window: "month" });
+    const day = quotaTracker.consumed(hash, { window: "day" });
+    const who = `${entry.label || "(unlabeled)"} · ${hash.slice(0, 12)}`;
+    const period = (w: "month" | "day") =>
+      w === "month" ? new Date().toISOString().slice(0, 7) : new Date().toISOString().slice(0, 10);
+    const caps: Array<{ cap?: number; used: number; window: "month" | "day"; metric: string; unit: string }> = [
+      { cap: q["monthly-cost-usd"], used: month.costUsd, window: "month", metric: "月成本", unit: "$" },
+      { cap: q["monthly-tokens"], used: month.tokens, window: "month", metric: "月 Token", unit: "" },
+      { cap: q["daily-cost-usd"], used: day.costUsd, window: "day", metric: "日成本", unit: "$" },
+      { cap: q["daily-tokens"], used: day.tokens, window: "day", metric: "日 Token", unit: "" },
+    ];
+    for (const c of caps) {
+      if (!c.cap || c.cap <= 0) continue;
+      const pct = (c.used / c.cap) * 100;
+      // highest crossed threshold
+      const crossed = thresholds.filter((t) => pct >= t).pop();
+      if (crossed === undefined) continue;
+      notifier.send({
+        kind: "quota",
+        dedupKey: `quota:${hash}:${c.metric}:${period(c.window)}:${crossed}`,
+        title: crossed >= 100 ? "🚫 额度已用尽" : "⚠️ 额度即将用尽",
+        color: crossed >= 100 ? "red" : "orange",
+        fields: [
+          { label: "Key", value: who },
+          { label: "维度", value: c.metric },
+          {
+            label: "用量",
+            value: `${c.unit}${c.used.toFixed(c.unit ? 2 : 0)} / ${c.unit}${c.cap} (${pct.toFixed(1)}%)`,
+          },
+        ],
+      });
+    }
   };
 
   // Record one stats event per request that made it past auth. `finish`
@@ -258,6 +314,7 @@ export function createServer(
         ? statsRecorder.record(input)
         : { v: 1 as const, ts: new Date().toISOString(), ...input };
       quotaTracker?.record(event);
+      checkQuotaAlerts(res.locals.apiKey as ApiKeyEntry | undefined);
 
       // Per-request diagnostic log (separate store + retention). Pulls the
       // error text from an explicit tagStatsError, else from the captured
@@ -616,6 +673,29 @@ export function createServer(
     });
   }
 
+  // ── Outbound notifications (飞书) — admin-only. Secret never returned. ──
+  if (notifier) {
+    app.get("/admin/notify/config", requireAdmin, (_req, res) => {
+      res.json(notifier.getConfig());
+    });
+    app.put("/admin/notify/config", requireAdmin, (req, res) => {
+      try {
+        res.json(notifier.updateConfig((req.body || {}) as Partial<NotifyConfig>));
+      } catch (err: any) {
+        res.status(400).json({ error: { message: err?.message || String(err) } });
+      }
+    });
+    // Send a test card now (bypasses enabled + dedup); reports the real error.
+    app.post("/admin/notify/test", requireAdmin, async (_req, res) => {
+      try {
+        await notifier.test();
+        res.json({ ok: true });
+      } catch (err: any) {
+        res.status(400).json({ error: { message: err?.message || String(err) } });
+      }
+    });
+  }
+
   // ── Routing / load-balancing policy (admin-only) ──
   if (routingController) {
     app.get("/admin/routing/config", requireAdmin, (_req, res) => {
@@ -787,6 +867,10 @@ export function createServer(
         isToolAllowed: (sid: string, tool: string) => isMcpToolAllowed(entry, sid, tool),
         isServerFull: (sid: string) => isMcpServerFull(entry, sid),
         controller: ctrl,
+        overQuota: (sid: string) =>
+          entry
+            ? mcpQuotaError(entry, sid, hashApiKey(entry.key), quotaTracker)
+            : null,
         onToolCall: (serverId: string, tool: string, ok: boolean) =>
           recordMcpCall(res, serverId, tool, ok),
       };

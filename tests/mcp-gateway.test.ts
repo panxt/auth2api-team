@@ -106,6 +106,18 @@ test("per-tool grant (multi-upstream, prefixed): only the granted tool is listed
   assert.match(bad.error.message, /unauthorized/);
 });
 
+test("overQuota gate blocks tools/call with -32000 before executing", async () => {
+  const c = ctx(["gitlab"]);
+  c.overQuota = (sid) => (sid === "gitlab" ? "gitlab 日调用配额已用尽 (2/2)" : null);
+  const r: any = await handleMcpRpc(
+    { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "create_issue" } },
+    c,
+  );
+  assert.ok(r.error);
+  assert.equal(r.error.code, -32000);
+  assert.match(r.error.message, /配额已用尽/);
+});
+
 test("single-upstream key → flat mode: tools/list returns un-namespaced names", async () => {
   const c = ctx(["gitlab"]); // only one server authorized
   const list: any = await handleMcpRpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }, c);

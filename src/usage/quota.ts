@@ -77,6 +77,7 @@ export class QuotaTracker {
   // MCP tool calls carry no token usage, so they're tracked separately from
   // Consumption (which is token/cost only) — count only, keyed apiKeyHash→(server→n).
   private monthMcpByKey = new Map<string, Map<string, number>>();
+  private dayMcpByKey = new Map<string, Map<string, number>>();
   private overrides?: Record<string, ModelPrice>;
 
   constructor(pricingOverrides?: Record<string, ModelPrice>) {
@@ -128,6 +129,23 @@ export class QuotaTracker {
     return m ? Object.fromEntries(m) : {};
   }
 
+  /** MCP call count for one key in a window. `server` scopes to one upstream;
+   *  omit for the cross-server total. Powers per-key MCP call-count quotas. */
+  mcpCallCount(
+    apiKeyHash: string,
+    window: QuotaWindow,
+    server?: string,
+  ): number {
+    this.rollIfNeeded();
+    const map = window === "day" ? this.dayMcpByKey : this.monthMcpByKey;
+    const perServer = map.get(apiKeyHash);
+    if (!perServer) return 0;
+    if (server !== undefined) return perServer.get(server) ?? 0;
+    let sum = 0;
+    for (const n of perServer.values()) sum += n;
+    return sum;
+  }
+
   /** Drop accumulated counts when the wall clock crosses a window boundary. */
   private rollIfNeeded(): void {
     const now = new Date();
@@ -143,6 +161,7 @@ export class QuotaTracker {
       this.dayKey = dk;
       this.dayByKey.clear();
       this.dayByKeyModel.clear();
+      this.dayMcpByKey.clear();
     }
   }
 
@@ -168,14 +187,16 @@ export class QuotaTracker {
     // return, since the token/cost aggregation below is a no-op for them.
     const mcpServer = mcpServerOf(ev.endpoint);
     if (mcpServer) {
-      if (inMonth) {
-        let m = this.monthMcpByKey.get(ev.apiKeyHash);
+      const bump = (map: Map<string, Map<string, number>>) => {
+        let m = map.get(ev.apiKeyHash);
         if (!m) {
           m = new Map();
-          this.monthMcpByKey.set(ev.apiKeyHash, m);
+          map.set(ev.apiKeyHash, m);
         }
         m.set(mcpServer, (m.get(mcpServer) ?? 0) + 1);
-      }
+      };
+      if (inMonth) bump(this.monthMcpByKey);
+      if (inDay) bump(this.dayMcpByKey);
       return;
     }
     if (!ev.usage) return;

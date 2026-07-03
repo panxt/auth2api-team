@@ -30,6 +30,9 @@ export interface GatewayCtx {
   controller: McpController;
   /** Called once per successful tools/call for usage/metering. */
   onToolCall?: (serverId: string, tool: string, ok: boolean) => void;
+  /** Per-key MCP call-count quota gate: returns an error string if calling a
+   *  tool of `serverId` now would exceed a cap, else null. */
+  overQuota?: (serverId: string) => string | null;
 }
 
 /** Returns a JSON-RPC response object, or null for notifications (no reply). */
@@ -112,6 +115,8 @@ export async function handleMcpRpc(
       if (!ctx.isToolAllowed(route.serverId, route.name)) {
         return err(-32602, `unauthorized tool: ${params.name}`);
       }
+      const quotaMsg = ctx.overQuota?.(route.serverId);
+      if (quotaMsg) return err(-32000, quotaMsg);
       try {
         const result = await route.client.callTool(route.name, params.arguments);
         ctx.onToolCall?.(route.serverId, route.name, true);

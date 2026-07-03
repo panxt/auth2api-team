@@ -55,6 +55,13 @@ export interface UsageKeysResp {
 
 export type KeyRole = "admin" | "auditor" | "member";
 
+/** MCP call-count quota (counts only). All caps optional; unset = unlimited. */
+export interface McpQuota {
+  "daily-calls"?: number;
+  "monthly-calls"?: number;
+  "per-server"?: Record<string, { daily?: number; monthly?: number }>;
+}
+
 export interface ManagedKeyView {
   id: string;                    // hash prefix
   label: string | null;
@@ -67,6 +74,8 @@ export interface ManagedKeyView {
   "allowed-models": string[] | null;
   "denied-models": string[] | null;
   "allowed-mcp": string[] | null;
+  "expires-at": string | null;
+  "mcp-quota": McpQuota | null;
   source: "managed" | "config";
 }
 
@@ -96,6 +105,8 @@ export interface CreateKeyInput {
   "allowed-models"?: string[];
   "denied-models"?: string[];
   "allowed-mcp"?: string[];
+  "expires-at"?: string | null;
+  "mcp-quota"?: McpQuota | null;
 }
 
 export type PatchKeyInput = CreateKeyInput;
