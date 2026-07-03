@@ -12,6 +12,10 @@ export class HealthMonitor {
   private timer: ReturnType<typeof setInterval> | null = null;
   private accountUp = new Map<string, boolean>();
   private mcpUp = new Map<string, boolean>();
+  // Highest pool-alert level already fired per "provider:window" (0 none / 1
+  // warn / 2 exhausted). Only alert on escalation; recovery (window reset)
+  // lowers it silently so a fresh window can re-alert.
+  private poolLevel = new Map<string, number>();
 
   constructor(
     private registry: ProviderRegistry,
@@ -56,6 +60,41 @@ export class HealthMonitor {
           this.accountUp.set(id, up);
         }
       }
+      // Aggregate account-pool capacity ("总额度"): warn at pool-threshold%,
+      // exhausted at ~100%. Per provider × window (5h/7d).
+      const threshold = this.notifier.poolThreshold();
+      for (const p of this.registry.all()) {
+        const qp = (p.manager as any).quotaPool?.();
+        if (!qp) continue;
+        for (const w of ["5h", "7d"] as const) {
+          const wp = qp[w];
+          if (!wp || wp.remainingPct == null) continue;
+          const usedPct = (1 - wp.remainingPct) * 100;
+          const exhausted = wp.remainingUnits <= 0 || usedPct >= 99.9;
+          const level = exhausted ? 2 : usedPct >= threshold ? 1 : 0;
+          const id = `${p.id}:${w}`;
+          const prev = this.poolLevel.get(id) ?? 0;
+          if (level > prev) {
+            this.notifier.send({
+              kind: "pool-quota",
+              dedupKey: `pool:${id}:${level}:${wp.soonestReset ?? ""}`,
+              title: level === 2 ? "🚫 总额度已用尽" : "⚠️ 总额度即将用尽",
+              color: level === 2 ? "red" : "orange",
+              fields: [
+                { label: "Provider", value: p.id },
+                { label: "窗口", value: w },
+                { label: "已用", value: `${usedPct.toFixed(1)}%` },
+                {
+                  label: "剩余",
+                  value: `${wp.remainingUnits.toFixed(2)} 等效窗口`,
+                },
+              ],
+            });
+          }
+          this.poolLevel.set(id, level);
+        }
+      }
+
       for (const v of this.mcp?.list() ?? []) {
         const up = v.health.status === "connected";
         if (this.mcpUp.get(v.id) === true && !up) {

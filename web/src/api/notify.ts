@@ -12,8 +12,10 @@ export interface NotifyConfig {
     "prewarm-fail": boolean;
     "mcp-probe-fail": boolean;
     "key-expiry": boolean;
+    "pool-quota": boolean;
   };
   "expiry-warn-days": number;
+  "pool-threshold": number;
   "dedup-minutes": number;
 }
 

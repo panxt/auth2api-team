@@ -291,9 +291,15 @@ export interface NotifyConfig {
     "mcp-probe-fail": boolean;
     /** Key nearing expiry (advance notice) + expired sweep. */
     "key-expiry": boolean;
+    /** Aggregate account-pool capacity (5h/7d weighted windows) hit the
+     *  `pool-threshold` / got exhausted — "总额度快用完/没了". */
+    "pool-quota": boolean;
   };
   /** Advance-notice lead time for key expiry, in days (0 = only on expiry). */
   "expiry-warn-days": number;
+  /** Account-pool used% that triggers the "总额度" warn alert (0..100). A
+   *  separate exhausted (100%) alert always fires when the pool bottoms out. */
+  "pool-threshold": number;
   /** Per-(type|subject|period) dedup cooldown, minutes. */
   "dedup-minutes": number;
 }
@@ -307,8 +313,10 @@ export const DEFAULT_NOTIFY_CONFIG: NotifyConfig = {
     "prewarm-fail": true,
     "mcp-probe-fail": true,
     "key-expiry": true,
+    "pool-quota": true,
   },
   "expiry-warn-days": 7,
+  "pool-threshold": 90,
   "dedup-minutes": 360,
 };
 

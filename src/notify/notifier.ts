@@ -10,7 +10,8 @@ export type NotifyKind =
   | "account-down"
   | "prewarm-fail"
   | "mcp-probe-fail"
-  | "key-expiry";
+  | "key-expiry"
+  | "pool-quota";
 
 const KIND_TOGGLE: Record<NotifyKind, keyof NotifyConfig["alerts"]> = {
   quota: "quota-thresholds", // presence of thresholds gates it (see shouldFire)
@@ -18,6 +19,7 @@ const KIND_TOGGLE: Record<NotifyKind, keyof NotifyConfig["alerts"]> = {
   "prewarm-fail": "prewarm-fail",
   "mcp-probe-fail": "mcp-probe-fail",
   "key-expiry": "key-expiry",
+  "pool-quota": "pool-quota",
 };
 
 export interface NotifyEvent {
@@ -112,6 +114,12 @@ export class Notifier {
   /** Advance-notice lead time for key expiry, in days. */
   expiryWarnDays(): number {
     return Math.max(0, this.config["expiry-warn-days"] ?? 0);
+  }
+
+  /** Account-pool used% that triggers the "总额度" warn alert. */
+  poolThreshold(): number {
+    const t = this.config["pool-threshold"];
+    return typeof t === "number" && t > 0 && t <= 100 ? t : 90;
   }
 
   /** Send a test card NOW — bypasses enabled + dedup, needs a webhook. Throws

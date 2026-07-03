@@ -1305,6 +1305,7 @@ function NotifyCard() {
                 ["prewarm-fail", "暖机失败"],
                 ["mcp-probe-fail", "MCP 探活失败"],
                 ["key-expiry", "Key 到期/临期"],
+                ["pool-quota", "总额度快用完/耗尽"],
               ] as const).map(([k, txt]) => (
                 <label key={k} className="flex items-center gap-1.5">
                   <input
@@ -1318,10 +1319,10 @@ function NotifyCard() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div>
               <label className="block text-xs text-ink-500 mb-1">
-                额度阈值(%,逗号分隔)
+                每 key 额度阈值(%,逗号分隔)
               </label>
               <input
                 className="input !py-1"
@@ -1334,6 +1335,19 @@ function NotifyCard() {
                       .filter((n) => n > 0 && n <= 100),
                   })
                 }
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-ink-500 mb-1">
+                总额度告警阈值(%)
+              </label>
+              <input
+                className="input !py-1"
+                type="number"
+                min="1"
+                max="100"
+                value={cfg["pool-threshold"]}
+                onChange={(e) => patch({ "pool-threshold": Number(e.target.value) })}
               />
             </div>
             <div>
