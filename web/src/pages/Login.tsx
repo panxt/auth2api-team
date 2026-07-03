@@ -1,9 +1,11 @@
 import { FormEvent, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
+import { useBrand } from "../lib/brand";
 
 export function Login() {
   const { login } = useAuth();
+  const brand = useBrand();
   const nav = useNavigate();
   const [key, setKey] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -27,7 +29,7 @@ export function Login() {
     <div className="min-h-screen bg-ink-950 text-ink-100 flex items-center justify-center p-4">
       <div className="w-full max-w-md card">
         <div className="text-center mb-6">
-          <div className="text-2xl font-semibold tracking-tight">auth2api</div>
+          <div className="text-2xl font-semibold tracking-tight">{brand}</div>
           <div className="text-sm text-ink-400 mt-1">Admin Dashboard</div>
         </div>
 

@@ -56,7 +56,9 @@ export function Layout() {
       {/* Sidebar */}
       <aside className="w-56 shrink-0 border-r border-ink-800 flex flex-col">
         <div className="p-5 border-b border-ink-800">
-          <div className="text-lg font-semibold tracking-tight">auth2api</div>
+          <div className="text-lg font-semibold tracking-tight">
+            {whoami?.brand || "auth2api"}
+          </div>
           <div className="text-xs text-ink-500 mt-0.5">admin dashboard</div>
         </div>
 

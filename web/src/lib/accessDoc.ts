@@ -14,13 +14,15 @@ export function buildAccessDoc(
   label: string | null,
   baseUrl?: string | null,
   coworkBaseUrl?: string | null,
+  brand?: string | null,
 ): string {
   const base = baseUrl || window.location.origin;
   const cowork = coworkBaseUrl || "https://<管理员提供的-https-地址>";
   const who = label ? `(${label})` : "";
-  return `# 🚀 auth2api 接入与使用手册 ${who}
+  const name = brand || "auth2api";
+  return `# 🚀 ${name} 接入与使用手册 ${who}
 
-> 我们用内部代理 **auth2api** 把团队的 Claude / Codex 订阅统一成一个 API。你只需一个 **API Key**,就能在 Claude Code、Claude 桌面 App、各种客户端里用,**无需自己登录、无需自己付费**。
+> 我们用内部代理 **${name}** 把团队的 Claude / Codex 订阅统一成一个 API。你只需一个 **API Key**,就能在 Claude Code、Claude 桌面 App、各种客户端里用,**无需自己登录、无需自己付费**。
 
 > ⚠️ **此 Key 等同于团队订阅的钥匙,仅限本人**:不要发微信 / Slack / 邮件、不要传到 Git、不要和 Base URL 拼在一张图里发出去。怀疑泄漏立刻找管理员吊销重发;离职 / 不用了主动注销。
 
@@ -292,8 +294,9 @@ export function downloadAccessDoc(
   idForName: string,
   baseUrl?: string | null,
   coworkBaseUrl?: string | null,
+  brand?: string | null,
 ): void {
-  const md = buildAccessDoc(key, label, baseUrl, coworkBaseUrl);
+  const md = buildAccessDoc(key, label, baseUrl, coworkBaseUrl, brand);
   const blob = new Blob([md], { type: "text/markdown" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");

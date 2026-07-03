@@ -493,6 +493,13 @@ export interface Config {
    */
   "public-base-url"?: string;
   /**
+   * Display/brand name shown in the UI (sidebar, login, access docs). Purely
+   * cosmetic — internal identifiers (provider ids, /mcp serverInfo, cert file
+   * names) stay "auth2api" for compatibility. Seed here; UI-editable override
+   * lives in SettingsStore (key "brand"). Falls back to "auth2api".
+   */
+  brand?: string;
+  /**
    * https reverse-proxy address for the Claude desktop **Cowork** client (which
    * rejects plain http). Used in the access doc's "方式二" cert section. Optional
    * — when unset the doc shows a placeholder and tells the member to ask an

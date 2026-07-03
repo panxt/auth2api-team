@@ -327,6 +327,7 @@ async function startServer(): Promise<void> {
     prewarmScheduler,
     mcpController,
     notifier,
+    storage.settings,
   );
   const host = config.host || "127.0.0.1";
   const port = config.port;

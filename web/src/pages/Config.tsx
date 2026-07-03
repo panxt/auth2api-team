@@ -33,6 +33,7 @@ import {
   testNotify,
   NotifyConfig,
 } from "../api/notify";
+import { fetchBrand, updateBrand } from "../api/brand";
 import { Modal } from "../components/Modal";
 
 /* ── shared small formatters (local copies) ────────────────────── */
@@ -121,6 +122,7 @@ export function Config() {
         </p>
       </header>
       <div className="space-y-4">
+        <BrandCard />
         <RoutingCard />
         <PrewarmCard />
         <McpCard />
@@ -1387,6 +1389,73 @@ function NotifyCard() {
               title={!cfg.feishu["webhook-url"] ? "先填 webhook" : "发送测试通知"}
             >
               {testing ? "发送中..." : "发送测试"}
+            </button>
+            {msg && <span className="text-ink-400 text-sm">{msg}</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Brand (display name) settings card ─────────────────────── */
+
+function BrandCard() {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchBrand()
+      .then((r) => setName(r.name || ""))
+      .catch(() => setName(""))
+      .finally(() => setLoaded(true));
+  }, []);
+
+  async function save() {
+    setSaving(true);
+    setMsg(null);
+    try {
+      const r = await updateBrand(name.trim());
+      setName(r.name);
+      setMsg("已保存 — 刷新页面生效");
+      setTimeout(() => setMsg(null), 3000);
+    } catch (e) {
+      setMsg(`保存失败: ${(e as ApiError).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <button
+        className="flex items-center justify-between w-full text-left"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="font-medium">
+          🏷️ 品牌显示名
+          {loaded && <span className="text-ink-500 text-xs ml-2">{name || "auth2api"}</span>}
+        </span>
+        <span className="text-ink-500 text-sm">{open ? "收起" : "展开"}</span>
+      </button>
+      {open && (
+        <div className="mt-4 space-y-3 text-sm">
+          <p className="text-xs text-ink-500">
+            仅改展示名(侧边栏、登录页、接入文档标题)。内部标识(provider、/mcp
+            serverInfo、证书文件名)保持 auth2api 不变。留空 = 恢复默认。
+          </p>
+          <div className="flex items-center gap-2">
+            <input
+              className="input !py-1 max-w-xs"
+              placeholder="auth2api"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+            <button className="btn-primary text-sm" onClick={save} disabled={saving}>
+              {saving ? "保存中..." : "保存"}
             </button>
             {msg && <span className="text-ink-400 text-sm">{msg}</span>}
           </div>

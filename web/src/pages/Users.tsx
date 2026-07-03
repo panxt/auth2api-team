@@ -448,7 +448,7 @@ export function Users() {
                 className="btn-secondary"
                 onClick={() =>
                   navigator.clipboard.writeText(
-                    buildAccessDoc(createdKey.key, createdKey.label, whoami?.publicBaseUrl, whoami?.coworkBaseUrl),
+                    buildAccessDoc(createdKey.key, createdKey.label, whoami?.publicBaseUrl, whoami?.coworkBaseUrl, whoami?.brand),
                   )
                 }
               >
@@ -457,7 +457,7 @@ export function Users() {
               <button
                 className="btn-secondary"
                 onClick={() =>
-                  downloadAccessDoc(createdKey.key, createdKey.label, createdKey.id, whoami?.publicBaseUrl, whoami?.coworkBaseUrl)
+                  downloadAccessDoc(createdKey.key, createdKey.label, createdKey.id, whoami?.publicBaseUrl, whoami?.coworkBaseUrl, whoami?.brand)
                 }
               >
                 下载文档 (.md)
@@ -477,7 +477,7 @@ export function Users() {
                 className="md-body mt-2 bg-ink-900 border border-ink-800 p-4 rounded-md max-h-96 overflow-auto"
                 dangerouslySetInnerHTML={{
                   __html: renderAccessDocHtml(
-                    buildAccessDoc(createdKey.key, createdKey.label, whoami?.publicBaseUrl, whoami?.coworkBaseUrl),
+                    buildAccessDoc(createdKey.key, createdKey.label, whoami?.publicBaseUrl, whoami?.coworkBaseUrl, whoami?.brand),
                   ),
                 }}
               />

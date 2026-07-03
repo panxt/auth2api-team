@@ -43,6 +43,7 @@ import {
 } from "./usage/mcp-access";
 import { LoggingConfig, RoutingConfig, PrewarmConfig, NotifyConfig } from "./config";
 import { Notifier } from "./notify/notifier";
+import type { SettingsStore } from "./storage/types";
 
 // Simple in-memory rate limiter per IP
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -97,6 +98,7 @@ export function createServer(
   prewarmScheduler?: PrewarmScheduler,
   mcpController?: McpController,
   notifier?: Notifier,
+  settings?: SettingsStore,
 ): express.Application {
   const app = express();
   // Stats slots are seeded whenever any subsystem needs them: the recorder
@@ -1357,6 +1359,31 @@ export function createServer(
   // GET /admin/ui/whoami — used by the dashboard SPA right after login to
   // verify the entered admin key, and to display the logged-in identity in
   // the sidebar. Returns the same shape as one row of /admin/usage/keys.
+  // Display brand name (cosmetic). Order: SettingsStore override < config.yaml
+  // seed < "auth2api". Internal identifiers stay "auth2api" regardless.
+  const getBrand = (): string => {
+    const persisted = settings?.get<string>("brand");
+    return (typeof persisted === "string" && persisted.trim()) ||
+      (config.brand && config.brand.trim()) ||
+      "auth2api";
+  };
+
+  // Public (no-auth) brand endpoint so the login page + tab title can render it
+  // before authentication.
+  app.get("/brand", (_req, res) => {
+    res.json({ name: getBrand() });
+  });
+
+  // Admin: set the display brand (persisted to SettingsStore). Empty clears the
+  // override (reverts to yaml seed / default).
+  if (settings) {
+    app.put("/admin/brand", requireAdmin, (req, res) => {
+      const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+      settings.set("brand", name);
+      res.json({ name: getBrand() });
+    });
+  }
+
   app.get("/admin/ui/whoami", (_req, res) => {
     const entry = res.locals.apiKey as ApiKeyEntry | undefined;
     if (!entry) {
@@ -1376,6 +1403,8 @@ export function createServer(
       publicBaseUrl: config["public-base-url"] ?? null,
       // https address for the Cowork desktop client (cert section of the doc).
       coworkBaseUrl: config["cowork-base-url"] ?? null,
+      // Cosmetic display brand (sidebar/login/docs).
+      brand: getBrand(),
     });
   });
 

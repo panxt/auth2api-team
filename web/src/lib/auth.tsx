@@ -18,6 +18,8 @@ export interface WhoAmI {
   publicBaseUrl?: string | null;
   /** https address for Cowork desktop client (cert section of access doc). */
   coworkBaseUrl?: string | null;
+  /** Cosmetic display brand (sidebar/login/docs). */
+  brand?: string | null;
   enabled: boolean;
   apiKeyShort: string;
 }
