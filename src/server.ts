@@ -207,6 +207,50 @@ export function createServer(
     next();
   };
 
+  // Fire a飞书 quota alert when a key crosses a configured usage threshold
+  // (e.g. 80% / 100%) on any configured cost/token cap. Dedup (per key|metric|
+  // window|threshold|period) keeps it to once per crossing. No-op if notifier
+  // disabled or the key has no quota.
+  const checkQuotaAlerts = (entry: ApiKeyEntry | undefined): void => {
+    if (!notifier || !quotaTracker || !entry?.quota) return;
+    const thresholds = notifier.quotaThresholds();
+    if (!thresholds.length) return;
+    const hash = hashApiKey(entry.key);
+    const q = entry.quota;
+    const month = quotaTracker.consumed(hash, { window: "month" });
+    const day = quotaTracker.consumed(hash, { window: "day" });
+    const who = `${entry.label || "(unlabeled)"} · ${hash.slice(0, 12)}`;
+    const period = (w: "month" | "day") =>
+      w === "month" ? new Date().toISOString().slice(0, 7) : new Date().toISOString().slice(0, 10);
+    const caps: Array<{ cap?: number; used: number; window: "month" | "day"; metric: string; unit: string }> = [
+      { cap: q["monthly-cost-usd"], used: month.costUsd, window: "month", metric: "月成本", unit: "$" },
+      { cap: q["monthly-tokens"], used: month.tokens, window: "month", metric: "月 Token", unit: "" },
+      { cap: q["daily-cost-usd"], used: day.costUsd, window: "day", metric: "日成本", unit: "$" },
+      { cap: q["daily-tokens"], used: day.tokens, window: "day", metric: "日 Token", unit: "" },
+    ];
+    for (const c of caps) {
+      if (!c.cap || c.cap <= 0) continue;
+      const pct = (c.used / c.cap) * 100;
+      // highest crossed threshold
+      const crossed = thresholds.filter((t) => pct >= t).pop();
+      if (crossed === undefined) continue;
+      notifier.send({
+        kind: "quota",
+        dedupKey: `quota:${hash}:${c.metric}:${period(c.window)}:${crossed}`,
+        title: crossed >= 100 ? "🚫 额度已用尽" : "⚠️ 额度即将用尽",
+        color: crossed >= 100 ? "red" : "orange",
+        fields: [
+          { label: "Key", value: who },
+          { label: "维度", value: c.metric },
+          {
+            label: "用量",
+            value: `${c.unit}${c.used.toFixed(c.unit ? 2 : 0)} / ${c.unit}${c.cap} (${pct.toFixed(1)}%)`,
+          },
+        ],
+      });
+    }
+  };
+
   // Record one stats event per request that made it past auth. `finish`
   // covers normal responses; `close` covers client disconnects before the
   // response completed. A guard prevents the normal finish->close sequence
@@ -270,6 +314,7 @@ export function createServer(
         ? statsRecorder.record(input)
         : { v: 1 as const, ts: new Date().toISOString(), ...input };
       quotaTracker?.record(event);
+      checkQuotaAlerts(res.locals.apiKey as ApiKeyEntry | undefined);
 
       // Per-request diagnostic log (separate store + retention). Pulls the
       // error text from an explicit tagStatsError, else from the captured
