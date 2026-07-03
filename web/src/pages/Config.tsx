@@ -27,6 +27,12 @@ import {
   McpTransport,
   McpTool,
 } from "../api/mcp";
+import {
+  fetchNotifyConfig,
+  updateNotifyConfig,
+  testNotify,
+  NotifyConfig,
+} from "../api/notify";
 import { Modal } from "../components/Modal";
 
 /* ── shared small formatters (local copies) ────────────────────── */
@@ -118,6 +124,7 @@ export function Config() {
         <RoutingCard />
         <PrewarmCard />
         <McpCard />
+        <NotifyCard />
         <LoggingCard />
       </div>
     </div>
@@ -1170,6 +1177,202 @@ function LoggingCard() {
           <div className="md:col-span-2 flex items-center gap-3">
             <button className="btn-primary text-sm" onClick={save} disabled={saving}>
               {saving ? "保存中..." : "保存设置"}
+            </button>
+            {msg && <span className="text-ink-400 text-sm">{msg}</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── Notification (飞书) settings card ──────────────────────────── */
+
+function NotifyCard() {
+  const [open, setOpen] = useState(false);
+  const [cfg, setCfg] = useState<NotifyConfig | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchNotifyConfig().then(setCfg).catch(() => setCfg(null));
+  }, []);
+
+  function patch(p: Partial<NotifyConfig>) {
+    setCfg((c) => (c ? { ...c, ...p } : c));
+  }
+  function patchFeishu(p: Partial<NotifyConfig["feishu"]>) {
+    setCfg((c) => (c ? { ...c, feishu: { ...c.feishu, ...p } } : c));
+  }
+  function patchAlerts(p: Partial<NotifyConfig["alerts"]>) {
+    setCfg((c) => (c ? { ...c, alerts: { ...c.alerts, ...p } } : c));
+  }
+
+  async function save() {
+    if (!cfg) return;
+    setSaving(true);
+    setMsg(null);
+    try {
+      const next = await updateNotifyConfig(cfg);
+      setCfg(next);
+      setMsg("已保存");
+      setTimeout(() => setMsg(null), 2000);
+    } catch (e) {
+      setMsg(`保存失败: ${(e as ApiError).message}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function runTest() {
+    setTesting(true);
+    setMsg(null);
+    try {
+      await testNotify();
+      setMsg("✅ 测试通知已发送,去飞书群里看");
+    } catch (e) {
+      setMsg(`测试失败: ${(e as ApiError).message}`);
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  const status = cfg
+    ? cfg.enabled
+      ? cfg.feishu["webhook-url"]
+        ? "已启用"
+        : "已启用(缺 webhook)"
+      : "已关闭"
+    : "";
+
+  return (
+    <div className="card">
+      <button
+        className="flex items-center justify-between w-full text-left"
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="font-medium">
+          🔔 通知(飞书)
+          {status && <span className="text-ink-500 text-xs ml-2">{status}</span>}
+        </span>
+        <span className="text-ink-500 text-sm">{open ? "收起" : "展开"}</span>
+      </button>
+      {open && cfg && (
+        <div className="mt-4 space-y-4 text-sm">
+          <p className="text-xs text-ink-500">
+            外部出站,默认关闭。开启后额度阈值、账号掉线、暖机失败、MCP 探活失败、Key
+            到期等事件会推送到飞书群机器人。内容脱敏(仅含 key 备注 + 指纹,不含明文)。
+          </p>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={cfg.enabled}
+              onChange={(e) => patch({ enabled: e.target.checked })}
+            />
+            启用飞书通知
+          </label>
+          <div>
+            <label className="block text-xs text-ink-500 mb-1">
+              飞书自定义机器人 Webhook URL
+            </label>
+            <input
+              className="input !py-1"
+              placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"
+              value={cfg.feishu["webhook-url"]}
+              onChange={(e) => patchFeishu({ "webhook-url": e.target.value })}
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-ink-500 mb-1">
+              加签 Secret{" "}
+              <span className="text-ink-600">(可选;留空=不加签。已设则留空表示不改)</span>
+            </label>
+            <input
+              className="input !py-1"
+              type="password"
+              placeholder="留空 = 不修改现有值"
+              value={cfg.feishu.secret}
+              onChange={(e) => patchFeishu({ secret: e.target.value })}
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs text-ink-500 mb-2">告警开关</label>
+            <div className="flex flex-wrap gap-3">
+              {([
+                ["account-down", "账号掉线/需重登"],
+                ["prewarm-fail", "暖机失败"],
+                ["mcp-probe-fail", "MCP 探活失败"],
+                ["key-expiry", "Key 到期/临期"],
+              ] as const).map(([k, txt]) => (
+                <label key={k} className="flex items-center gap-1.5">
+                  <input
+                    type="checkbox"
+                    checked={cfg.alerts[k]}
+                    onChange={(e) => patchAlerts({ [k]: e.target.checked })}
+                  />
+                  {txt}
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-xs text-ink-500 mb-1">
+                额度阈值(%,逗号分隔)
+              </label>
+              <input
+                className="input !py-1"
+                value={cfg.alerts["quota-thresholds"].join(",")}
+                onChange={(e) =>
+                  patchAlerts({
+                    "quota-thresholds": e.target.value
+                      .split(",")
+                      .map((x) => Number(x.trim()))
+                      .filter((n) => n > 0 && n <= 100),
+                  })
+                }
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-ink-500 mb-1">
+                Key 到期提前告警(天)
+              </label>
+              <input
+                className="input !py-1"
+                type="number"
+                min="0"
+                value={cfg["expiry-warn-days"]}
+                onChange={(e) => patch({ "expiry-warn-days": Number(e.target.value) })}
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-ink-500 mb-1">
+                去重冷却(分钟)
+              </label>
+              <input
+                className="input !py-1"
+                type="number"
+                min="0"
+                value={cfg["dedup-minutes"]}
+                onChange={(e) => patch({ "dedup-minutes": Number(e.target.value) })}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button className="btn-primary text-sm" onClick={save} disabled={saving}>
+              {saving ? "保存中..." : "保存设置"}
+            </button>
+            <button
+              className="btn-secondary text-sm"
+              onClick={runTest}
+              disabled={testing || !cfg.feishu["webhook-url"]}
+              title={!cfg.feishu["webhook-url"] ? "先填 webhook" : "发送测试通知"}
+            >
+              {testing ? "发送中..." : "发送测试"}
             </button>
             {msg && <span className="text-ink-400 text-sm">{msg}</span>}
           </div>

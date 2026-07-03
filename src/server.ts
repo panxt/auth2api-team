@@ -40,7 +40,8 @@ import {
   isMcpToolAllowed,
   isMcpServerFull,
 } from "./usage/mcp-access";
-import { LoggingConfig, RoutingConfig, PrewarmConfig } from "./config";
+import { LoggingConfig, RoutingConfig, PrewarmConfig, NotifyConfig } from "./config";
+import { Notifier } from "./notify/notifier";
 
 // Simple in-memory rate limiter per IP
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -94,6 +95,7 @@ export function createServer(
   routingController?: RoutingController,
   prewarmScheduler?: PrewarmScheduler,
   mcpController?: McpController,
+  notifier?: Notifier,
 ): express.Application {
   const app = express();
   // Stats slots are seeded whenever any subsystem needs them: the recorder
@@ -610,6 +612,29 @@ export function createServer(
       try {
         const next = requestLogger.updateConfig((req.body || {}) as Partial<LoggingConfig>);
         res.json(next);
+      } catch (err: any) {
+        res.status(400).json({ error: { message: err?.message || String(err) } });
+      }
+    });
+  }
+
+  // ── Outbound notifications (飞书) — admin-only. Secret never returned. ──
+  if (notifier) {
+    app.get("/admin/notify/config", requireAdmin, (_req, res) => {
+      res.json(notifier.getConfig());
+    });
+    app.put("/admin/notify/config", requireAdmin, (req, res) => {
+      try {
+        res.json(notifier.updateConfig((req.body || {}) as Partial<NotifyConfig>));
+      } catch (err: any) {
+        res.status(400).json({ error: { message: err?.message || String(err) } });
+      }
+    });
+    // Send a test card now (bypasses enabled + dedup); reports the real error.
+    app.post("/admin/notify/test", requireAdmin, async (_req, res) => {
+      try {
+        await notifier.test();
+        res.json({ ok: true });
       } catch (err: any) {
         res.status(400).json({ error: { message: err?.message || String(err) } });
       }

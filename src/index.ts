@@ -18,6 +18,7 @@ import { RequestLogger } from "./logging/logger";
 import { RoutingController } from "./accounts/routing";
 import { PrewarmScheduler } from "./accounts/prewarm";
 import { McpController } from "./mcp/registry";
+import { Notifier } from "./notify/notifier";
 import type { PrewarmResult } from "./providers/types";
 
 function prompt(question: string): Promise<string> {
@@ -278,6 +279,9 @@ async function startServer(): Promise<void> {
   const mcpController = new McpController(storage.settings);
   mcpController.start();
 
+  // Outbound notifier (飞书). Default-disabled; opt-in via UI. External egress.
+  const notifier = new Notifier(storage.settings, config.notify);
+
   const app = createServer(
     config,
     registry,
@@ -288,6 +292,7 @@ async function startServer(): Promise<void> {
     routingController,
     prewarmScheduler,
     mcpController,
+    notifier,
   );
   const host = config.host || "127.0.0.1";
   const port = config.port;
