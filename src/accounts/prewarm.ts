@@ -12,29 +12,37 @@ const FIRED_KEY = "prewarm.fired";
 /** Wall-clock date + minutes-of-day in a given IANA timezone (or server-local
  *  when tz is empty). Used so scheduled times fire at the intended local hour
  *  regardless of the host's timezone. */
+function serverLocal(now: Date): { date: string; minutes: number } {
+  const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  return { date, minutes: now.getHours() * 60 + now.getMinutes() };
+}
+
 function wallClock(tz: string | undefined): { date: string; minutes: number } {
   const now = new Date();
-  if (!tz) {
-    const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-    return { date, minutes: now.getHours() * 60 + now.getMinutes() };
+  if (!tz) return serverLocal(now);
+  try {
+    // en-CA gives YYYY-MM-DD; hour12:false gives 00-23.
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(now);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
+    let hh = parseInt(get("hour"), 10);
+    if (hh === 24) hh = 0; // some engines emit "24" at midnight
+    return {
+      date: `${get("year")}-${get("month")}-${get("day")}`,
+      minutes: hh * 60 + parseInt(get("minute"), 10),
+    };
+  } catch {
+    // Invalid IANA tz — never let the scheduler tick crash; fall back to local.
+    console.error(`[prewarm] invalid timezone "${tz}", using server-local`);
+    return serverLocal(now);
   }
-  // en-CA gives YYYY-MM-DD; hour12:false gives 00-23.
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).formatToParts(now);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
-  let hh = parseInt(get("hour"), 10);
-  if (hh === 24) hh = 0; // some engines emit "24" at midnight
-  return {
-    date: `${get("year")}-${get("month")}-${get("day")}`,
-    minutes: hh * 60 + parseInt(get("minute"), 10),
-  };
 }
 
 function toMinutes(hhmm: string): number | null {
@@ -158,6 +166,14 @@ export class PrewarmScheduler {
         const [h, m] = t.trim().split(":").map(Number);
         if (h > 23 || m > 59)
           throw new Error(`invalid time "${t}" — hour 0-23, minute 0-59`);
+      }
+    }
+    if (patch.timezone !== undefined && patch.timezone !== "") {
+      try {
+        // Throws RangeError for an unknown IANA zone.
+        new Intl.DateTimeFormat("en-CA", { timeZone: patch.timezone });
+      } catch {
+        throw new Error(`invalid timezone "${patch.timezone}" — expected an IANA name like "Asia/Shanghai"`);
       }
     }
     const persisted = this.settings.get<Partial<PrewarmConfig>>(SETTINGS_KEY);

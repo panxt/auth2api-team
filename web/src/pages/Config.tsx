@@ -243,6 +243,31 @@ function RoutingCard() {
 
 /* ─── Prewarm scheduler card ─────────────────────────────────── */
 
+// Full IANA timezone list for the datalist (type-to-filter + dropdown). Modern
+// browsers expose Intl.supportedValuesOf("timeZone"); fall back to a common set.
+const TZ_OPTIONS: string[] = (() => {
+  try {
+    const v = (Intl as any).supportedValuesOf?.("timeZone");
+    if (Array.isArray(v) && v.length) return v as string[];
+  } catch {
+    /* older browser — use fallback */
+  }
+  return [
+    "UTC",
+    "Asia/Shanghai",
+    "Asia/Hong_Kong",
+    "Asia/Tokyo",
+    "Asia/Singapore",
+    "Asia/Kolkata",
+    "Europe/London",
+    "Europe/Berlin",
+    "America/New_York",
+    "America/Chicago",
+    "America/Denver",
+    "America/Los_Angeles",
+  ];
+})();
+
 function PrewarmCard() {
   const [open, setOpen] = useState(false);
   const [cfg, setCfg] = useState<PrewarmConfig | null>(null);
@@ -400,10 +425,21 @@ function PrewarmCard() {
             </label>
             <input
               className="input !py-1 max-w-xs"
-              placeholder="Asia/Shanghai(留空=服务器本地)"
+              list="prewarm-tz-list"
+              placeholder="输入可搜索,如 Asia/Shanghai(留空=服务器本地)"
               value={cfg.timezone ?? ""}
               onChange={(e) => patch({ timezone: e.target.value })}
             />
+            <datalist id="prewarm-tz-list">
+              {TZ_OPTIONS.map((tz) => (
+                <option key={tz} value={tz} />
+              ))}
+            </datalist>
+            {cfg.timezone && !TZ_OPTIONS.includes(cfg.timezone) && (
+              <div className="text-amber-400 text-xs mt-1">
+                ⚠️ "{cfg.timezone}" 不在已知时区列表中,可能无效(请从下拉选一个 IANA 时区)。
+              </div>
+            )}
           </div>
 
           <div>
