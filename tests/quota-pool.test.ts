@@ -97,3 +97,31 @@ test("quotaPool: null when no account surfaces a window", () => {
   assert.equal(pool["5h"], null);
   assert.equal(pool["7d"], null);
 });
+
+test("quotaPool: idle accounts (no util header) count as free capacity", () => {
+  // One maxed account + two idle (never requested). The idle ones must count as
+  // full headroom, so the pool is NOT ~100% used. (Regression: they used to be
+  // excluded, making the pool overstate exhaustion.)
+  const { m, emails } = mgr([1, 1, 1]);
+  setUtil(m, emails[0], { u5h: 1.0 }); // maxed
+  // emails[1], emails[2] have no rate-limit headers → idle
+  const p = m.quotaPool()["5h"];
+  assert.ok(p);
+  assert.equal(p.accounts, 3, "all enabled accounts count as capacity");
+  assert.equal(p.capacity, 3);
+  assert.equal(p.used, 1, "only the maxed account contributes used");
+  assert.equal(p.remainingUnits, 2);
+  assert.equal(p.remainingPct, 0.6667); // 1 - 1/3, rounded to 4 dp
+});
+
+test("quotaPool: expired window (reset in the past) counts as 0 used", () => {
+  const { m, emails } = mgr([1, 1]);
+  const past = Math.floor(Date.now() / 1000) - 60; // reset already passed
+  const future = Math.floor(Date.now() / 1000) + 3600;
+  setUtil(m, emails[0], { u5h: 1.0, r5h: past }); // stale 100% but window reset
+  setUtil(m, emails[1], { u5h: 0.5, r5h: future });
+  const p = m.quotaPool()["5h"];
+  assert.ok(p);
+  assert.equal(p.capacity, 2);
+  assert.equal(p.used, 0.5, "expired account contributes 0, live account 0.5");
+});

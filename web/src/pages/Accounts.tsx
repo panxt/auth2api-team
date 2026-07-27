@@ -568,13 +568,32 @@ export function Accounts() {
               const pct = budget && budget > 0 ? (cost / budget) * 100 : 0;
               const tone =
                 pct >= 90 ? "bg-rose-500" : pct >= 70 ? "bg-amber-500" : "bg-emerald-500";
+              // Visual state: disabled / not-available → grey the whole card;
+              // 5h window at ~100% (live) → mark "额度用尽" even if still nominally
+              // available. Keeps the pool card honest about what's actually usable.
+              const cd = cooldownStatus(a);
+              const inactive = a.disabled || !a.available;
+              const u5hRaw = Number(a.rateLimit?.fields?.["unified-5h-utilization"]);
+              const reset5h = Number(a.rateLimit?.fields?.["unified-5h-reset"]);
+              const live5h = Number.isFinite(reset5h) && reset5h * 1000 > Date.now();
+              const exhausted = live5h && Number.isFinite(u5hRaw) && u5hRaw >= 0.99;
               return (
-                <div key={a.email} className="card">
+                <div
+                  key={a.email}
+                  className={`card ${inactive ? "opacity-60 grayscale" : ""}`}
+                >
                   <div className="flex items-center justify-between mb-3">
                     <div className="font-medium">
                       {a.email}
                       {a.tierLabel && (
                         <span className="ml-2 badge-ok">{a.tierLabel}</span>
+                      )}
+                      {a.disabled && <span className="ml-2 badge-muted">已禁用</span>}
+                      {!a.disabled && !a.available && (
+                        <span className={`ml-2 ${cd.className}`}>{cd.badge}</span>
+                      )}
+                      {!inactive && exhausted && (
+                        <span className="ml-2 badge-err">额度用尽</span>
                       )}
                     </div>
                     <div className="flex items-center gap-2 text-xs text-ink-400">

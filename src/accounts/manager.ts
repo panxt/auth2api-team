@@ -659,22 +659,36 @@ export class AccountManager {
     let used = 0;
     let maxUtil: number | null = null;
     let soonest: number | null = null;
+    // `hasData` gates the whole window: if NO enabled account ever surfaced this
+    // window's util header, the provider doesn't report it (e.g. 7d on Codex) →
+    // return null. Otherwise EVERY enabled account counts as capacity, and an
+    // account with no live utilization (never requested, or window already
+    // reset/expired) contributes 0 used = full headroom. This is the fix for
+    // the pool overstating exhaustion when idle/fresh accounts were excluded.
+    let hasData = false;
     for (const acct of this.accounts.values()) {
-      if (acct.disabled) continue;
-      const u = this.parseUtil(acct.rateLimit?.fields?.[utilKey]);
-      if (u == null) continue;
-      const clamped = Math.min(Math.max(u, 0), 1);
+      if (acct.disabled) continue; // disabled can't serve → not capacity
       const w = this.weightOf(acct);
+      const rawU = this.parseUtil(acct.rateLimit?.fields?.[utilKey]);
+      const resetRaw = Number(acct.rateLimit?.fields?.[resetKey]);
+      const hasReset = Number.isFinite(resetRaw);
+      // Only zero-out when we KNOW the window expired (reset timestamp in the
+      // past → a fresh window opens on the next request). No reset header ⇒
+      // trust the reported utilization as current.
+      const expired = hasReset && resetRaw * 1000 <= now;
+      if (rawU != null) hasData = true;
       accounts++;
       capacity += w;
-      used += w * clamped;
-      maxUtil = maxUtil == null ? u : Math.max(maxUtil, u);
-      const r = Number(acct.rateLimit?.fields?.[resetKey]);
-      if (Number.isFinite(r) && r * 1000 > now) {
-        soonest = soonest == null ? r : Math.min(soonest, r);
+      if (rawU != null && !expired) {
+        const clamped = Math.min(Math.max(rawU, 0), 1);
+        used += w * clamped;
+        maxUtil = maxUtil == null ? rawU : Math.max(maxUtil, rawU);
+        if (hasReset && resetRaw * 1000 > now) {
+          soonest = soonest == null ? resetRaw : Math.min(soonest, resetRaw);
+        }
       }
     }
-    if (accounts === 0) return null;
+    if (!hasData || accounts === 0) return null;
     const round = (x: number) => Math.round(x * 100) / 100;
     const remainingPct =
       capacity > 0 ? Math.round((1 - used / capacity) * 10000) / 10000 : null;
