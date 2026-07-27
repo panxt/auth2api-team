@@ -26,6 +26,8 @@ import {
   resolveAuthDir,
   normalizeApiKeys,
   ApiKeyEntry,
+  effectiveDailyCaps,
+  todayUtc,
 } from "../src/config";
 import { isModelAllowed } from "../src/usage/model-access";
 import { UsageData } from "../src/accounts/manager";
@@ -37,6 +39,35 @@ import { UsageData } from "../src/accounts/manager";
 function keyWith(allowed?: string[]): ApiKeyEntry {
   return { key: "k", enabled: true, admin: false, "allowed-models": allowed };
 }
+
+test("effectiveDailyCaps: base caps when no override", () => {
+  const e = { quota: { "daily-cost-usd": 20, "daily-tokens": 1000 } };
+  assert.deepEqual(effectiveDailyCaps(e), {
+    "daily-cost-usd": 20,
+    "daily-tokens": 1000,
+  });
+});
+
+test("effectiveDailyCaps: today's override replaces base per-dimension", () => {
+  const e = {
+    quota: { "daily-cost-usd": 20, "daily-tokens": 1000 },
+    "daily-override": { date: todayUtc(), "daily-cost-usd": 50 },
+  };
+  // cost bumped to 50 today; tokens keeps the base (override omitted it)
+  assert.deepEqual(effectiveDailyCaps(e), {
+    "daily-cost-usd": 50,
+    "daily-tokens": 1000,
+  });
+});
+
+test("effectiveDailyCaps: yesterday's override is ignored (auto-revert)", () => {
+  const yesterday = new Date(Date.now() - 86400_000).toISOString().slice(0, 10);
+  const e = {
+    quota: { "daily-cost-usd": 20 },
+    "daily-override": { date: yesterday, "daily-cost-usd": 999 },
+  };
+  assert.deepEqual(effectiveDailyCaps(e)["daily-cost-usd"], 20);
+});
 
 test("isModelAllowed: no allowlist → all models allowed", () => {
   assert.equal(isModelAllowed(keyWith(undefined), "claude-opus-4-8"), true);

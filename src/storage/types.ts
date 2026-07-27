@@ -163,5 +163,6 @@ export function normalizeKeyEntry(v: any): ApiKeyEntry | null {
     "allowed-mcp": v["allowed-mcp"],
     "expires-at": v["expires-at"],
     "mcp-quota": v["mcp-quota"],
+    "daily-override": v["daily-override"],
   };
 }

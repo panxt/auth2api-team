@@ -89,6 +89,46 @@ export interface ApiKeyQuota extends ApiKeyModelQuota {
   "per-model"?: Record<string, ApiKeyModelQuota>;
 }
 
+/**
+ * A one-day temporary override of a key's DAILY caps. Effective only while
+ * `date` (UTC "YYYY-MM-DD") equals today — so it auto-reverts to the fixed
+ * quota at the next UTC midnight with no manual reset. Lets an operator grant
+ * someone extra headroom "just for today". A field left unset keeps the base
+ * daily cap for that dimension.
+ */
+export interface DailyOverride {
+  date: string; // UTC YYYY-MM-DD this override applies to
+  "daily-cost-usd"?: number;
+  "daily-tokens"?: number;
+}
+
+/** Today's UTC date, "YYYY-MM-DD". */
+export function todayUtc(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Effective DAILY caps for a key right now: the temporary override's caps when
+ * it targets today, else the base quota's daily caps. Per-dimension: an
+ * override that sets only cost leaves the token cap at its base value.
+ */
+export function effectiveDailyCaps(entry: {
+  quota?: ApiKeyQuota;
+  "daily-override"?: DailyOverride;
+}): { "daily-cost-usd"?: number; "daily-tokens"?: number } {
+  const base = entry.quota ?? {};
+  const ov = entry["daily-override"];
+  const active = !!ov && ov.date === todayUtc();
+  return {
+    "daily-cost-usd": active
+      ? (ov!["daily-cost-usd"] ?? base["daily-cost-usd"])
+      : base["daily-cost-usd"],
+    "daily-tokens": active
+      ? (ov!["daily-tokens"] ?? base["daily-tokens"])
+      : base["daily-tokens"],
+  };
+}
+
 /** Per-key rate limiting, layered on top of the global per-IP limiter. */
 export interface ApiKeyRateLimit {
   /** Max requests per minute for this key. */
@@ -156,6 +196,8 @@ export interface ApiKeyEntry {
    * overall caps. All optional — omit to not limit that dimension.
    */
   "mcp-quota"?: McpQuota;
+  /** One-day temporary override of the daily caps (auto-reverts next UTC day). */
+  "daily-override"?: DailyOverride;
 }
 
 /** MCP call-count quota (counts only; no tokens). All caps optional. */
@@ -180,6 +222,7 @@ interface RawApiKeyEntry {
   "allowed-mcp"?: string[];
   "expires-at"?: string;
   "mcp-quota"?: McpQuota;
+  "daily-override"?: DailyOverride;
 }
 
 /** Effective role of a key, with back-compat: an explicit role wins, else
@@ -574,6 +617,7 @@ export function normalizeApiKeys(
         "allowed-mcp": item["allowed-mcp"],
         "expires-at": item["expires-at"],
         "mcp-quota": item["mcp-quota"],
+        "daily-override": item["daily-override"],
       });
     } else {
       // Don't silently lose a misconfigured entry — a dropped key would just
