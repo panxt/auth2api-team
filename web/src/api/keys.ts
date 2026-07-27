@@ -39,6 +39,17 @@ export interface UsageKey {
     tokens?: { used: number; limit: number; pct: number };
     cost?: { used: number; limit: number; pct: number };
   } | null;
+  /** Today (UTC): consumption + EFFECTIVE daily caps (temp override applied). */
+  today?: {
+    costUsd: number;
+    tokens: number;
+    capCostUsd: number | null;
+    capTokens: number | null;
+    cost?: { used: number; limit: number; pct: number };
+    overrideActive: boolean;
+    baseCapCostUsd: number | null;
+    baseCapTokens: number | null;
+  } | null;
   /** Month-to-date MCP tool-call counts per upstream server id (call-count
    *  metering; no tokens). Empty/absent when the key made no MCP calls. */
   mcp?: Record<string, number>;
@@ -143,3 +154,10 @@ export const deleteKey = (id: string) => del<null>(`/admin/keys/${id}`);
 /** Admin: rotate ANY managed key — reissue with a fresh secret. */
 export const rotateKey = (id: string) =>
   post<CreateKeyResponse>(`/admin/keys/${id}/rotate`);
+
+/** Admin: set (or clear) a key's TODAY-only daily caps. Auto-reverts tomorrow.
+ *  Pass {} or {clear:true} to remove; empty fields keep the base daily cap. */
+export const setDailyOverride = (
+  id: string,
+  body: { "daily-cost-usd"?: number | null; "daily-tokens"?: number | null; clear?: boolean },
+) => post<ManagedKeyView>(`/admin/keys/${id}/daily-override`, body);

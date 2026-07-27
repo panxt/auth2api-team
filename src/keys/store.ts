@@ -1,4 +1,4 @@
-import { ApiKeyEntry, KeyRole, generateApiKey } from "../config";
+import { ApiKeyEntry, KeyRole, generateApiKey, DailyOverride } from "../config";
 import { hashApiKey } from "../utils/common";
 import type { KeyRepository } from "../storage/types";
 
@@ -45,6 +45,7 @@ export interface KeyView {
   "allowed-mcp": ApiKeyEntry["allowed-mcp"] | null;
   "expires-at": ApiKeyEntry["expires-at"] | null;
   "mcp-quota": ApiKeyEntry["mcp-quota"] | null;
+  "daily-override": ApiKeyEntry["daily-override"] | null;
 }
 
 function keyId(key: string): string {
@@ -70,6 +71,7 @@ function normalizeEntry(v: any): ApiKeyEntry {
     "allowed-mcp": v["allowed-mcp"],
     "expires-at": v["expires-at"],
     "mcp-quota": v["mcp-quota"],
+    "daily-override": v["daily-override"],
   };
 }
 
@@ -89,6 +91,7 @@ function toView(entry: ApiKeyEntry, source: "config" | "managed"): KeyView {
     "allowed-mcp": entry["allowed-mcp"] ?? null,
     "expires-at": entry["expires-at"] ?? null,
     "mcp-quota": entry["mcp-quota"] ?? null,
+    "daily-override": entry["daily-override"] ?? null,
   };
 }
 
@@ -205,6 +208,25 @@ export class ManagedKeyStore {
       entry["expires-at"] = patch["expires-at"] ?? undefined;
     if (patch["mcp-quota"] !== undefined)
       entry["mcp-quota"] = patch["mcp-quota"] ?? undefined;
+    this.live.set(entry.key, entry);
+    this.persist();
+    return toView(entry, "managed");
+  }
+
+  /** Set (or clear, with null) a key's one-day daily-cap override. Passing an
+   *  override without a `date` stamps today (UTC) so it auto-reverts tomorrow.
+   *  Config-sourced keys are read-only. */
+  setDailyOverride(id: string, override: DailyOverride | null): KeyView {
+    const entry = this.findManaged(id);
+    if (override === null) {
+      delete entry["daily-override"];
+    } else {
+      entry["daily-override"] = {
+        date: override.date || new Date().toISOString().slice(0, 10),
+        "daily-cost-usd": override["daily-cost-usd"],
+        "daily-tokens": override["daily-tokens"],
+      };
+    }
     this.live.set(entry.key, entry);
     this.persist();
     return toView(entry, "managed");

@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import { Config, isDebugLevel, ApiKeyEntry, canReadAll, resolveAuthDir } from "./config";
+import { Config, isDebugLevel, ApiKeyEntry, canReadAll, resolveAuthDir, effectiveDailyCaps, todayUtc, DailyOverride } from "./config";
 import { ProviderRegistry } from "./providers/registry";
 import { extractApiKey, hashApiKey } from "./utils/common";
 import {
@@ -219,6 +219,7 @@ export function createServer(
     if (!thresholds.length) return;
     const hash = hashApiKey(entry.key);
     const q = entry.quota;
+    const daily = effectiveDailyCaps(entry); // honor today's temporary override
     const month = quotaTracker.consumed(hash, { window: "month" });
     const day = quotaTracker.consumed(hash, { window: "day" });
     const who = `${entry.label || "(unlabeled)"} · ${hash.slice(0, 12)}`;
@@ -227,8 +228,8 @@ export function createServer(
     const caps: Array<{ cap?: number; used: number; window: "month" | "day"; metric: string; unit: string }> = [
       { cap: q["monthly-cost-usd"], used: month.costUsd, window: "month", metric: "月成本", unit: "$" },
       { cap: q["monthly-tokens"], used: month.tokens, window: "month", metric: "月 Token", unit: "" },
-      { cap: q["daily-cost-usd"], used: day.costUsd, window: "day", metric: "日成本", unit: "$" },
-      { cap: q["daily-tokens"], used: day.tokens, window: "day", metric: "日 Token", unit: "" },
+      { cap: daily["daily-cost-usd"], used: day.costUsd, window: "day", metric: "日成本", unit: "$" },
+      { cap: daily["daily-tokens"], used: day.tokens, window: "day", metric: "日 Token", unit: "" },
     ];
     for (const c of caps) {
       if (!c.cap || c.cap <= 0) continue;
@@ -373,10 +374,14 @@ export function createServer(
   // Retry-After (until the UTC month/day boundary) signals a time-bounded block.
   const requireQuota: express.RequestHandler = (req, res, next) => {
     const entry = res.locals.apiKey as ApiKeyEntry | undefined;
-    if (!entry?.quota || !quotaTracker) return next();
+    // A daily-override alone (no base quota) still needs enforcing today.
+    if (!entry || !quotaTracker) return next();
+    if (!entry.quota && !entry["daily-override"]) return next();
     const tracker = quotaTracker;
     const keyHash = hashApiKey(entry.key);
-    const q = entry.quota;
+    const q = entry.quota ?? {};
+    // Effective daily caps: temporary same-day override wins over the base.
+    const dailyCaps = effectiveDailyCaps(entry);
 
     // Resolve the requested model the same way the handlers do, so per-model
     // caps and the per-(key,model) consumption buckets line up.
@@ -410,8 +415,8 @@ export function createServer(
     const checks: Check[] = [
       { cap: q["monthly-tokens"], used: keyMonth.tokens, window: "month", msg: "Monthly token quota exceeded" },
       { cap: q["monthly-cost-usd"], used: keyMonth.costUsd, window: "month", msg: "Monthly cost budget exceeded" },
-      { cap: q["daily-tokens"], used: keyDay.tokens, window: "day", msg: "Daily token quota exceeded" },
-      { cap: q["daily-cost-usd"], used: keyDay.costUsd, window: "day", msg: "Daily cost budget exceeded" },
+      { cap: dailyCaps["daily-tokens"], used: keyDay.tokens, window: "day", msg: "Daily token quota exceeded" },
+      { cap: dailyCaps["daily-cost-usd"], used: keyDay.costUsd, window: "day", msg: "Daily cost budget exceeded" },
     ];
     if (modelCaps) {
       checks.push(
@@ -918,10 +923,13 @@ export function createServer(
     const keys = [];
     for (const entry of config["api-keys"].values()) {
       if (!seeAll && entry.key !== requester?.key) continue;
-      const consumed = quotaTracker
-        ? quotaTracker.consumed(hashApiKey(entry.key))
-        : null;
+      const hash = hashApiKey(entry.key);
+      const consumed = quotaTracker ? quotaTracker.consumed(hash) : null;
+      const dayC = quotaTracker ? quotaTracker.consumed(hash, { window: "day" }) : null;
       const q = entry.quota;
+      const dailyCaps = effectiveDailyCaps(entry);
+      const ov = entry["daily-override"];
+      const overrideActive = !!ov && ov.date === todayUtc();
       const usage =
         consumed && q
           ? {
@@ -930,7 +938,7 @@ export function createServer(
             }
           : null;
       keys.push({
-        apiKeyShort: hashApiKey(entry.key).slice(0, 12),
+        apiKeyShort: hash.slice(0, 12),
         label: entry.label ?? null,
         owner: entry.owner ?? null,
         admin: entry.admin,
@@ -938,9 +946,24 @@ export function createServer(
         quota: q ?? null,
         consumed,
         usage,
+        // Today (UTC): consumption + the EFFECTIVE daily caps (temporary override
+        // applied) + whether a same-day override is active. Powers the "今日
+        // 已用 / 当日额度" display and the 今日加额 control.
+        today: dayC
+          ? {
+              costUsd: dayC.costUsd,
+              tokens: dayC.tokens,
+              capCostUsd: dailyCaps["daily-cost-usd"] ?? null,
+              capTokens: dailyCaps["daily-tokens"] ?? null,
+              cost: pctRemaining(dayC.costUsd, dailyCaps["daily-cost-usd"]),
+              overrideActive,
+              baseCapCostUsd: q?.["daily-cost-usd"] ?? null,
+              baseCapTokens: q?.["daily-tokens"] ?? null,
+            }
+          : null,
         // Month-to-date MCP tool-call counts per upstream server (call-count
         // metering; no tokens). Empty object when the key made no MCP calls.
-        mcp: quotaTracker ? quotaTracker.mcpConsumed(hashApiKey(entry.key)) : {},
+        mcp: quotaTracker ? quotaTracker.mcpConsumed(hash) : {},
       });
     }
     res.json({
@@ -1027,6 +1050,33 @@ export function createServer(
     app.post("/admin/keys/:id/rotate", requireAdmin, (req, res) => {
       try {
         res.json(keyCreateResponse(store.rotate(req.params.id)));
+      } catch (err) {
+        handleKeyError(err, res);
+      }
+    });
+
+    // POST /admin/keys/:id/daily-override — set (or clear) a key's TODAY-only
+    // daily caps. Body { "daily-cost-usd"?, "daily-tokens"? } stamps today (UTC)
+    // and auto-reverts to the fixed quota at the next UTC midnight — no manual
+    // reset. Body {} or { clear: true } removes the override. Admin-only.
+    app.post("/admin/keys/:id/daily-override", requireAdmin, (req, res) => {
+      try {
+        const b = req.body || {};
+        const cost = b["daily-cost-usd"];
+        const tokens = b["daily-tokens"];
+        const clear =
+          b.clear === true ||
+          ((cost == null || cost === "") && (tokens == null || tokens === ""));
+        const override: DailyOverride | null = clear
+          ? null
+          : {
+              date: todayUtc(),
+              "daily-cost-usd":
+                cost != null && cost !== "" && Number(cost) > 0 ? Number(cost) : undefined,
+              "daily-tokens":
+                tokens != null && tokens !== "" && Number(tokens) > 0 ? Number(tokens) : undefined,
+            };
+        res.json(store.setDailyOverride(req.params.id, override));
       } catch (err) {
         handleKeyError(err, res);
       }

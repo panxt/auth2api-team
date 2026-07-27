@@ -7,6 +7,7 @@ import {
   updateKey,
   deleteKey,
   rotateKey,
+  setDailyOverride,
   UsageKey,
   ManagedKeyView,
   CreateKeyInput,
@@ -51,6 +52,36 @@ function mcpServersOf(allowedMcp: string[] | null): string[] {
   return Array.from(new Set(allowedMcp.map((g) => g.split("__")[0])));
 }
 
+/** Today's (UTC) consumption vs the effective daily cap (temp override applied). */
+function TodayCell({ today }: { today: UsageKey["today"] }) {
+  if (!today) return <span className="text-ink-600 text-xs">—</span>;
+  const cap = today.capCostUsd;
+  const used = today.costUsd;
+  const pct = cap && cap > 0 ? Math.min(100, (used / cap) * 100) : 0;
+  const tone = pct >= 90 ? "bg-rose-500" : pct >= 70 ? "bg-amber-500" : "bg-emerald-500";
+  return (
+    <div className="min-w-[8rem]">
+      <div className="flex items-center gap-1.5 text-sm">
+        <span>{fmtUSD(used)}</span>
+        {cap != null ? (
+          <span className="text-ink-500">/ ${cap}</span>
+        ) : (
+          <span className="text-ink-600 text-xs">未设日额度</span>
+        )}
+        {today.overrideActive && (
+          <span className="badge-ok text-xs" title="今日临时额度,明日自动恢复">今日临时</span>
+        )}
+      </div>
+      {cap != null && cap > 0 && (
+        <div className="h-1.5 bg-ink-800 rounded-full overflow-hidden mt-1">
+          <div className={`h-full ${tone}`} style={{ width: `${pct}%` }} />
+        </div>
+      )}
+      <div className="text-xs text-ink-500 mt-0.5">{fmtTokens(today.tokens)} tok</div>
+    </div>
+  );
+}
+
 /** Renders a key's MCP grant summary + prefix mode badge for the table. */
 function McpModeCell({ allowedMcp }: { allowedMcp: string[] | null }) {
   const servers = mcpServersOf(allowedMcp);
@@ -92,6 +123,7 @@ export function Users() {
 
   const [showCreate, setShowCreate] = useState(false);
   const [editing, setEditing] = useState<MergedRow | null>(null);
+  const [overriding, setOverriding] = useState<MergedRow | null>(null); // 今日加额目标
   const [createdKey, setCreatedKey] = useState<CreateKeyResponse | null>(null); // raw key + meta, shown once
 
   const load = useCallback(async () => {
@@ -236,6 +268,7 @@ export function Users() {
                 <th className="px-4 py-3 font-medium text-center">启用</th>
                 <th className="px-4 py-3 font-medium">配额(月)</th>
                 <th className="px-4 py-3 font-medium">本月用量</th>
+                <th className="px-4 py-3 font-medium">今日用量 / 额度</th>
                 <th className="px-4 py-3 font-medium">可用模型</th>
                 <th className="px-4 py-3 font-medium">MCP 授权</th>
                 <th className="px-4 py-3 font-medium">Owner</th>
@@ -311,6 +344,9 @@ export function Users() {
                       </div>
                     </td>
                     <td className="px-4 py-3">
+                      <TodayCell today={row.today} />
+                    </td>
+                    <td className="px-4 py-3">
                       {(row.allowedModels && row.allowedModels.length > 0) ||
                       (row.deniedModels && row.deniedModels.length > 0) ? (
                         <div className="flex flex-wrap gap-1 max-w-[16rem]">
@@ -362,6 +398,14 @@ export function Users() {
                           {row.enabled ? "禁用" : "启用"}
                         </button>
                         <button
+                          className="btn-ghost text-xs text-emerald-400 hover:text-emerald-300"
+                          onClick={() => setOverriding(row)}
+                          disabled={!row.managedId}
+                          title={!row.managedId ? "config 来源,只读" : "今日临时额度(明日自动恢复)"}
+                        >
+                          今日加额
+                        </button>
+                        <button
                           className="btn-ghost text-xs"
                           onClick={() => onRotate(row)}
                           disabled={!row.managedId}
@@ -385,7 +429,7 @@ export function Users() {
               {rows.length === 0 && (
                 <tr>
                   <td
-                    colSpan={isAdmin ? 10 : 9}
+                    colSpan={isAdmin ? 11 : 10}
                     className="px-4 py-8 text-center text-ink-500"
                   >
                     {isAdmin
@@ -418,6 +462,15 @@ export function Users() {
         onClose={() => setEditing(null)}
         onSaved={() => {
           setEditing(null);
+          load();
+        }}
+      />
+
+      <DailyOverrideModal
+        row={overriding}
+        onClose={() => setOverriding(null)}
+        onSaved={() => {
+          setOverriding(null);
           load();
         }}
       />
@@ -768,6 +821,120 @@ function EditKeyModal({
           >
             {submitting ? "保存中..." : "保存"}
           </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ─── 今日临时加额(明日自动恢复)──────────────────────────── */
+
+function DailyOverrideModal({
+  row,
+  onClose,
+  onSaved,
+}: {
+  row: MergedRow | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [cost, setCost] = useState("");
+  const [tokens, setTokens] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (row) {
+      // Prefill with the currently-effective daily caps (override or base).
+      setCost(row.today?.capCostUsd != null ? String(row.today.capCostUsd) : "");
+      setTokens(row.today?.capTokens != null ? String(row.today.capTokens) : "");
+      setErr(null);
+    }
+  }, [row]);
+
+  if (!row) return null;
+  const baseCost = row.today?.baseCapCostUsd;
+  const baseTokens = row.today?.baseCapTokens;
+  const active = row.today?.overrideActive;
+
+  async function apply(clear: boolean) {
+    if (!row?.managedId) {
+      setErr("config.yaml 里的 key 只读,无法设置");
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      await setDailyOverride(row.managedId, clear
+        ? { clear: true }
+        : {
+            "daily-cost-usd": cost.trim() ? Number(cost) : null,
+            "daily-tokens": tokens.trim() ? Number(tokens) : null,
+          });
+      onSaved();
+    } catch (e) {
+      setErr((e as ApiError).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal open={!!row} onClose={onClose} title={`今日临时额度 · ${row.label || row.apiKeyShort}`}>
+      <div className="space-y-4 text-sm">
+        <p className="text-xs text-ink-500">
+          只改<strong>今天(UTC)</strong>的日额度,<strong>明天自动恢复</strong>固定配额,无需手动调回。
+          留空 = 该维度用回固定日额度。今日已用:{fmtUSD(row.today?.costUsd)} ·{" "}
+          {fmtTokens(row.today?.tokens)} tok。
+        </p>
+        <div>
+          <label className="block text-xs text-ink-500 mb-1">
+            今日日成本上限($){" "}
+            <span className="text-ink-600">
+              固定值:{baseCost != null ? `$${baseCost}` : "未设"}
+            </span>
+          </label>
+          <input
+            className="input !py-1"
+            type="number"
+            min="0"
+            placeholder={baseCost != null ? String(baseCost) : "留空=不限"}
+            value={cost}
+            onChange={(e) => setCost(e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-ink-500 mb-1">
+            今日日 Token 上限{" "}
+            <span className="text-ink-600">
+              固定值:{baseTokens != null ? fmtTokens(baseTokens) : "未设"}
+            </span>
+          </label>
+          <input
+            className="input !py-1"
+            type="number"
+            min="0"
+            placeholder={baseTokens != null ? String(baseTokens) : "留空=不限"}
+            value={tokens}
+            onChange={(e) => setTokens(e.target.value)}
+          />
+        </div>
+        {err && <div className="badge-err px-3 py-2 block">{err}</div>}
+        <div className="flex justify-between gap-2 pt-1">
+          <button
+            className="btn-ghost text-xs text-ink-400"
+            onClick={() => apply(true)}
+            disabled={busy || !active}
+            title={active ? "清除今日临时额度,立即恢复固定配额" : "当前无今日临时额度"}
+          >
+            清除今日临时额度
+          </button>
+          <div className="flex gap-2">
+            <button className="btn-secondary" onClick={onClose}>取消</button>
+            <button className="btn-primary" onClick={() => apply(false)} disabled={busy}>
+              {busy ? "设置中..." : "设为今日额度"}
+            </button>
+          </div>
         </div>
       </div>
     </Modal>
