@@ -1,6 +1,6 @@
 {
   "name": "auth2api",
-  "version": "2.5.1",
+  "version": "2.6.0",
   "description": "Lightweight Claude OAuth to OpenAI-compatible API proxy (team fork with admin tooling and docs)",
   "license": "MIT",
   "repository": {
