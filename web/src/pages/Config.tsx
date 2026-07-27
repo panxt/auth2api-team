@@ -299,6 +299,7 @@ function PrewarmCard() {
       const next = await updatePrewarmConfig({
         enabled: cfg.enabled,
         times: cfg.times,
+        timezone: cfg.timezone ?? "",
       });
       setCfg(next);
       setMsg("已保存");
@@ -391,9 +392,24 @@ function PrewarmCard() {
           </label>
 
           <div>
+            <label className="block text-xs text-ink-500 mb-1">
+              时区{" "}
+              <span className="text-ink-600">
+                (时间点按此时区解释;留空 = 服务器本地时区。例:Asia/Shanghai)
+              </span>
+            </label>
+            <input
+              className="input !py-1 max-w-xs"
+              placeholder="Asia/Shanghai(留空=服务器本地)"
+              value={cfg.timezone ?? ""}
+              onChange={(e) => patch({ timezone: e.target.value })}
+            />
+          </div>
+
+          <div>
             <div className="text-xs text-ink-500 mb-1.5 inline-flex items-center">
-              触发时间(服务器本地时间,每个时间点每天触发一次)
-              <InfoTip text="每天到点自动给所有支持暖机的账号发一次 ping。常见配置:仅 08:00(上班前开窗);08:00 + 13:00(严格保证两个窗口都准点锚定)。" />
+              触发时间(按上方时区,每个时间点每天触发一次;过点会补跑)
+              <InfoTip text="每天到点自动给所有支持暖机的账号发一次 ping。过点补跑:即使定时器迟到 / 进程刚重启,只要当天还没跑过、已过该时刻,就会补上一次(可能稍晚),不再漏跑。常见配置:仅 08:00;或 08:00 + 13:00。" />
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {cfg.times.map((t, i) => (

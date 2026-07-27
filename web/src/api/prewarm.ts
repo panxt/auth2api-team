@@ -8,6 +8,8 @@ export interface PrewarmConfig {
   times: string[];
   /** Provider ids to prewarm; empty = every provider that supports it. */
   providers: string[];
+  /** IANA timezone the times are interpreted in; empty = server local. */
+  timezone?: string;
 }
 
 export interface PrewarmRun {
