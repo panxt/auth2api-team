@@ -7,6 +7,44 @@ import type {
 import type { PrewarmResult } from "../providers/types";
 
 const SETTINGS_KEY = "prewarm";
+const FIRED_KEY = "prewarm.fired";
+
+/** Wall-clock date + minutes-of-day in a given IANA timezone (or server-local
+ *  when tz is empty). Used so scheduled times fire at the intended local hour
+ *  regardless of the host's timezone. */
+function wallClock(tz: string | undefined): { date: string; minutes: number } {
+  const now = new Date();
+  if (!tz) {
+    const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    return { date, minutes: now.getHours() * 60 + now.getMinutes() };
+  }
+  // en-CA gives YYYY-MM-DD; hour12:false gives 00-23.
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(now);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
+  let hh = parseInt(get("hour"), 10);
+  if (hh === 24) hh = 0; // some engines emit "24" at midnight
+  return {
+    date: `${get("year")}-${get("month")}-${get("day")}`,
+    minutes: hh * 60 + parseInt(get("minute"), 10),
+  };
+}
+
+function toMinutes(hhmm: string): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim());
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
 /** Timer granularity. Trigger points have minute resolution, so a 30s tick
  *  guarantees each configured "HH:MM" is observed within its minute. */
 const TICK_MS = 30_000;
@@ -63,6 +101,13 @@ export class PrewarmScheduler {
   ) {
     const persisted = settings.get<Partial<PrewarmConfig>>(SETTINGS_KEY);
     this.config = resolvePrewarmConfig(yamlSeed, persisted);
+    // Restore fired keys so a restart doesn't re-fire a time already run today.
+    try {
+      const saved = settings.get<string[]>(FIRED_KEY);
+      if (Array.isArray(saved)) this.firedKeys = new Set(saved.slice(-32));
+    } catch {
+      /* ignore */
+    }
   }
 
   getConfig(): PrewarmConfig {
@@ -138,20 +183,38 @@ export class PrewarmScheduler {
 
   private tick(): void {
     if (!this.config.enabled || this.config.times.length === 0) return;
-    const now = new Date();
-    const hh = String(now.getHours()).padStart(2, "0");
-    const mm = String(now.getMinutes()).padStart(2, "0");
-    const hhmm = `${hh}:${mm}`;
-    if (!this.config.times.includes(hhmm)) return;
-    const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-    const key = `${day} ${hhmm}`;
-    if (this.firedKeys.has(key)) return;
+    const { date, minutes: nowMin } = wallClock(this.config.timezone);
+    // Catch-up semantics: fire the LATEST configured time that is due today
+    // (now >= time) and hasn't fired yet. Using "due" instead of exact-minute
+    // equality means a delayed tick (event-loop lag), a process restart after
+    // the minute, or a paused host still runs the warm-up — just late — instead
+    // of dropping it silently. Only one fire per tick; a second due-but-unfired
+    // time catches up on the next 30s tick.
+    let target: string | null = null;
+    let targetMin = -1;
+    for (const t of this.config.times) {
+      const tm = toMinutes(t);
+      if (tm === null || tm > nowMin) continue; // not due yet today
+      const key = `${date} ${t.trim()}`;
+      if (this.firedKeys.has(key)) continue; // already ran today
+      if (tm > targetMin) {
+        targetMin = tm;
+        target = t.trim();
+      }
+    }
+    if (!target) return;
+    const key = `${date} ${target}`;
     this.firedKeys.add(key);
     if (this.firedKeys.size > 64) {
-      // Keep only the most-recent keys to stay bounded.
       this.firedKeys = new Set(Array.from(this.firedKeys).slice(-32));
     }
-    void this.trigger("schedule", hhmm).catch((err) =>
+    // Persist so a restart doesn't re-fire this time today.
+    try {
+      this.settings.set(FIRED_KEY, Array.from(this.firedKeys).slice(-32));
+    } catch {
+      /* ignore */
+    }
+    void this.trigger("schedule", target).catch((err) =>
       console.error("[prewarm] scheduled run failed:", err?.message || err),
     );
   }

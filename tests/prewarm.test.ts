@@ -158,3 +158,49 @@ test("history is newest-first and capped", async () => {
   // All entries are well-formed; newest-first ordering is by construction.
   assert.ok(hist.every((h) => h.total === 1 && h.ok === 1));
 });
+
+/* ── catch-up scheduling + cross-restart dedup ─────────────────── */
+
+function hhmm(min: number): string {
+  const m = ((min % 1440) + 1440) % 1440;
+  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+}
+
+test("tick fires the latest DUE (past) time, skips future ones (catch-up)", () => {
+  const settings = memSettings();
+  const s = new PrewarmScheduler(settings, async () => []);
+  const now = new Date();
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const due = hhmm(nowMin - 3); // already past today → due
+  const future = hhmm(nowMin + 30); // not yet → must not fire
+  s.updateConfig({ enabled: true, times: [due, future] });
+  (s as any).tick();
+  const fired = Array.from((s as any).firedKeys as Set<string>);
+  assert.equal(fired.length, 1, "exactly one time fired");
+  assert.ok(fired[0].endsWith(" " + due), "the DUE time fired, not the future one");
+  assert.ok(Array.isArray(settings.get("prewarm.fired")), "fired keys persisted");
+});
+
+test("tick does not re-fire a time already fired today (dedup + persistence)", () => {
+  const settings = memSettings();
+  const now = new Date();
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const due = hhmm(nowMin - 3);
+  const s1 = new PrewarmScheduler(settings, async () => []);
+  s1.updateConfig({ enabled: true, times: [due] });
+  (s1 as any).tick();
+  const after1 = ((s1 as any).firedKeys as Set<string>).size;
+  (s1 as any).tick();
+  assert.equal(((s1 as any).firedKeys as Set<string>).size, after1, "same process → no re-fire");
+  // Restart (new instance, same settings) restores fired keys → still no re-fire.
+  const s2 = new PrewarmScheduler(settings, async () => []);
+  s2.updateConfig({ enabled: true, times: [due] });
+  const before = ((s2 as any).firedKeys as Set<string>).size;
+  (s2 as any).tick();
+  assert.equal(((s2 as any).firedKeys as Set<string>).size, before, "restart → persisted dedup holds");
+});
+
+test("timezone flows through prewarm config", () => {
+  const s = new PrewarmScheduler(memSettings(), async () => []);
+  assert.equal(s.updateConfig({ timezone: "Asia/Shanghai" }).timezone, "Asia/Shanghai");
+});

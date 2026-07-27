@@ -21,6 +21,7 @@ import { McpController } from "./mcp/registry";
 import { Notifier } from "./notify/notifier";
 import { ExpirySweep } from "./keys/expiry-sweep";
 import { HealthMonitor } from "./monitor/health-monitor";
+import { setStreamKeepaliveMs } from "./upstream/streaming";
 import type { PrewarmResult } from "./providers/types";
 
 function prompt(question: string): Promise<string> {
@@ -160,6 +161,9 @@ async function startServer(): Promise<void> {
     ?.split("=")[1];
   const config = loadConfig(configPath);
   const authDir = resolveAuthDir(config["auth-dir"]);
+
+  // Arm the SSE keep-alive heartbeat (prevents client "stalled mid-stream").
+  setStreamKeepaliveMs(config.timeouts["stream-keepalive-ms"]);
 
   // Open the configured storage backend (sqlite by default, or file). It
   // provides the usage event log and the managed-key repository.

@@ -86,8 +86,23 @@ export type SSEEventHandler = (
   usage: UsageData,
 ) => string[];
 
+/** Process-wide default SSE keep-alive idle threshold (ms); 0 = disabled. Set
+ *  once at startup from config.timeouts["stream-keepalive-ms"]. Per-call
+ *  StreamOptions.keepaliveMs overrides it. */
+let DEFAULT_KEEPALIVE_MS = 0;
+export function setStreamKeepaliveMs(ms: number): void {
+  DEFAULT_KEEPALIVE_MS = Number.isFinite(ms) && ms > 0 ? ms : 0;
+}
+
 export interface StreamOptions {
   onEvent?: SSEEventHandler;
+  /**
+   * When > 0, emit an SSE keep-alive comment (`: keep-alive`) to the client if
+   * no bytes have been forwarded for this many ms. Prevents Claude Code's
+   * "Response stalled mid-stream" abort during legitimate quiet periods (big
+   * prompts, model thinking, near-rate-limit upstreams). 0/undefined disables.
+   */
+  keepaliveMs?: number;
 }
 
 export interface StreamResult {
@@ -160,6 +175,29 @@ export async function handleStreamingResponse(
   };
   resp.on("close", onClose);
 
+  // Keep-alive heartbeat: if the upstream goes quiet longer than keepaliveMs,
+  // emit an SSE comment line (ignored by clients per the SSE spec) so the
+  // client's stall timer never trips during legitimate quiet periods.
+  let lastActivityAt = Date.now();
+  const keepaliveMs = options?.keepaliveMs ?? DEFAULT_KEEPALIVE_MS;
+  let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+  if (keepaliveMs > 0) {
+    // Check at half the idle threshold so a ping lands within ~keepaliveMs.
+    const period = Math.max(1000, Math.floor(keepaliveMs / 2));
+    keepaliveTimer = setInterval(() => {
+      if (clientDisconnected || resp.writableEnded) return;
+      if (Date.now() - lastActivityAt >= keepaliveMs) {
+        try {
+          resp.write(": keep-alive\n\n");
+          lastActivityAt = Date.now();
+        } catch {
+          /* write after end — ignore */
+        }
+      }
+    }, period);
+    if (keepaliveTimer.unref) keepaliveTimer.unref();
+  }
+
   try {
     // The `finished` flag lets us run the loop body one final time with
     // an empty chunk after `reader.read()` returns `done`. That final
@@ -185,6 +223,7 @@ export async function handleStreamingResponse(
       } else {
         if (!options?.onEvent) {
           resp.write(value);
+          lastActivityAt = Date.now();
         }
         buffer += decoder.decode(value, { stream: true });
       }
@@ -210,7 +249,10 @@ export async function handleStreamingResponse(
             if (options?.onEvent) {
               const chunks = options.onEvent(currentEvent, data, usage);
               for (const c of chunks) {
-                if (!clientDisconnected) resp.write(c);
+                if (!clientDisconnected) {
+                  resp.write(c);
+                  lastActivityAt = Date.now();
+                }
               }
             }
           } catch {
@@ -223,6 +265,7 @@ export async function handleStreamingResponse(
   } catch (err) {
     if (!clientDisconnected) console.error("Stream error:", err);
   } finally {
+    if (keepaliveTimer) clearInterval(keepaliveTimer);
     resp.off("close", onClose);
     if (!clientDisconnected) {
       resp.end();

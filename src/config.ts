@@ -43,6 +43,10 @@ export interface TimeoutConfig {
   "messages-ms": number;
   "stream-messages-ms": number;
   "count-tokens-ms": number;
+  /** SSE keep-alive idle threshold (ms). If the upstream sends nothing for this
+   *  long mid-stream, emit a `: keep-alive` comment so the client doesn't abort
+   *  with "Response stalled mid-stream". 0 disables. Default 15000. */
+  "stream-keepalive-ms": number;
 }
 
 export interface StatsConfig {
@@ -431,12 +435,17 @@ export interface PrewarmConfig {
   times: string[];
   /** Provider ids to prewarm; empty = every provider that supports it. */
   providers: string[];
+  /** IANA timezone the `times` are interpreted in (e.g. "Asia/Shanghai").
+   *  Empty/unset = the server process's local time. Fixes "runs at the wrong
+   *  hour" when the host TZ differs from what the operator intends. */
+  timezone?: string;
 }
 
 export const DEFAULT_PREWARM_CONFIG: PrewarmConfig = {
   enabled: true,
   times: ["08:00"],
   providers: [],
+  timezone: "",
 };
 
 /** Validate & canonicalize "HH:MM" entries; drops blanks/dupes, sorts. */
@@ -591,6 +600,7 @@ const DEFAULT_RAW: RawConfig = {
     "messages-ms": 120000,
     "stream-messages-ms": 600000,
     "count-tokens-ms": 30000,
+    "stream-keepalive-ms": 15000,
   },
   stats: {
     enabled: true,
