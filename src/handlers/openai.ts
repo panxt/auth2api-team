@@ -84,11 +84,9 @@ async function proxyCodexChatCompletions(args: {
   const responsesBody = normalizeCodexResponsesBody(
     chatToResponsesRequest(body),
   );
-  // codex's ChatGPT-account backend rejects a couple of public-Responses
-  // fields. Strip them here — they are not load-bearing and the backend
-  // applies its own caps from the user's ChatGPT plan.
-  delete responsesBody.max_output_tokens;
-  delete responsesBody.parallel_tool_calls;
+  // Public-Responses fields the ChatGPT-codex backend rejects are stripped
+  // inside normalizeCodexResponsesBody — they are not load-bearing and the
+  // backend applies its own caps from the user's ChatGPT plan.
   // Codex requires stream:true upstream. For non-streaming clients we
   // drive a streaming upstream and aggregate locally before responding.
   responsesBody.stream = true;
@@ -216,8 +214,6 @@ async function proxyCodexResponses(args: {
 }): Promise<void> {
   const { req, resp, config, provider, body, model, stream } = args;
   const responsesBody = normalizeCodexResponsesBody(body);
-  delete responsesBody.max_output_tokens;
-  delete responsesBody.parallel_tool_calls;
   // Force the upstream to stream regardless of the client's request — the
   // backend doesn't support stream:false, and we drain locally below if
   // the client wants a single JSON body.

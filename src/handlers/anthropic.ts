@@ -61,13 +61,10 @@ async function proxyCodexMessages(args: {
   const responsesBody = normalizeCodexResponsesBody(
     anthropicToResponsesRequest(body),
   );
-  // codex's ChatGPT-account backend rejects `max_output_tokens` even
-  // though the public OpenAI Responses API accepts it. Anthropic Messages
-  // requires `max_tokens` so the translator always emits this field —
-  // strip it here. Same applies to a couple of other fields the
-  // ChatGPT-codex backend doesn't support.
-  delete responsesBody.max_output_tokens;
-  delete responsesBody.parallel_tool_calls;
+  // Fields the ChatGPT-codex backend rejects (`max_output_tokens`, which the
+  // Anthropic->Responses translator always emits because Messages requires
+  // `max_tokens`; `parallel_tool_calls`; `user`) are stripped inside
+  // normalizeCodexResponsesBody.
   // codex requires stream:true upstream — we aggregate locally for
   // non-streaming clients.
   responsesBody.stream = true;
