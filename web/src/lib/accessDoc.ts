@@ -90,18 +90,23 @@ export ANTHROPIC_AUTH_TOKEN="${key}"
 
 **若启动后弹「选择登录方式」菜单**:说明环境变量没生效(先 \`echo $ANTHROPIC_BASE_URL\` 确认)。若要继续,**选第 2 项 \`Anthropic Console account · API usage billing\`**,**绝不要选第 1 项订阅登录**(会绕过代理直连官方)。
 
-#### 想在 Claude Code 里用 GPT-5.5
+#### 想在 \`/model\` 菜单里看到全部模型(含 GPT-5.5)
 
-Claude Code 的 \`/model\` 只认自己白名单里的名字,直接敲 \`/model gpt-5.5\` 会报 \`Unknown model\`。正确做法是**把 opus 这个槽位重定向**到 GPT-5.5,再多加一个环境变量:
+默认情况下 Claude Code 的 \`/model\` 只列它自带的 \`Opus\`/\`Sonnet\`/\`Haiku\`,敲 \`/model gpt-5.5\` 会报 \`Unknown model\`。**再加一个环境变量**就会让它来 ${name} 拉一次模型列表:
 
 \`\`\`bash
-export ANTHROPIC_DEFAULT_OPUS_MODEL="gpt-5.5"      # /model opus  → 实际走 GPT-5.5
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="gpt-5.4-mini" # 后台小任务也走 Codex,不吃 Claude 额度
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 \`\`\`
 
-设完在会话里 \`/model opus\` 就是 GPT-5.5、\`/model sonnet\` 还是 Claude Sonnet,**一句命令来回切**。想反过来把 sonnet 槽位给 GPT 也行,改 \`ANTHROPIC_DEFAULT_SONNET_MODEL\` 即可。
+重开终端后 \`/model\`,菜单下半部分会多出网关支持的全部模型(描述写着 \`From gateway\`)—— \`gpt-5.5\`、\`gpt-5.4-mini\`、\`gpt-5.3-codex\` 都在里面,选中即用,也可以直接敲 \`/model gpt-5.5\`。
 
-> 这三个变量只改「别名 → 真实模型名」的映射,请求最终发的是你映射的那个名字,由 ${name} 按名字路由到对应账号池。所以 \`/model\` 菜单里显示的还是 Opus,但实际跑的是 GPT-5.5 —— 看用量看板的模型列可以确认。
+可选再加一行,把 Claude Code 的后台小任务(对话标题、命令描述)也挪到 Codex,省 Claude 额度:
+
+\`\`\`bash
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="gpt-5.4-mini"
+\`\`\`
+
+> \`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY\` 是 Claude Code 的内部开关,官方文档未收录,升级后可能失效。**兜底办法**:改用 \`export ANTHROPIC_DEFAULT_OPUS_MODEL="gpt-5.5"\` 把 opus 槽位重定向过去,之后 \`/model opus\` 实际跑的就是 GPT-5.5(菜单上显示的仍是 Opus)。详见 \`docs/GPT5_IN_CLAUDE_CODE.md\`。
 
 **IDE 插件(VSCode / JetBrains)**:读同一套环境变量,永久写入后**重启 IDE** 即可。
 
@@ -273,7 +278,7 @@ curl -s -H "Authorization: Bearer ${key}" ${base}/admin/usage/keys | python3 -m 
 
 省略 \`model\` 默认 \`claude-sonnet-4-6\`。
 
-> **在 Claude Code 里用 \`gpt-5.5\` 不能直接 \`/model gpt-5.5\`**(它有模型名白名单),要用上面「方式一」里的 \`ANTHROPIC_DEFAULT_OPUS_MODEL\` 槽位重定向。其它客户端(Codex CLI、第三方 GUI、SDK / curl)直接填 \`gpt-5.5\` 就行,没有这个限制。
+> **Claude Code 里想选 \`gpt-5.5\`,得先开 \`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\`**(见上面「方式一」),否则 \`/model\` 菜单里没有它。其它客户端(Codex CLI、第三方 GUI、SDK / curl)直接填 \`gpt-5.5\` 就行,没有这个限制。
 
 ---
 
@@ -286,7 +291,8 @@ curl -s -H "Authorization: Bearer ${key}" ${base}/admin/usage/keys | python3 -m 
 | \`401 / Invalid API key\` | Key 填错或漏了 \`Bearer\`;或被禁用 / 轮换 → 找管理员 |
 | 启动弹「选择登录方式」 | 环境变量没生效,见方式一排查 |
 | \`403 model_not_allowed\` | 你的 Key 被限制了可用模型,换模型或找管理员开通 |
-| Claude Code 报 \`Unknown model 'gpt-5.5'\` | \`/model\` 不认自定义模型名;用 \`ANTHROPIC_DEFAULT_OPUS_MODEL\` 重定向,见「方式一」 |
+| Claude Code 报 \`Unknown model 'gpt-5.5'\` | 没开 \`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1\`,见「方式一」 |
+| \`/model\` 菜单里没有 \`From gateway\` 那批模型 | 同上;确认变量已生效并重开了终端 |
 | \`429\`(限流 / 配额) | 上游限流或月度配额用满,看 \`Retry-After\` 或找管理员 |
 | Codex 报 \`404 /chat/completions\` | base 地址末尾忘了加 \`/v1\` |
 | Windows 改了变量还连官方 | 用 \`SetEnvironmentVariable(..., "User")\` 写用户级并重启 IDE |
