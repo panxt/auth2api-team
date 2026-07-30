@@ -15,6 +15,8 @@ import { TokenData, TokenStorage } from "../src/auth/types";
 import { AccountManager, extractUsage } from "../src/accounts/manager";
 import { buildRegistry } from "../src/providers/registry";
 import { generateCodexAuthURL } from "../src/auth/codex/oauth";
+import { normalizeCodexResponsesBody } from "../src/upstream/codex-api";
+import { anthropicToResponsesRequest } from "../src/upstream/responses-translator";
 import { generatePKCECodes } from "../src/auth/pkce";
 import {
   RefreshTokenExhaustedError,
@@ -94,6 +96,71 @@ test("providerForModel routes by model name", () => {
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+// ══════════════════════════════════════════════════
+// upstream/codex-api.ts — normalizeCodexResponsesBody
+// ══════════════════════════════════════════════════
+
+test("normalizeCodexResponsesBody fills codex's three required fields", () => {
+  const out = normalizeCodexResponsesBody({ model: "gpt-5.5", input: [] });
+  assert.equal(out.stream, true);
+  assert.equal(out.store, false);
+  assert.equal(out.instructions, "");
+});
+
+test("normalizeCodexResponsesBody preserves explicitly-set required fields", () => {
+  const out = normalizeCodexResponsesBody({
+    model: "gpt-5.5",
+    stream: false,
+    store: true,
+    instructions: "be brief",
+  });
+  assert.equal(out.stream, false);
+  assert.equal(out.store, true);
+  assert.equal(out.instructions, "be brief");
+});
+
+test("normalizeCodexResponsesBody strips fields the codex backend 400s on", () => {
+  const out = normalizeCodexResponsesBody({
+    model: "gpt-5.5",
+    max_output_tokens: 4096,
+    parallel_tool_calls: true,
+    user: "user_abc123",
+  });
+  assert.ok(!("max_output_tokens" in out), "max_output_tokens must be stripped");
+  assert.ok(
+    !("parallel_tool_calls" in out),
+    "parallel_tool_calls must be stripped",
+  );
+  // Regression: Claude Code sends metadata.user_id on every /v1/messages
+  // request; leaving it mapped through as `user` made the codex backend
+  // reject the whole request with 400 "Unsupported parameter: user".
+  assert.ok(!("user" in out), "user must be stripped");
+});
+
+test("normalizeCodexResponsesBody does not mutate its input", () => {
+  const input: any = { model: "gpt-5.5", user: "u1", max_output_tokens: 10 };
+  normalizeCodexResponsesBody(input);
+  assert.equal(input.user, "u1");
+  assert.equal(input.max_output_tokens, 10);
+});
+
+test("Claude Code's metadata.user_id survives translation but not normalization", () => {
+  // Shape Claude Code actually posts to /v1/messages.
+  const anthropicBody = {
+    model: "gpt-5.5",
+    max_tokens: 64,
+    metadata: { user_id: "acct_hash_deadbeef" },
+    messages: [{ role: "user", content: "hi" }],
+  };
+  const translated: any = anthropicToResponsesRequest(anthropicBody);
+  // The translator maps metadata.user_id -> user (correct for the public API)…
+  assert.equal(translated.user, "acct_hash_deadbeef");
+  // …and the codex normalizer is what keeps it off the ChatGPT backend.
+  const out = normalizeCodexResponsesBody(translated);
+  assert.ok(!("user" in out));
+  assert.ok(!("max_output_tokens" in out));
 });
 
 test("registry.withAccounts filters empty providers", () => {

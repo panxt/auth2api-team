@@ -78,13 +78,29 @@ function buildHeaders(
  * ones. Explicitly-set values are preserved (so a client that wants stream
  * false will still get the upstream's "Stream must be set to true" 400 — we
  * don't second-guess explicit intent).
+ *
+ * It also strips fields the public OpenAI Responses API accepts but the
+ * ChatGPT-account codex backend rejects outright with
+ * `400 {"detail":"Unsupported parameter: <name>"}`. Every codex entry point
+ * (/v1/messages, /v1/chat/completions, /v1/responses) funnels through here, so
+ * this list is the single place that knows the backend's dialect.
  */
+const CODEX_UNSUPPORTED_FIELDS = [
+  "max_output_tokens",
+  "parallel_tool_calls",
+  // Claude Code sends `metadata.user_id` on every /v1/messages request, which
+  // the Anthropic->Responses translator maps to `user`. Chat clients may send
+  // `user` directly. Either way the codex backend 400s on it.
+  "user",
+] as const;
+
 export function normalizeCodexResponsesBody(body: any): any {
   if (!body || typeof body !== "object") return body;
   const next: any = { ...body };
   if (next.stream === undefined) next.stream = true;
   if (next.store === undefined) next.store = false;
   if (next.instructions === undefined) next.instructions = "";
+  for (const field of CODEX_UNSUPPORTED_FIELDS) delete next[field];
   return next;
 }
 
