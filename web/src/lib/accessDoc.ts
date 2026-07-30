@@ -100,13 +100,9 @@ export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 
 重开终端后 \`/model\`,菜单下半部分会多出网关支持的全部模型(描述写着 \`From gateway\`)—— \`gpt-5.5\`、\`gpt-5.4-mini\`、\`gpt-5.3-codex\` 都在里面,选中即用,也可以直接敲 \`/model gpt-5.5\`。
 
-可选再加一行,把 Claude Code 的后台小任务(对话标题、命令描述)也挪到 Codex,省 Claude 额度:
+**默认模型不变,还是 Claude** —— GPT 是你需要时手动切过去、用完切回来。不要自己配别名映射(把 \`opus\` 之类的槽位指向 GPT):那样菜单显示的名字和实际跑的模型不一致,出问题时说不清用的是哪个。
 
-\`\`\`bash
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="gpt-5.4-mini"
-\`\`\`
-
-> \`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY\` 是 Claude Code 的内部开关,官方文档未收录,升级后可能失效。**兜底办法**:改用 \`export ANTHROPIC_DEFAULT_OPUS_MODEL="gpt-5.5"\` 把 opus 槽位重定向过去,之后 \`/model opus\` 实际跑的就是 GPT-5.5(菜单上显示的仍是 Opus)。详见 \`docs/GPT5_IN_CLAUDE_CODE.md\`。
+> \`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY\` 是 Claude Code 的内部开关,官方文档未收录,升级后可能失效。菜单里那批模型突然没了就**找管理员**,别自己折腾。详见 \`docs/GPT5_IN_CLAUDE_CODE.md\`。
 
 **IDE 插件(VSCode / JetBrains)**:读同一套环境变量,永久写入后**重启 IDE** 即可。
 

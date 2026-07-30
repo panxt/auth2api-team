@@ -173,27 +173,18 @@ echo %CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY%
 
 ---
 
-## 备选方案:槽位重定向
+## 用法说明:手动切,不设默认
 
-`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` 是 Claude Code 的内部开关,官方文档里没有写,**未来版本有可能改名或去掉**。如果哪天升级后菜单里的 `From gateway` 那批模型消失了,用这个办法顶上:
+配好之后**默认模型不变**,还是 Claude —— GPT-5.5 是你需要时用 `/model` 主动切过去,用完切回来。
 
-```bash
-export ANTHROPIC_DEFAULT_OPUS_MODEL="gpt-5.5"
-```
+这样设计是有意的:
 
-原理是把 `opus` 这个**槽位**重定向到 GPT-5.5 —— 之后 `/model opus` 菜单上显示的还是 Opus,但实际跑的是 GPT-5.5。同理还有 `ANTHROPIC_DEFAULT_SONNET_MODEL` 和 `ANTHROPIC_DEFAULT_HAIKU_MODEL`。
+- **不给 GPT 设默认**,免得日常开发不知不觉就在吃那个共用的 ChatGPT 额度(下面「注意」里说了为什么要省)
+- **不做别名映射**(把 `opus` 之类的槽位偷偷指向 GPT)。那样菜单上显示 Opus、实际跑 GPT,看错了都不知道,排查问题时也说不清自己刚才用的是哪个模型
 
-这个办法的缺点是**菜单名和实际模型不一致**,容易看错,所以只在上面那个开关失效时用。
+所以:想用就 `/model gpt-5.5`,不想用就 `/model` 切回 Claude,**菜单上显示的名字始终等于实际跑的模型**。
 
-### 顺带一个优化(可选)
-
-不管用哪种方案,都可以加这一行:
-
-```bash
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="gpt-5.4-mini"
-```
-
-Claude Code 的**后台小任务**(生成对话标题、命令描述这些)默认打 Claude 的 Haiku,吃团队的 Claude 额度。指到 `gpt-5.4-mini` 就转到 GPT 那边,又快又便宜。
+> 如果哪天升级 Claude Code 后 `/model` 里的 `From gateway` 那批模型消失了(这是个内部开关,官方文档未收录,有可能变),**找管理员**,别自己折腾映射。
 
 ---
 
