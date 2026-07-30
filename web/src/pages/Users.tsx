@@ -126,6 +126,14 @@ export function Users() {
   const [overriding, setOverriding] = useState<MergedRow | null>(null); // 今日加额目标
   const [createdKey, setCreatedKey] = useState<CreateKeyResponse | null>(null); // raw key + meta, shown once
 
+  // ── Batch selection (managed keys only; config keys are read-only) ──
+  const [selected, setSelected] = useState<Set<string>>(new Set()); // managedIds
+  const [batchBusy, setBatchBusy] = useState(false);
+  // Which batch modal is open: model allowlist / denylist / quota / none.
+  const [batchModal, setBatchModal] = useState<"allow" | "deny" | "quota" | null>(
+    null,
+  );
+
   const load = useCallback(async () => {
     setLoading(true);
     setErr(null);
@@ -168,6 +176,22 @@ export function Users() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Drop selections whose key no longer exists after a reload (deleted, or
+  // now config-only) so the batch toolbar never acts on a stale id.
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const live = new Set(rows.filter((r) => r.managedId).map((r) => r.managedId!));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (live.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [rows]);
 
   // Fetch the available model list + registered MCP categories once (admin
   // only) for the allowlist / MCP-grant pickers.
@@ -228,6 +252,105 @@ export function Users() {
     }
   }
 
+  // ── Batch helpers ────────────────────────────────────────────────────
+  // Only managed keys are selectable; config keys are read-only.
+  const selectableIds = rows
+    .filter((r) => r.managedId)
+    .map((r) => r.managedId!);
+  const allSelected =
+    selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
+  const someSelected = selected.size > 0 && !allSelected;
+
+  function toggleOne(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleAll() {
+    setSelected((prev) =>
+      prev.size === selectableIds.length && selectableIds.length > 0
+        ? new Set()
+        : new Set(selectableIds),
+    );
+  }
+
+  /** Run one op across all selected ids sequentially, tally failures, then
+   *  reload and clear the selection. `perId` returns the key's label for the
+   *  error summary. */
+  async function runBatch(
+    verb: string,
+    perId: (id: string) => Promise<void>,
+  ): Promise<void> {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    setBatchBusy(true);
+    let ok = 0;
+    const failures: string[] = [];
+    for (const id of ids) {
+      const label =
+        rows.find((r) => r.managedId === id)?.label || id.slice(0, 8);
+      try {
+        await perId(id);
+        ok++;
+      } catch (e) {
+        failures.push(`${label}: ${(e as ApiError).message}`);
+      }
+    }
+    setBatchBusy(false);
+    await load();
+    setSelected(new Set());
+    if (failures.length) {
+      alert(
+        `${verb}:成功 ${ok},失败 ${failures.length}\n\n` +
+          failures.slice(0, 8).join("\n") +
+          (failures.length > 8 ? `\n…还有 ${failures.length - 8} 条` : ""),
+      );
+    }
+  }
+
+  async function batchSetEnabled(enabled: boolean) {
+    await runBatch(enabled ? "批量启用" : "批量禁用", async (id) => {
+      await updateKey(id, { enabled });
+    });
+  }
+
+  async function batchDelete() {
+    const n = selected.size;
+    if (
+      !confirm(
+        `确认删除选中的 ${n} 个 key?\n此操作不可逆,所有用这些 key 的客户端会立即失效。`,
+      )
+    )
+      return;
+    await runBatch("批量删除", async (id) => {
+      await deleteKey(id);
+    });
+  }
+
+  async function batchSetModels(kind: "allow" | "deny", list: string[]) {
+    // 空数组 = 清空该名单(白名单空=允许全部;黑名单空=不禁任何)。
+    const field = kind === "allow" ? "allowed-models" : "denied-models";
+    await runBatch(
+      kind === "allow" ? "批量设模型白名单" : "批量设模型黑名单",
+      async (id) => {
+        await updateKey(id, { [field]: list });
+      },
+    );
+    setBatchModal(null);
+  }
+
+  async function batchSetQuota(quota: KeyQuota | null) {
+    // null = 清空额度(改为不限);对象 = 覆盖为这套额度。
+    await runBatch("批量设额度", async (id) => {
+      await updateKey(id, { quota });
+    });
+    setBatchModal(null);
+  }
+
   return (
     <div>
       <header className="flex items-center justify-between mb-6">
@@ -257,11 +380,88 @@ export function Users() {
       {loading && <div className="text-ink-400">加载中...</div>}
       {err && <div className="badge-err px-3 py-2 inline-block">{err}</div>}
 
+      {/* Batch action bar — only when admin has ≥1 managed key selected */}
+      {isAdmin && selected.size > 0 && (
+        <div className="card mb-3 p-3 flex flex-wrap items-center gap-2 bg-ink-900 border-emerald-800">
+          <span className="text-sm text-ink-300 mr-1">
+            已选 <b className="text-emerald-400">{selected.size}</b> 个
+          </span>
+          <button
+            className="btn-secondary text-xs"
+            onClick={() => batchSetEnabled(true)}
+            disabled={batchBusy}
+          >
+            批量启用
+          </button>
+          <button
+            className="btn-secondary text-xs text-amber-400"
+            onClick={() => batchSetEnabled(false)}
+            disabled={batchBusy}
+          >
+            批量禁用
+          </button>
+          <button
+            className="btn-secondary text-xs"
+            onClick={() => setBatchModal("allow")}
+            disabled={batchBusy}
+            title="统一设置这些 key 的模型白名单(如只放开 gpt-5.5)"
+          >
+            批量设白名单
+          </button>
+          <button
+            className="btn-secondary text-xs text-rose-400"
+            onClick={() => setBatchModal("deny")}
+            disabled={batchBusy}
+            title="统一设置这些 key 的模型黑名单(列出的一律 403)"
+          >
+            批量设黑名单
+          </button>
+          <button
+            className="btn-secondary text-xs"
+            onClick={() => setBatchModal("quota")}
+            disabled={batchBusy}
+            title="统一设置这些 key 的额度(月/日 · 成本/Token)"
+          >
+            批量设额度
+          </button>
+          <button
+            className="btn-danger text-xs"
+            onClick={batchDelete}
+            disabled={batchBusy}
+          >
+            批量删除
+          </button>
+          <button
+            className="btn-ghost text-xs ml-auto"
+            onClick={() => setSelected(new Set())}
+            disabled={batchBusy}
+          >
+            取消选择
+          </button>
+          {batchBusy && <span className="text-xs text-ink-400">处理中…</span>}
+        </div>
+      )}
+
       {!loading && !err && (
         <div className="card overflow-x-auto p-0">
           <table className="w-full text-sm">
             <thead className="bg-ink-900 text-ink-400">
               <tr className="text-left">
+                {isAdmin && (
+                  <th className="px-4 py-3 font-medium w-10">
+                    <input
+                      type="checkbox"
+                      className="cursor-pointer align-middle"
+                      checked={allSelected}
+                      ref={(el) => {
+                        if (el) el.indeterminate = someSelected;
+                      }}
+                      onChange={toggleAll}
+                      disabled={selectableIds.length === 0}
+                      title="全选 / 取消全选(仅 managed key)"
+                    />
+                  </th>
+                )}
                 <th className="px-4 py-3 font-medium">Label</th>
                 <th className="px-4 py-3 font-medium">来源</th>
                 <th className="px-4 py-3 font-medium text-center">Admin</th>
@@ -282,7 +482,34 @@ export function Users() {
                 const cost = row.consumed?.costUsd ?? 0;
                 const limit = row.quota?.["monthly-cost-usd"];
                 return (
-                  <tr key={row.apiKeyShort} className="hover:bg-ink-900/50">
+                  <tr
+                    key={row.apiKeyShort}
+                    className={`hover:bg-ink-900/50 ${
+                      row.managedId && selected.has(row.managedId)
+                        ? "bg-emerald-950/30"
+                        : ""
+                    }`}
+                  >
+                    {isAdmin && (
+                      <td className="px-4 py-3">
+                        <input
+                          type="checkbox"
+                          className={
+                            row.managedId
+                              ? "cursor-pointer align-middle"
+                              : "cursor-not-allowed opacity-40 align-middle"
+                          }
+                          checked={!!row.managedId && selected.has(row.managedId)}
+                          disabled={!row.managedId}
+                          onChange={() =>
+                            row.managedId && toggleOne(row.managedId)
+                          }
+                          title={
+                            row.managedId ? "选中以批量操作" : "config 来源,只读"
+                          }
+                        />
+                      </td>
+                    )}
                     <td className="px-4 py-3 font-medium">
                       {row.label || (
                         <span className="text-ink-500">(unlabeled)</span>
@@ -429,7 +656,7 @@ export function Users() {
               {rows.length === 0 && (
                 <tr>
                   <td
-                    colSpan={isAdmin ? 11 : 10}
+                    colSpan={isAdmin ? 12 : 10}
                     className="px-4 py-8 text-center text-ink-500"
                   >
                     {isAdmin
@@ -473,6 +700,27 @@ export function Users() {
           setOverriding(null);
           load();
         }}
+      />
+
+      <BatchModelsModal
+        kind={batchModal === "deny" ? "deny" : "allow"}
+        open={batchModal === "allow" || batchModal === "deny"}
+        count={selected.size}
+        models={models}
+        busy={batchBusy}
+        onClose={() => setBatchModal(null)}
+        onApply={(list) =>
+          batchSetModels(batchModal === "deny" ? "deny" : "allow", list)
+        }
+      />
+
+      <BatchQuotaModal
+        open={batchModal === "quota"}
+        count={selected.size}
+        models={models}
+        busy={batchBusy}
+        onClose={() => setBatchModal(null)}
+        onApply={batchSetQuota}
       />
 
       {createdKey && (
@@ -1002,6 +1250,138 @@ function CapRow({
         </div>
       ))}
     </div>
+  );
+}
+
+/* ─── Batch: set model allow/deny list across selected keys ─────────── */
+
+function BatchModelsModal({
+  kind,
+  open,
+  count,
+  models,
+  busy,
+  onClose,
+  onApply,
+}: {
+  kind: "allow" | "deny";
+  open: boolean;
+  count: number;
+  models: string[];
+  busy: boolean;
+  onClose: () => void;
+  onApply: (list: string[]) => void;
+}) {
+  const [list, setList] = useState<string[]>([]);
+  const isDeny = kind === "deny";
+
+  // Reset the picker each time the modal opens — it applies to a fresh
+  // selection, not whatever was left from last time.
+  useEffect(() => {
+    if (open) setList([]);
+  }, [open, kind]);
+
+  const noun = isDeny ? "黑名单" : "白名单";
+
+  return (
+    <Modal open={open} onClose={onClose} title={`批量设模型${noun} · ${count} 个 key`}>
+      <div className="space-y-4">
+        <div className="badge-warn px-3 py-2 text-xs block">
+          将<b>覆盖</b>这 {count} 个 key 现有的模型{noun}(不是追加)。
+          {isDeny
+            ? "不选任何模型 = 清空黑名单(不再禁用任何模型)。白名单不受影响。"
+            : "不选任何模型 = 清空白名单 = 允许全部。黑名单不受影响。"}
+        </div>
+        <ModelAllowlistPicker
+          models={models}
+          selected={list}
+          onChange={setList}
+          title={isDeny ? "禁用模型(黑名单)" : "可用模型(白名单)"}
+          hint={
+            isDeny
+              ? "(列出的一律 403,优先级高于白名单)"
+              : "(不选 = 清空为允许全部;选中后这些 key 仅允许这些模型)"
+          }
+          accent={isDeny ? "rose" : "emerald"}
+        />
+        <div className="flex justify-end gap-2 pt-2">
+          <button className="btn-secondary" onClick={onClose} disabled={busy}>
+            取消
+          </button>
+          <button
+            className="btn-primary"
+            onClick={() => onApply(list)}
+            disabled={busy}
+          >
+            {busy
+              ? "应用中…"
+              : list.length === 0
+                ? `清空${noun}(${count} 个)`
+                : `应用到 ${count} 个 key`}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ─── Batch: set quota across selected keys ─────────── */
+
+function BatchQuotaModal({
+  open,
+  count,
+  models,
+  busy,
+  onClose,
+  onApply,
+}: {
+  open: boolean;
+  count: number;
+  models: string[];
+  busy: boolean;
+  onClose: () => void;
+  onApply: (quota: KeyQuota | null) => void;
+}) {
+  const [quota, setQuota] = useState<KeyQuota>({});
+
+  useEffect(() => {
+    if (open) setQuota({});
+  }, [open]);
+
+  // A quota with no key-total caps AND no per-model caps is "empty" → clearing.
+  const isEmpty =
+    quota["monthly-cost-usd"] == null &&
+    quota["monthly-tokens"] == null &&
+    quota["daily-cost-usd"] == null &&
+    quota["daily-tokens"] == null &&
+    Object.keys(quota["per-model"] ?? {}).length === 0;
+
+  return (
+    <Modal open={open} onClose={onClose} title={`批量设额度 · ${count} 个 key`}>
+      <div className="space-y-4">
+        <div className="badge-warn px-3 py-2 text-xs block">
+          将<b>覆盖</b>这 {count} 个 key 现有的额度(不是叠加)。
+          全部留空 = 清空额度 = 改为不限。今日临时加额不受影响。
+        </div>
+        <QuotaEditor value={quota} onChange={setQuota} models={models} />
+        <div className="flex justify-end gap-2 pt-2">
+          <button className="btn-secondary" onClick={onClose} disabled={busy}>
+            取消
+          </button>
+          <button
+            className="btn-primary"
+            onClick={() => onApply(isEmpty ? null : quota)}
+            disabled={busy}
+          >
+            {busy
+              ? "应用中…"
+              : isEmpty
+                ? `清空额度(${count} 个)`
+                : `应用到 ${count} 个 key`}
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
