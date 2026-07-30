@@ -51,12 +51,94 @@ export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
 ```
 
+改完 `source ~/.zshrc`(或关掉终端重开)。
+
+---
+
+## 🪟 Windows 详细步骤
+
+Windows 上**推荐用 settings.json**(上面方式 A),因为它跟 PowerShell / CMD / IDE 用哪个终端无关,只配一次。
+
+### 推荐:改 settings.json
+
+**1. 打开文件夹** — 按 `Win + R`,粘贴下面这行回车:
+
+```
+%USERPROFILE%\.claude
+```
+
+**2. 找 `settings.json`** — 没有这个文件就新建一个(注意别被系统加成 `settings.json.txt`,资源管理器里要先打开「查看 → 文件扩展名」)。
+
+**3. 用记事本 / VSCode 打开,填入**:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://172.16.13.203:8318",
+    "ANTHROPIC_AUTH_TOKEN": "换成你自己的 Key",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"
+  }
+}
+```
+
+文件里**已经有内容**的话,只把 `env` 这一块加进去,别整个替换。
+
+**4. 检查格式** — PowerShell 里跑:
+
 ```powershell
-# Windows PowerShell(User 级别,设完关掉窗口重开)
+Get-Content "$env:USERPROFILE\.claude\settings.json" | ConvertFrom-Json
+```
+
+不报错就说明 JSON 写对了。报错通常是**多了一个逗号**或**少了一个引号**。
+
+**5. 关掉所有终端窗口重开**,启动 `claude`,敲 `/model`。
+
+### 备选:设系统环境变量
+
+**PowerShell(User 级别,永久)**:
+
+```powershell
+[Environment]::SetEnvironmentVariable("ANTHROPIC_BASE_URL", "http://172.16.13.203:8318", "User")
+[Environment]::SetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN", "换成你自己的Key", "User")
 [Environment]::SetEnvironmentVariable("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1", "User")
 ```
 
-改完 `source ~/.zshrc`(或关掉终端重开)。
+⚠️ **设完必须关掉当前 PowerShell 窗口重开** —— 正在运行的进程读不到新值,这是 Windows 上最常见的"我明明设了却没用"。
+
+**只想临时试一下**(只影响当前这个 PowerShell 窗口,关掉就没了):
+
+```powershell
+$env:ANTHROPIC_BASE_URL="http://172.16.13.203:8318"
+$env:ANTHROPIC_AUTH_TOKEN="换成你自己的Key"
+$env:CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY="1"
+claude
+```
+
+**图形界面**:`Win + R` → 输 `sysdm.cpl` → 高级 → 环境变量 → 上半部分「用户变量」→ 新建,变量名 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`,变量值 `1`。
+
+### 确认变量到位了
+
+```powershell
+# PowerShell
+echo $env:CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
+```
+
+```cmd
+:: CMD
+echo %CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY%
+```
+
+输出 `1` 就对了。输出空白或者变量名本身 → 没设上,或者没重开窗口。
+
+### Windows 上的几个坑
+
+| 坑 | 说明 |
+|---|---|
+| 设了没生效 | 99% 是**没关窗口重开**。环境变量只在新进程里生效 |
+| 在 VSCode / JetBrains 里用 | 要**重启整个 IDE**,不是重启 IDE 里的终端面板 |
+| 用 WSL / Git Bash | 那是 Linux 环境,不读 Windows 的用户变量。要在 WSL 里按 `~/.bashrc` 的方式配(见上面方式 B) |
+| `settings.json.txt` | 记事本默认加 `.txt` 后缀。保存时「文件类型」选**所有文件**,或者先开启资源管理器的文件扩展名显示 |
+| 值写成了数字 | settings.json 里必须是字符串 `"1"`,不能是 `1` |
 
 ---
 
