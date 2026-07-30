@@ -12,7 +12,11 @@ import {
   storageToToken,
 } from "../src/auth/token-storage";
 import { TokenData, TokenStorage } from "../src/auth/types";
-import { AccountManager, extractUsage } from "../src/accounts/manager";
+import {
+  AccountManager,
+  extractUsage,
+  codexQuotaToFields,
+} from "../src/accounts/manager";
 import { buildRegistry } from "../src/providers/registry";
 import { generateCodexAuthURL } from "../src/auth/codex/oauth";
 import { normalizeCodexResponsesBody } from "../src/upstream/codex-api";
@@ -161,6 +165,123 @@ test("Claude Code's metadata.user_id survives translation but not normalization"
   const out = normalizeCodexResponsesBody(translated);
   assert.ok(!("user" in out));
   assert.ok(!("max_output_tokens" in out));
+});
+
+// ══════════════════════════════════════════════════
+// accounts/manager.ts — Codex quota headers (x-codex-*)
+// ══════════════════════════════════════════════════
+
+// The exact header set probed from the live ChatGPT-account codex backend
+// (2026-07-30): weekly-only cap on a Plus plan, 5h band retired.
+const LIVE_CODEX_HEADERS: Record<string, string> = {
+  "active-limit": "premium",
+  "credits-balance": "0",
+  "credits-has-credits": "False",
+  "credits-unlimited": "False",
+  "plan-type": "plus",
+  "primary-over-secondary-limit-percent": "0",
+  "primary-reset-after-seconds": "594859",
+  "primary-reset-at": "1785984543",
+  "primary-used-percent": "17",
+  "primary-window-minutes": "10080",
+  "secondary-reset-after-seconds": "0",
+  "secondary-reset-at": "",
+  "secondary-used-percent": "0",
+  "secondary-window-minutes": "0",
+};
+
+test("codexQuotaToFields: weekly band maps to the 7d slot, inactive 5h skipped", () => {
+  const f = codexQuotaToFields(LIVE_CODEX_HEADERS);
+  // 10080 min = 7 days → 7d slot; 17% used → 0.17 utilization.
+  assert.equal(f["unified-7d-utilization"], "0.17");
+  assert.equal(f["unified-7d-reset"], "1785984543");
+  assert.equal(f["unified-7d-window-minutes"], "10080");
+  // secondary window-minutes = 0 → inactive → no 5h slot at all.
+  assert.equal(f["unified-5h-utilization"], undefined);
+  assert.equal(f["unified-5h-reset"], undefined);
+  // display-only fields preserved under codex- prefix.
+  assert.equal(f["codex-plan-type"], "plus");
+  assert.equal(f["codex-active-limit"], "premium");
+  assert.equal(f["codex-credits-balance"], "0");
+});
+
+test("codexQuotaToFields: 1% is 0.01, not misread as 100% (parseUtil trap)", () => {
+  const f = codexQuotaToFields({
+    "primary-window-minutes": "10080",
+    "primary-used-percent": "1",
+    "primary-reset-at": "1785984543",
+  });
+  assert.equal(f["unified-7d-utilization"], "0.01");
+});
+
+test("codexQuotaToFields: short window (<1 day) maps to the 5h slot", () => {
+  const f = codexQuotaToFields({
+    "primary-window-minutes": "300", // 5h
+    "primary-used-percent": "60",
+    "primary-reset-at": "1785984543",
+    "secondary-window-minutes": "10080", // 7d
+    "secondary-used-percent": "40",
+    "secondary-reset-at": "1786000000",
+  });
+  assert.equal(f["unified-5h-utilization"], "0.6");
+  assert.equal(f["unified-5h-window-minutes"], "300");
+  assert.equal(f["unified-7d-utilization"], "0.4");
+  assert.equal(f["unified-7d-window-minutes"], "10080");
+});
+
+test("codexQuotaToFields: 100% used clamps to 1.0", () => {
+  const f = codexQuotaToFields({
+    "primary-window-minutes": "10080",
+    "primary-used-percent": "100",
+  });
+  assert.equal(f["unified-7d-utilization"], "1");
+});
+
+test("codexQuotaToFields: empty / no-quota headers yield no unified fields", () => {
+  assert.deepEqual(codexQuotaToFields({}), {});
+  // a band present but with window-minutes 0 contributes nothing.
+  assert.deepEqual(
+    codexQuotaToFields({
+      "primary-window-minutes": "0",
+      "primary-used-percent": "50",
+    }),
+    {},
+  );
+});
+
+test("codex AccountManager.recordRateLimit populates quotaPool 7d, leaves 5h null", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-codex-quota-"));
+  try {
+    const m = new AccountManager(dir, {
+      provider: "codex",
+      refresh: async () => ({}) as any,
+    });
+    m.addAccount({
+      accessToken: "tok",
+      refreshToken: "r",
+      email: "c@x.com",
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      provider: "codex",
+    });
+    // Feed the live header set with the x-codex- prefix restored.
+    const h: Record<string, string> = {};
+    for (const [k, v] of Object.entries(LIVE_CODEX_HEADERS)) h[`x-codex-${k}`] = v;
+    m.recordRateLimit("c@x.com", new Headers(h));
+
+    const pool = m.quotaPool();
+    assert.equal(pool["5h"], null, "5h window is retired → null");
+    assert.ok(pool["7d"], "weekly cap surfaces as the 7d window");
+    assert.equal(pool["7d"]!.accounts, 1);
+    // 17% used across a single weight-1 account → 0.83 remaining.
+    assert.equal(pool["7d"]!.remainingPct, 0.83);
+
+    // The snapshot carries the raw normalized fields for the UI.
+    const snap = m.getSnapshots()[0];
+    assert.equal(snap.rateLimit?.fields["unified-7d-utilization"], "0.17");
+    assert.equal(snap.rateLimit?.fields["codex-plan-type"], "plus");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("registry.withAccounts filters empty providers", () => {

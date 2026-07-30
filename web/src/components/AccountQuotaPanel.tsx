@@ -9,9 +9,11 @@ import { AccountSnapshot } from "../api/accounts";
  *     when upstream did not surface unified-* headers.
  *
  * Anthropic OAuth subscriptions return the `unified-*` headers we parse
- * from upstream rate-limit responses. Codex / Cursor accounts probably
- * won't surface them, in which case fields stay empty and we render a
- * dash.
+ * from upstream rate-limit responses. Codex accounts surface `x-codex-*`
+ * headers which the backend normalizes into the same unified-* keys (weekly
+ * cap → 7d slot); this panel renders a codex-flavored view (weekly window +
+ * plan tier) when it detects a codex account. Cursor doesn't surface quota
+ * yet, in which case fields stay empty and we render a dash.
  */
 
 function fmtPct(s: string | undefined): { pct: number; label: string } | null {
@@ -105,6 +107,12 @@ export function AccountQuotaPanel({ account }: { account: AccountSnapshot }) {
   const rl = account.rateLimit;
   const f = rl?.fields ?? {};
 
+  // Codex accounts carry a plan-type claim and expose `x-codex-*` quota
+  // headers, which the backend normalizes into the same unified-* keys but
+  // with a different window model (a single weekly cap, no first-message
+  // anchored 5h). Render a codex-flavored view rather than the Anthropic one.
+  const isCodex = account.planType != null || f["codex-plan-type"] != null;
+
   // unified-5h-*
   const u5h = fmtPct(f["unified-5h-utilization"]);
   const r5h = f["unified-5h-reset"];
@@ -114,6 +122,7 @@ export function AccountQuotaPanel({ account }: { account: AccountSnapshot }) {
   const u7d = fmtPct(f["unified-7d-utilization"]);
   const r7d = f["unified-7d-reset"];
   const s7d = f["unified-7d-status"];
+  const weekMinutes = f["unified-7d-window-minutes"];
 
   // Retry-After (active rate limit)
   const retryAfter = rl?.retryAfterSec;
@@ -135,47 +144,84 @@ export function AccountQuotaPanel({ account }: { account: AccountSnapshot }) {
         </div>
       )}
 
-      {/* 5h window */}
-      <div>
-        <div className="flex items-center justify-between mb-1">
-          <span className="text-ink-300 font-medium inline-flex items-center">
-            5 小时滚动窗口
-            <InfoTip text="Anthropic 订阅账号按滚动时间窗口限流。此处为最近 5 小时内的额度占用率,达到 100% 将触发限流(HTTP 429),须等窗口向前滚动、释放出额度后才能恢复。重置时间为当前窗口内最早一笔用量的到期时刻。" />
-          </span>
-          {s5h && <StatusBadge status={s5h} />}
-        </div>
-        {u5h ? (
-          <>
-            <div className="flex justify-between text-xs text-ink-400 mb-1">
-              <span>已用 {u5h.label}</span>
-              <span>
-                重置:{" "}
-                <span className="text-ink-300">
-                  {fmtUnixToLocal(r5h)}
-                </span>{" "}
-                (剩 {fmtUnixCountdown(r5h)})
+      {/* Codex plan tier / credits summary */}
+      {isCodex && (
+        <div className="flex flex-wrap gap-2 text-xs">
+          {(f["codex-plan-type"] || account.planType) && (
+            <span className="badge-muted">
+              套餐 {f["codex-plan-type"] || account.planType}
+            </span>
+          )}
+          {f["codex-active-limit"] && (
+            <span className="badge-muted">限额档 {f["codex-active-limit"]}</span>
+          )}
+          {f["codex-credits-unlimited"] === "True" ? (
+            <span className="badge-ok">积分不限</span>
+          ) : (
+            f["codex-credits-balance"] != null && (
+              <span className="badge-muted">
+                积分 {f["codex-credits-balance"]}
               </span>
-            </div>
-            <UtilizationBar pct={u5h.pct} />
-          </>
-        ) : (
-          <FallbackWindow account={account} />
-        )}
-      </div>
+            )
+          )}
+        </div>
+      )}
 
-      {/* 7d window */}
+      {/* 5h window — Codex currently has no short window, so only show it when
+          upstream actually reports one (either provider). */}
+      {(!isCodex || u5h) && (
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-ink-300 font-medium inline-flex items-center">
+              5 小时滚动窗口
+              <InfoTip text="Anthropic 订阅账号按滚动时间窗口限流。此处为最近 5 小时内的额度占用率,达到 100% 将触发限流(HTTP 429),须等窗口向前滚动、释放出额度后才能恢复。重置时间为当前窗口内最早一笔用量的到期时刻。" />
+            </span>
+            {s5h && <StatusBadge status={s5h} />}
+          </div>
+          {u5h ? (
+            <>
+              <div className="flex justify-between text-xs text-ink-400 mb-1">
+                <span>已用 {u5h.label}</span>
+                <span>
+                  重置:{" "}
+                  <span className="text-ink-300">
+                    {fmtUnixToLocal(r5h)}
+                  </span>{" "}
+                  (剩 {fmtUnixCountdown(r5h)})
+                </span>
+              </div>
+              <UtilizationBar pct={u5h.pct} />
+            </>
+          ) : (
+            <FallbackWindow account={account} />
+          )}
+        </div>
+      )}
+
+      {/* 7d / weekly window */}
       <div>
         <div className="flex items-center justify-between mb-1">
           <span className="text-ink-300 font-medium inline-flex items-center">
-            7 天滚动窗口
-            <InfoTip text="最近 7 天滚动统计的额度占用率,用于约束周级总用量。与 5 小时窗口相互独立,任一窗口达到 100% 都会触发限流。重置时间为窗口内最早一笔用量的到期时刻。" />
+            {isCodex ? "每周用量" : "7 天滚动窗口"}
+            <InfoTip
+              text={
+                isCodex
+                  ? "ChatGPT/Codex 订阅当前按“每周”限额计费(Codex、工作台、Agents、Excel 等共享,不含普通聊天)。此处为本周期额度占用率,达到 100% 会触发限流(HTTP 429),须等窗口在下方重置时刻滚动后才恢复。"
+                  : "最近 7 天滚动统计的额度占用率,用于约束周级总用量。与 5 小时窗口相互独立,任一窗口达到 100% 都会触发限流。重置时间为窗口内最早一笔用量的到期时刻。"
+              }
+            />
           </span>
           {s7d && <StatusBadge status={s7d} />}
         </div>
         {u7d ? (
           <>
             <div className="flex justify-between text-xs text-ink-400 mb-1">
-              <span>已用 {u7d.label}</span>
+              <span>
+                已用 {u7d.label}
+                {isCodex && weekMinutes === "10080" && (
+                  <span className="text-ink-500">(7 天窗口)</span>
+                )}
+              </span>
               <span>
                 重置:{" "}
                 <span className="text-ink-300">
@@ -188,7 +234,9 @@ export function AccountQuotaPanel({ account }: { account: AccountSnapshot }) {
           </>
         ) : (
           <div className="text-xs text-ink-500">
-            上游未返回 7 天用量信息(该 provider 可能不支持)
+            {isCodex
+              ? "尚未采集到用量 — 账号发起一次请求后即可显示每周额度占用"
+              : "上游未返回 7 天用量信息(该 provider 可能不支持)"}
           </div>
         )}
       </div>
@@ -197,9 +245,11 @@ export function AccountQuotaPanel({ account }: { account: AccountSnapshot }) {
       <div className="text-xs text-ink-500 pt-2 border-t border-ink-800">
         {rl ? (
           <>
-            数据来源:Anthropic{" "}
-            <code className="text-ink-300">unified-*</code> 响应头 · 采集于{" "}
-            {fmtIsoToLocal(rl.observedAt)}
+            数据来源:{isCodex ? "Codex " : "Anthropic "}
+            <code className="text-ink-300">
+              {isCodex ? "x-codex-*" : "unified-*"}
+            </code>{" "}
+            响应头 · 采集于 {fmtIsoToLocal(rl.observedAt)}
           </>
         ) : !hasUpstream && account.windowStartedAt ? (
           <>

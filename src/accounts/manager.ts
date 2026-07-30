@@ -83,6 +83,71 @@ export function extractUsage(resp: any): UsageData {
   };
 }
 
+/** Minutes at/above which a Codex quota band is treated as the "weekly" (7d)
+ *  window; anything shorter maps to the "5h" short window. Codex's weekly
+ *  window reports 10080 (=7d) and the historical short window reported 300
+ *  (=5h), so a 1-day cut cleanly separates them and tolerates OpenAI nudging
+ *  the exact minute counts. */
+const CODEX_WEEKLY_MIN_MINUTES = 1440;
+
+/**
+ * Translate Codex's `x-codex-*` quota headers (prefix already stripped) into
+ * the SAME field vocabulary the Anthropic pool math already speaks
+ * (`unified-{5h,7d}-utilization` as a 0..1 fraction + `unified-{5h,7d}-reset`
+ * as unix seconds), so `windowPool()` / `quotaPool()` light up for Codex with
+ * no special-casing downstream. Codex reports two bands (`primary` /
+ * `secondary`), each carrying `-window-minutes`, `-used-percent`,
+ * `-reset-at` (unix s) and `-reset-after-seconds`; a band with
+ * `window-minutes <= 0` is inactive and skipped (this is how the Plus plan's
+ * old 5h window now reads once OpenAI moved everyone to a weekly cap).
+ *
+ * Display-only fields (`plan-type`, `active-limit`, credit balance) are kept
+ * verbatim under a `codex-` prefix — they don't feed the pool but let the UI
+ * show plan tier / credits.
+ *
+ * NOTE: `-used-percent` is an integer 0..100, so we divide by 100 ourselves.
+ * We must NOT lean on `parseUtil`'s fraction-vs-percent heuristic, which would
+ * misread the literal "1" (=1%) as 100%.
+ */
+export function codexQuotaToFields(
+  codex: Record<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of [
+    "plan-type",
+    "active-limit",
+    "credits-balance",
+    "credits-has-credits",
+    "credits-unlimited",
+  ]) {
+    if (codex[k] != null && codex[k] !== "") out[`codex-${k}`] = codex[k];
+  }
+  for (const band of ["primary", "secondary"]) {
+    const mins = Number(codex[`${band}-window-minutes`]);
+    if (!Number.isFinite(mins) || mins <= 0) continue;
+    const slot = mins >= CODEX_WEEKLY_MIN_MINUTES ? "7d" : "5h";
+    const utilKey = `unified-${slot}-utilization`;
+    const resetKey = `unified-${slot}-reset`;
+    const pct = Number(codex[`${band}-used-percent`]);
+    if (Number.isFinite(pct)) {
+      const frac = Math.min(Math.max(pct / 100, 0), 1);
+      // If both bands land in the same slot (shouldn't with real data), keep
+      // the higher utilization so the pool never under-reports pressure.
+      const prev = Number(out[utilKey]);
+      if (!Number.isFinite(prev) || frac > prev) out[utilKey] = String(frac);
+    }
+    const resetAt = Number(codex[`${band}-reset-at`]);
+    if (Number.isFinite(resetAt) && resetAt > 0) {
+      const prev = Number(out[resetKey]);
+      // Keep the SOONER reset when a slot collides.
+      if (!Number.isFinite(prev) || resetAt < prev) out[resetKey] = String(resetAt);
+    }
+    // Window length, for the UI to label "weekly" vs the short window.
+    out[`unified-${slot}-window-minutes`] = String(mins);
+  }
+  return out;
+}
+
 /**
  * Snapshot of upstream rate-limit headers, normalized into a single object.
  * Anthropic returns `anthropic-ratelimit-{requests,tokens,input-tokens,
@@ -711,7 +776,9 @@ export class AccountManager {
 
   /** Pool-wide quota summary for the dashboard: 5h + 7d windows aggregated as
    *  weighted equivalent windows. Either window is null if no account exposes
-   *  it (e.g. Codex/Cursor pools have no unified-* headers). */
+   *  it. Anthropic surfaces both natively; Codex is normalized into these same
+   *  keys by {@link codexQuotaToFields} (weekly cap → 7d slot, so a Plus
+   *  account today reports 7d only and 5h stays null); Cursor has none. */
   quotaPool(): QuotaPool {
     return {
       "5h": this.windowPool("unified-5h-utilization", "unified-5h-reset"),
@@ -746,11 +813,18 @@ export class AccountManager {
   recordRateLimit(email: string, headers: Headers): void {
     const acct = this.accounts.get(email);
     if (!acct) return;
-    // Only the Anthropic upstream's `anthropic-ratelimit-*` (especially
-    // `unified-*`) headers have semantics we can interpret today. Codex /
-    // Cursor headers have different meanings and shouldn't be mixed into
-    // the same Anthropic-keyed snapshot. Skip non-Anthropic providers to
-    // avoid storing misleading rate-limit info. (Fix F10.)
+    // Codex publishes its own `x-codex-*` quota headers with a different shape
+    // (used-percent + window-minutes + reset-at). Normalize them into the same
+    // `unified-*` vocabulary the pool math speaks so the dashboard/quota-pool
+    // light up for Codex too. (Previously this method early-returned for every
+    // non-Anthropic provider, which is why Codex accounts served fine but the
+    // quota pool stayed silently empty and no exhaustion alert ever fired.)
+    if (this.provider === "codex") {
+      this.recordCodexRateLimit(acct, headers);
+      return;
+    }
+    // Cursor's headers have no interpretable quota semantics yet — skip to
+    // avoid storing misleading info (was Fix F10, now scoped to cursor).
     if (this.provider !== "anthropic") return;
     const fields: Record<string, string> = {};
     let retryAfterSec: number | undefined;
@@ -767,6 +841,30 @@ export class AccountManager {
     });
     // Only store when we actually got something — never overwrite a valid
     // snapshot with an empty one.
+    if (retryAfterSec === undefined && Object.keys(fields).length === 0) return;
+    acct.rateLimit = {
+      observedAt: new Date().toISOString(),
+      retryAfterSec,
+      fields,
+    };
+  }
+
+  /** Capture Codex's `x-codex-*` quota headers, normalized (via
+   *  {@link codexQuotaToFields}) into the same `unified-*` fields the pool
+   *  math reads. Called from recordRateLimit for the codex provider. */
+  private recordCodexRateLimit(acct: AccountState, headers: Headers): void {
+    const codex: Record<string, string> = {};
+    let retryAfterSec: number | undefined;
+    headers.forEach((value, key) => {
+      const k = key.toLowerCase();
+      if (k === "retry-after") {
+        const n = Number(value);
+        if (Number.isFinite(n)) retryAfterSec = n;
+      } else if (k.startsWith("x-codex-")) {
+        codex[k.slice("x-codex-".length)] = value;
+      }
+    });
+    const fields = codexQuotaToFields(codex);
     if (retryAfterSec === undefined && Object.keys(fields).length === 0) return;
     acct.rateLimit = {
       observedAt: new Date().toISOString(),
