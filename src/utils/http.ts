@@ -41,6 +41,9 @@ const FAILURE_RESPONSES: Record<
   forbidden: { status: 503, message: "Configured account is forbidden" },
   server: { status: 503, message: "Upstream server temporarily unavailable" },
   network: { status: 503, message: "Upstream network temporarily unavailable" },
+  // Client-fault (e.g. input exceeds the context window): 400, not a 503 —
+  // retrying the same oversized request just fails again. Not account-scoped.
+  client: { status: 400, message: "Request rejected by the upstream model" },
 };
 
 function statsContext(resp: ExpressResponse): any {

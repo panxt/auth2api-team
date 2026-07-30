@@ -441,6 +441,35 @@ export function classifyOpenAIResponsesError(
   if (code === "invalid_api_key" || code === "unauthorized") {
     return { failover: true, errorKind: "auth", detail: message };
   }
+  // Context-window overflow is the CLIENT's input being too large — it's
+  // deterministic, so failing over to another account just fails the same
+  // way, and cooling down a healthy account for it is wrong. Surface it to
+  // the client unchanged (its message tells the user to shrink the input).
+  // NOTE: check this BEFORE the generic "try again" rule below — the codex
+  // context-window message literally ends with "Please adjust your input and
+  // try again", which would otherwise match the retry heuristic.
+  if (
+    code === "context_length_exceeded" ||
+    /context window|context length|exceeds the context|maximum context/i.test(
+      message,
+    )
+  ) {
+    return { failover: false, errorKind: "client", detail: message };
+  }
+  // Transient backend errors the upstream itself flags as retryable (the
+  // ChatGPT codex backend returns "An error occurred while processing your
+  // request. You can retry your request…"). Fail OVER to another account
+  // rather than forwarding a hard error to the client — pre-commit only, so
+  // no risk of duplicating already-streamed output.
+  if (
+    code === "server_error" ||
+    code === "internal_error" ||
+    /an error occurred while processing|you can retry|please try again|temporarily|overloaded|service unavailable/i.test(
+      message,
+    )
+  ) {
+    return { failover: true, errorKind: "server", detail: message };
+  }
   return { failover: false, errorKind: "server", detail: message };
 }
 

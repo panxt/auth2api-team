@@ -32,7 +32,11 @@ export type AccountFailureKind =
   | "auth"
   | "forbidden"
   | "server"
-  | "network";
+  | "network"
+  // Not the account's fault — the client's request was rejected the same way
+  // any account would reject it (e.g. input exceeds the context window). Never
+  // cools down or penalizes the account; see recordFailure's early return.
+  | "client";
 
 const FAILURE_BACKOFF: Record<
   AccountFailureKind,
@@ -41,8 +45,16 @@ const FAILURE_BACKOFF: Record<
   rate_limit: { baseMs: 60 * 1000, maxMs: 15 * 60 * 1000 },
   auth: { baseMs: 10 * 60 * 1000, maxMs: 60 * 60 * 1000 },
   forbidden: { baseMs: 10 * 60 * 1000, maxMs: 60 * 60 * 1000 },
-  server: { baseMs: 5 * 1000, maxMs: 5 * 60 * 1000 },
-  network: { baseMs: 5 * 1000, maxMs: 5 * 60 * 1000 },
+  // Transient upstream blips (5xx) and connection errors: keep the ramp short.
+  // `failureCount` only resets on a success, so on a small pool that's
+  // intermittently flaky (e.g. 2 Codex accounts on the ChatGPT backend) the
+  // old 5-min cap could lock BOTH accounts at once, turning a recoverable
+  // blip into a wall of "No upstream account available" 503s. Cap at 30s so
+  // an account rejoins the pool quickly instead of cascading.
+  server: { baseMs: 3 * 1000, maxMs: 30 * 1000 },
+  network: { baseMs: 3 * 1000, maxMs: 30 * 1000 },
+  // Never cooled down (recordFailure early-returns); present for exhaustiveness.
+  client: { baseMs: 0, maxMs: 0 },
 };
 
 export interface UsageData {
@@ -323,6 +335,7 @@ function randomStickyDuration(): number {
 
 // Lower = more recoverable, preferred when all accounts are unavailable
 const FAILURE_PRIORITY: Record<AccountFailureKind, number> = {
+  client: 0,
   rate_limit: 0,
   server: 1,
   network: 2,
@@ -901,6 +914,11 @@ export class AccountManager {
   ): void {
     const acct = this.accounts.get(email);
     if (!acct) return;
+
+    // A client-fault rejection (e.g. context-window overflow) is not the
+    // account's problem — don't cool it down or inflate failureCount, which
+    // would otherwise lengthen the NEXT real failure's backoff.
+    if (kind === "client") return;
 
     acct.failureCount++;
     acct.totalFailures++;
