@@ -133,14 +133,17 @@ export function applyCloaking(options: CloakingOptions): any {
         };
 
   const prefixIdx = remaining.findIndex(isPrefixBlock);
-  const prefixBlock =
-    prefixIdx >= 0
-      ? remaining.splice(prefixIdx, 1)[0]
-      : {
-          type: "text",
-          text: "You are Claude Code, Anthropic's official CLI for Claude.",
-          cache_control: { type: "ephemeral" },
-        };
+  // Track whether the prefix is ours: only an *injected* block's cache_control
+  // may be dropped by enforceCacheControlLimit (a client's own breakpoint
+  // expresses real caching intent and must be preserved where possible).
+  const prefixWasInjected = prefixIdx < 0;
+  const prefixBlock = prefixWasInjected
+    ? {
+        type: "text",
+        text: "You are Claude Code, Anthropic's official CLI for Claude.",
+        cache_control: { type: "ephemeral" },
+      }
+    : remaining.splice(prefixIdx, 1)[0];
 
   // Reassemble: billing header (pos 0), prefix (pos 1), then the rest
   body.system = [billingBlock, prefixBlock, ...remaining];
@@ -164,9 +167,85 @@ export function applyCloaking(options: CloakingOptions): any {
     sessionID,
   );
 
+  // Order matters: trim the overflow breakpoint first, then reorder TTLs.
+  // Reordering first and deleting afterwards would leave the remaining
+  // breakpoints in the wrong TTL sequence.
+  enforceCacheControlLimit(body, prefixWasInjected ? prefixBlock : null);
   fixCacheControlOrder(body);
 
   return body;
+}
+
+/** Anthropic rejects a request carrying more than 4 cache_control breakpoints. */
+const MAX_CACHE_CONTROL = 4;
+
+/**
+ * Collect every cache_control holder across tools / system / messages, in
+ * Anthropic's documented processing order (tools → system → messages).
+ * Returned as (object, key) refs so callers can reassign or delete in place.
+ */
+function collectCacheControlRefs(body: any): Array<{ obj: any; key: string }> {
+  const refs: Array<{ obj: any; key: string }> = [];
+
+  if (Array.isArray(body.tools)) {
+    for (const t of body.tools) {
+      if (t?.cache_control) refs.push({ obj: t, key: "cache_control" });
+    }
+  }
+  if (Array.isArray(body.system)) {
+    for (const s of body.system) {
+      if (s?.cache_control) refs.push({ obj: s, key: "cache_control" });
+    }
+  }
+  if (Array.isArray(body.messages)) {
+    for (const m of body.messages) {
+      // Defensive: Anthropic docs only document cache_control on content
+      // blocks, but some clients attach it to the message itself.
+      if (m?.cache_control) refs.push({ obj: m, key: "cache_control" });
+      if (Array.isArray(m?.content)) {
+        for (const c of m.content) {
+          if (c?.cache_control) refs.push({ obj: c, key: "cache_control" });
+        }
+      }
+    }
+  }
+
+  return refs;
+}
+
+/**
+ * Anthropic caps a request at 4 cache_control breakpoints. A well-behaved
+ * client (the official CLI included) stays within that budget on its own, so
+ * an overflow observed here is one we created: `applyCloaking` injects a
+ * CLI-prefix block carrying `cache_control` when the client's system prompt
+ * doesn't already contain one. That block only exists for cloaking and has no
+ * caching intent, so its breakpoint is the first thing to drop — the block
+ * itself stays, keeping the cloaking effect intact.
+ *
+ * `injectedPrefix` is null when the prefix came from the client; in that case
+ * we fall through to the trailing-breakpoint fallback rather than discarding
+ * a breakpoint the client asked for.
+ */
+function enforceCacheControlLimit(body: any, injectedPrefix: any): void {
+  const total = collectCacheControlRefs(body).length;
+  if (total <= MAX_CACHE_CONTROL) return;
+
+  if (injectedPrefix?.cache_control) {
+    delete injectedPrefix.cache_control;
+    console.log(
+      `[cache_control] ${total} > ${MAX_CACHE_CONTROL}, dropped injected prefix breakpoint`,
+    );
+  }
+
+  // Fallback: the client itself was over budget (shouldn't normally happen).
+  // Drop from the tail so the longer, earlier prefixes keep their breakpoints.
+  const rest = collectCacheControlRefs(body);
+  for (let i = rest.length - 1; i >= MAX_CACHE_CONTROL; i--) {
+    delete rest[i].obj[rest[i].key];
+    console.warn(
+      "[cache_control] client exceeded limit, dropped a trailing breakpoint",
+    );
+  }
 }
 
 /**
@@ -201,30 +280,7 @@ export function applyCloaking(options: CloakingOptions): any {
  */
 function fixCacheControlOrder(body: any): void {
   const TTL_RANK: Record<string, number> = { "1h": 2, "5m": 1 };
-  const refs: Array<{ obj: any; key: string }> = [];
-
-  if (Array.isArray(body.tools)) {
-    for (const t of body.tools) {
-      if (t?.cache_control) refs.push({ obj: t, key: "cache_control" });
-    }
-  }
-  if (Array.isArray(body.system)) {
-    for (const s of body.system) {
-      if (s?.cache_control) refs.push({ obj: s, key: "cache_control" });
-    }
-  }
-  if (Array.isArray(body.messages)) {
-    for (const m of body.messages) {
-      // Defensive: Anthropic docs only document cache_control on content
-      // blocks, but some clients attach it to the message itself.
-      if (m?.cache_control) refs.push({ obj: m, key: "cache_control" });
-      if (Array.isArray(m?.content)) {
-        for (const c of m.content) {
-          if (c?.cache_control) refs.push({ obj: c, key: "cache_control" });
-        }
-      }
-    }
-  }
+  const refs = collectCacheControlRefs(body);
 
   if (refs.length < 2) return;
   const ttls = refs.map((r) => r.obj[r.key]);

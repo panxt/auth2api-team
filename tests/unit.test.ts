@@ -1687,3 +1687,122 @@ test("StatsRecorder replay ignores partial schema rows without polluting aggrega
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// --- applyCloaking: cache_control breakpoint budget ---------------------------
+
+import { applyCloaking } from "../src/upstream/cloaking";
+
+function cloakingArgs(body: any) {
+  return {
+    body,
+    request: { headers: { "x-api-key": "sk-test" } } as any,
+    account: { deviceId: "dev-1", accountUuid: "uuid-1" } as any,
+    config: {
+      cloaking: { "cli-version": "2.1.250", entrypoint: "cli" },
+    } as any,
+  };
+}
+
+/** Every cache_control in Anthropic's processing order: tools -> system -> messages. */
+function cacheControls(body: any): any[] {
+  const out: any[] = [];
+  for (const t of body.tools || [])
+    if (t?.cache_control) out.push(t.cache_control);
+  for (const s of body.system || [])
+    if (s?.cache_control) out.push(s.cache_control);
+  for (const m of body.messages || []) {
+    if (m?.cache_control) out.push(m.cache_control);
+    for (const c of m.content || [])
+      if (c?.cache_control) out.push(c.cache_control);
+  }
+  return out;
+}
+
+/** A CLI-shaped body already at the 4-breakpoint cap: tools 1 + system 1 + messages 2. */
+function cliBodyAtCap(systemText: string, systemTtl?: string) {
+  return {
+    model: "claude-sonnet-5",
+    tools: [
+      { name: "Bash", input_schema: {}, cache_control: { type: "ephemeral" } },
+    ],
+    system: [
+      {
+        type: "text",
+        text: systemText,
+        cache_control: systemTtl
+          ? { type: "ephemeral", ttl: systemTtl }
+          : { type: "ephemeral" },
+      },
+    ],
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "t1", cache_control: { type: "ephemeral" } },
+        ],
+      },
+      { role: "assistant", content: [{ type: "text", text: "a1" }] },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "t2", cache_control: { type: "ephemeral" } },
+        ],
+      },
+    ],
+  };
+}
+
+const CLI_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+test("applyCloaking keeps 4 breakpoints when the client prefix is recognized", () => {
+  const out = applyCloaking(cloakingArgs(cliBodyAtCap(CLI_PREFIX)));
+
+  assert.equal(cacheControls(out).length, 4);
+  // Nothing was injected, so the client's own system breakpoint survives.
+  assert.ok(out.system.find((s: any) => s.text === CLI_PREFIX)?.cache_control);
+});
+
+test("applyCloaking drops the injected prefix breakpoint instead of exceeding the cap", () => {
+  const body = cliBodyAtCap(
+    "You are an interactive CLI tool for software engineering.",
+  );
+  const out = applyCloaking(cloakingArgs(body));
+
+  assert.equal(cacheControls(out).length, 4);
+  // The injected block stays (cloaking intact) but no longer acts as a breakpoint.
+  const injected = out.system.find((s: any) => s.text === CLI_PREFIX);
+  assert.ok(injected, "injected prefix block should still be present");
+  assert.equal(injected.cache_control, undefined);
+  // Every breakpoint the client asked for is preserved.
+  assert.ok(
+    out.system.find((s: any) => s.text.includes("interactive CLI tool"))
+      ?.cache_control,
+  );
+});
+
+test("applyCloaking trims trailing breakpoints when the client itself exceeds the cap", () => {
+  const body = cliBodyAtCap(CLI_PREFIX);
+  // A 5th client breakpoint: the prefix is recognized, so there is nothing of
+  // ours to drop and the tail has to give way instead.
+  body.messages[1].content[0] = {
+    type: "text",
+    text: "a1",
+    cache_control: { type: "ephemeral" },
+  } as any;
+
+  const out = applyCloaking(cloakingArgs(body));
+
+  assert.equal(cacheControls(out).length, 4);
+  // Earliest breakpoints (the longest cacheable prefix) are the ones kept.
+  assert.ok(out.tools[0].cache_control);
+  assert.ok(out.system.find((s: any) => s.text === CLI_PREFIX)?.cache_control);
+});
+
+test("applyCloaking still orders TTLs descending after trimming", () => {
+  // The 1h breakpoint sits on the client system block, i.e. after the tools 5m one.
+  const body = cliBodyAtCap("You are an interactive CLI tool.", "1h");
+  const out = applyCloaking(cloakingArgs(body));
+
+  const ttls = cacheControls(out).map((c) => c.ttl ?? "5m");
+  assert.deepEqual(ttls, ["1h", "5m", "5m", "5m"]);
+});
