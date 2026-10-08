@@ -44,10 +44,24 @@ const MODEL_ALIASES: Record<string, string> = {
   "claude-opus-4-6": "claude-opus-4-6",
   "claude-sonnet-4-6": "claude-sonnet-4-6",
   "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+  "gpt-6-sol": "gpt-6-sol",
+  "gpt-6-codex": "gpt-6-codex",
+  "gpt-6-code": "gpt-6-codex",
+  "codex-gpt-6": "gpt-6-codex",
 };
 
+export function normalizeModelName(model: string): string {
+  return String(model || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^gtp-/, "gpt-");
+}
+
 export function resolveModel(model: string): string {
-  return MODEL_ALIASES[model] ?? model;
+  const normalized = normalizeModelName(model);
+  return MODEL_ALIASES[normalized] ?? normalized;
 }
 
 // ── Shared: reasoning effort → Anthropic thinking ──

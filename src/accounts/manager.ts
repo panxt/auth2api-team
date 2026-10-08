@@ -251,9 +251,15 @@ export type AccountResult =
 
 const STICKY_MIN_MS = 20 * 60 * 1000; // 20 minutes
 const STICKY_MAX_MS = 60 * 60 * 1000; // 60 minutes
+const CODEX_STICKY_MIN_MS = 30 * 1000;
+const CODEX_STICKY_MAX_MS = 2 * 60 * 1000;
 
-function randomStickyDuration(): number {
-  return STICKY_MIN_MS + Math.random() * (STICKY_MAX_MS - STICKY_MIN_MS);
+function randomStickyDuration(
+  provider: ProviderId = "anthropic",
+): number {
+  const min = provider === "codex" ? CODEX_STICKY_MIN_MS : STICKY_MIN_MS;
+  const max = provider === "codex" ? CODEX_STICKY_MAX_MS : STICKY_MAX_MS;
+  return min + Math.random() * (max - min);
 }
 
 // Lower = more recoverable, preferred when all accounts are unavailable
@@ -503,7 +509,7 @@ export class AccountManager {
     const now = Date.now();
     const ok = (idx: number, email: string, acct: AccountState): AccountResult => {
       this.lastUsedIndex = idx;
-      this.stickyUntil = now + randomStickyDuration();
+      this.stickyUntil = now + randomStickyDuration(this.provider);
       return {
         account: buildAvailableAccount(this.authDir, email, acct.token, this.provider),
       };
@@ -527,7 +533,11 @@ export class AccountManager {
     }
 
     // ── adaptive: keep affinity account if lightly loaded ──
-    if (this.routing.strategy === "adaptive" && this.lastUsedIndex >= 0) {
+    if (
+      this.provider !== "codex" &&
+      this.routing.strategy === "adaptive" &&
+      this.lastUsedIndex >= 0
+    ) {
       const email = this.accountOrder[this.lastUsedIndex];
       const acct = this.accounts.get(email);
       if (

@@ -10,6 +10,7 @@ import { combineAbortSignals } from "../src/utils/abort";
 import { classifyFailure, proxyWithRetry } from "../src/utils/http";
 import { handleStreamingResponse } from "../src/upstream/streaming";
 import {
+  normalizeModelName,
   resolveModel,
   openaiToAnthropic,
   anthropicToOpenai,
@@ -767,6 +768,16 @@ test("resolveModel maps aliases", () => {
   assert.equal(resolveModel("opus"), "claude-opus-4-8");
   assert.equal(resolveModel("sonnet"), "claude-sonnet-4-6");
   assert.equal(resolveModel("haiku"), "claude-haiku-4-5-20251001");
+});
+
+
+test("resolveModel normalizes Codex GPT-6 aliases", () => {
+  assert.equal(normalizeModelName(" GPT_6  "), "gpt-6");
+  assert.equal(resolveModel("GPT-6"), "gpt-6");
+  assert.equal(resolveModel("gtp-6"), "gpt-6");
+  assert.equal(resolveModel("GPT-6 Sol"), "gpt-6-sol");
+  assert.equal(resolveModel("GPT-6-Sol"), "gpt-6-sol");
+  assert.equal(resolveModel("gpt-6-code"), "gpt-6-codex");
 });
 
 test("resolveModel passes through unknown models", () => {
