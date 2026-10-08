@@ -19,7 +19,13 @@ import {
 } from "../src/accounts/manager";
 import { buildRegistry } from "../src/providers/registry";
 import { generateCodexAuthURL } from "../src/auth/codex/oauth";
-import { normalizeCodexResponsesBody } from "../src/upstream/codex-api";
+import {
+  callCodexResponses,
+  normalizeCodexCompactBody,
+  normalizeCodexResponsesBody,
+  RESPONSES_COMPACT_PATH,
+  __buildCodexHeaders,
+} from "../src/upstream/codex-api";
 import {
   listCodexModels,
   __resetCodexModelsCache,
@@ -160,6 +166,40 @@ test("normalizeCodexResponsesBody does not mutate its input", () => {
   normalizeCodexResponsesBody(input);
   assert.equal(input.user, "u1");
   assert.equal(input.max_output_tokens, 10);
+});
+
+test("normalizeCodexCompactBody keeps only compact-supported fields", () => {
+  const body = {
+    model: "gpt-5.5",
+    input: [{ role: "user", content: "hi" }],
+    instructions: "be concise",
+    tools: [{ type: "function", name: "x" }],
+    parallel_tool_calls: true,
+    reasoning: { effort: "medium" },
+    text: { format: { type: "text" } },
+    previous_response_id: "resp_123",
+    stream: true,
+    store: false,
+    metadata: { drop: true },
+    prompt_cache_key: "drop-from-body-but-can-seed-header",
+  };
+
+  assert.deepEqual(normalizeCodexCompactBody(body), {
+    model: "gpt-5.5",
+    input: [{ role: "user", content: "hi" }],
+    instructions: "be concise",
+    tools: [{ type: "function", name: "x" }],
+    parallel_tool_calls: true,
+    reasoning: { effort: "medium" },
+    text: { format: { type: "text" } },
+    previous_response_id: "resp_123",
+  });
+});
+
+test("normalizeCodexCompactBody leaves non-object bodies unchanged", () => {
+  assert.equal(normalizeCodexCompactBody(null), null);
+  assert.equal(normalizeCodexCompactBody(undefined), undefined);
+  assert.deepEqual(normalizeCodexCompactBody(["x"]), ["x"]);
 });
 
 test("Claude Code's metadata.user_id survives translation but not normalization", () => {
@@ -916,8 +956,6 @@ test("waitForCallback serves success HTML inline (no 302 to closed server)", asy
 // codex-api.normalizeCodexResponsesBody
 // ══════════════════════════════════════════════════
 
-import { normalizeCodexResponsesBody } from "../src/upstream/codex-api";
-
 test("normalizeCodexResponsesBody fills missing required fields", () => {
   const out = normalizeCodexResponsesBody({
     model: "gpt-5.3-codex",
@@ -959,7 +997,6 @@ test("normalizeCodexResponsesBody handles empty/non-object input safely", () => 
 // codex-api buildHeaders — protocol-required + parity headers
 // ══════════════════════════════════════════════════
 
-import { __buildCodexHeaders } from "../src/upstream/codex-api";
 import type { Config } from "../src/config";
 import type { AvailableAccount } from "../src/accounts/manager";
 
@@ -1043,6 +1080,76 @@ test("codex headers omit OpenAI-Beta unless configured, omit Account-ID if missi
   assert.equal(headers["OpenAI-Beta"], undefined);
   assert.equal(headers["ChatGPT-Account-ID"], undefined);
   assert.equal(headers.Accept, "application/json");
+});
+
+test("callCodexResponses targets compact path and seeds session headers", async () => {
+  let seenUrl = "";
+  let seenHeaders: Record<string, string> = {};
+  let seenBody: any = null;
+  const restoreFetch = withFetchStub(async (input, init) => {
+    seenUrl = String(input);
+    seenHeaders = init?.headers as Record<string, string>;
+    seenBody = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  try {
+    const body = normalizeCodexCompactBody({
+      model: "gpt-5.5",
+      input: "hi",
+      prompt_cache_key: "body-seed",
+      stream: true,
+      store: false,
+    });
+    await callCodexResponses({
+      body,
+      request: {
+        body,
+        headers: { session_id: "session-from-request" },
+      } as any,
+      account: makeAvailableAccount(),
+      config: makeCodexConfig(),
+      path: RESPONSES_COMPACT_PATH,
+    });
+  } finally {
+    restoreFetch();
+  }
+
+  assert.equal(
+    seenUrl,
+    "https://chatgpt.com/backend-api/codex/responses/compact",
+  );
+  assert.equal(seenHeaders.session_id, "session-from-request");
+  assert.equal(seenHeaders.conversation_id, "session-from-request");
+  assert.deepEqual(seenBody, { model: "gpt-5.5", input: "hi" });
+});
+
+test("callCodexResponses compact seed falls back to prompt_cache_key", async () => {
+  let seenHeaders: Record<string, string> = {};
+  const restoreFetch = withFetchStub(async (_input, init) => {
+    seenHeaders = init?.headers as Record<string, string>;
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  try {
+    const body = { model: "gpt-5.5", input: "hi", prompt_cache_key: "pc-key" };
+    await callCodexResponses({
+      body,
+      request: { body, headers: {} } as any,
+      account: makeAvailableAccount(),
+      config: makeCodexConfig(),
+      path: RESPONSES_COMPACT_PATH,
+    });
+  } finally {
+    restoreFetch();
+  }
+
+  assert.equal(seenHeaders.session_id, "pc-key");
+  assert.equal(seenHeaders.conversation_id, "pc-key");
 });
 
 // ══════════════════════════════════════════════════

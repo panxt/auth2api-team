@@ -160,7 +160,11 @@ async function requestText(options: {
   path: string;
   headers?: Record<string, string>;
   body?: unknown;
-}): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
+}): Promise<{
+  status: number;
+  body: string;
+  headers: http.IncomingHttpHeaders;
+}> {
   const address = serverAddress(options.server);
   const payload = options.body ? JSON.stringify(options.body) : undefined;
 
@@ -1066,7 +1070,6 @@ test("POST /admin/reload requires the API key", async (t) => {
   assert.equal(wrongAuth.status, 403);
 });
 
-
 test("codex count_tokens returns compatibility estimate instead of 501", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   saveToken(authDir, {
@@ -1179,6 +1182,49 @@ test("claude-cli anthropic-beta passthrough deduplicates oauth beta", async (t) 
   assert.equal(resp.status, 200);
 });
 
+test("anthropic compact context management adds compact beta", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const restoreFetch = withMockedFetch(async (_input, init) => {
+    const headers = init?.headers as Record<string, string>;
+    assert.ok(
+      headers["anthropic-beta"].split(",").includes("compact-2026-01-12"),
+    );
+    assert.ok(
+      headers["anthropic-beta"].split(",").includes("oauth-2025-04-20"),
+    );
+    return new Response(
+      JSON.stringify({
+        id: "msg_1",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  });
+  const server = await startApp(makeConfig(authDir), manager);
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/messages",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-sonnet-4-6",
+      messages: [{ role: "user", content: "compact this" }],
+      context_management: { edits: [{ type: "compact_20260112" }] },
+    },
+  });
+
+  assert.equal(resp.status, 200);
+});
+
 test("codex responses upstream errors are normalized to OpenAI error shape", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   saveToken(
@@ -1222,6 +1268,88 @@ test("codex responses upstream errors are normalized to OpenAI error shape", asy
   assert.deepEqual(resp.body, {
     error: { message: "bad codex request", type: "upstream_error" },
   });
+});
+
+test("codex responses compact route proxies to compact upstream path", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    assert.equal(
+      String(input),
+      "https://chatgpt.com/backend-api/codex/responses/compact",
+    );
+    const headers = init?.headers as Record<string, string>;
+    assert.equal(headers.session_id, "compact-session");
+    assert.equal(headers.conversation_id, "compact-session");
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      model: "gpt-5.5",
+      input: "hi",
+      instructions: "short",
+    });
+    return new Response(
+      JSON.stringify({ usage: { input_tokens: 2, output_tokens: 3 } }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/responses/compact",
+    headers: {
+      Authorization: "Bearer test-key",
+      session_id: "compact-session",
+    },
+    body: {
+      model: "gpt-5.5",
+      input: "hi",
+      instructions: "short",
+      stream: true,
+      store: false,
+      metadata: { drop: true },
+    },
+  });
+
+  assert.equal(resp.status, 200);
+  assert.deepEqual(resp.body, { usage: { input_tokens: 2, output_tokens: 3 } });
+});
+
+test("responses compact rejects non-codex models", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const server = await startApp(makeConfig(authDir), manager);
+  t.after(async () => {
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/responses/compact",
+    headers: { Authorization: "Bearer test-key" },
+    body: { model: "claude-sonnet-4-6", input: "hi" },
+  });
+
+  assert.equal(resp.status, 400);
+  assert.match(
+    resp.body.error.message,
+    /responses\/compact is only supported for the codex provider/,
+  );
 });
 
 test("cursor responses proxy converts minimal Connect-RPC stream to Responses SSE", async (t) => {
@@ -1390,7 +1518,6 @@ test("cursor SSE forwards deltas as soon as upstream HTTP/2 chunks arrive (no wh
       `may have buffered the entire upstream response.`,
   );
 });
-
 
 test("cursor /v1/messages emits Anthropic Messages SSE for bare model names in cursor-only mode", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
@@ -1858,7 +1985,9 @@ test("codex /v1/chat/completions non-stream still captures final SSE event when 
   const ev = (event: string, data: unknown) =>
     `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   const sseNoTrailingNewline =
-    ev("response.created", { response: { id: "resp_x", status: "in_progress" } }) +
+    ev("response.created", {
+      response: { id: "resp_x", status: "in_progress" },
+    }) +
     ev("response.output_text.delta", { delta: "answer" }) +
     `event: response.completed\ndata: ${JSON.stringify({
       response: {
@@ -1950,7 +2079,7 @@ test("codex /v1/responses non-stream splices streamed output_item.done into comp
     status: "completed",
     call_id: "call_xyz",
     name: "get_weather",
-    arguments: "{\"city\":\"Tokyo\"}",
+    arguments: '{"city":"Tokyo"}',
   };
 
   const sseBody =
@@ -2003,10 +2132,7 @@ test("codex /v1/responses non-stream splices streamed output_item.done into comp
   assert.equal(jsonResp.body.status, "completed");
   // The handler-level splice: completed.response.output was [] but
   // we should have stitched the three streamed items in order.
-  assert.ok(
-    Array.isArray(jsonResp.body.output),
-    "output must be an array",
-  );
+  assert.ok(Array.isArray(jsonResp.body.output), "output must be an array");
   assert.equal(
     jsonResp.body.output.length,
     3,
@@ -2018,7 +2144,7 @@ test("codex /v1/responses non-stream splices streamed output_item.done into comp
   assert.equal(jsonResp.body.output[1].content[0].text, "PONG");
   assert.equal(jsonResp.body.output[2].type, "function_call");
   assert.equal(jsonResp.body.output[2].call_id, "call_xyz");
-  assert.equal(jsonResp.body.output[2].arguments, "{\"city\":\"Tokyo\"}");
+  assert.equal(jsonResp.body.output[2].arguments, '{"city":"Tokyo"}');
   // Usage from completed.response is preserved.
   assert.deepEqual(jsonResp.body.usage, {
     input_tokens: 17,
@@ -2101,8 +2227,5 @@ test("codex /v1/responses non-stream prefers upstream-populated output over stre
   // When upstream supplies output already, it wins.
   assert.equal(jsonResp.body.output.length, 1);
   assert.equal(jsonResp.body.output[0].id, "msg_completed");
-  assert.equal(
-    jsonResp.body.output[0].content[0].text,
-    "FROM_COMPLETED",
-  );
+  assert.equal(jsonResp.body.output[0].content[0].text, "FROM_COMPLETED");
 });

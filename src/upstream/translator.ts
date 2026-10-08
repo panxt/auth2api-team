@@ -132,6 +132,16 @@ function convertToolChoice(tc: any): any {
   return tc;
 }
 
+function parseToolArguments(args: unknown): any {
+  if (args && typeof args === "object") return args;
+  if (typeof args !== "string" || !args.trim()) return {};
+  try {
+    return JSON.parse(args);
+  } catch {
+    return {};
+  }
+}
+
 // ══════════════════════════════════════════════════════════════════
 // OpenAI Chat Completions ↔ Anthropic Messages
 // ══════════════════════════════════════════════════════════════════
@@ -248,9 +258,7 @@ export function openaiToAnthropic(body: any): any {
           type: "tool_use",
           id: tc.id,
           name: tc.function?.name || "",
-          input: tc.function?.arguments
-            ? JSON.parse(tc.function.arguments)
-            : {},
+          input: parseToolArguments(tc.function?.arguments),
         });
       }
       messages.push({ role: "assistant", content });

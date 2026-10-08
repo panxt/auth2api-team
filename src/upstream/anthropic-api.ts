@@ -8,6 +8,18 @@ import { extractApiKey, hashApiKey } from "../utils/common";
 
 const BASE_URL = "https://api.anthropic.com";
 const OAUTH_BETA = "oauth-2025-04-20";
+const COMPACT_BETA = "compact-2026-01-12";
+
+function inferredBetasFromBody(body: any): string[] {
+  const edits = body?.context_management?.edits;
+  if (
+    Array.isArray(edits) &&
+    edits.some((edit: any) => edit?.type === "compact_20260112")
+  ) {
+    return [COMPACT_BETA];
+  }
+  return [];
+}
 
 /**
  * Dynamic Anthropic-Beta construction — mirrors Claude Code's utils/betas.ts
@@ -107,6 +119,7 @@ function buildHeaders(
   apiKeyHash?: string,
   structured?: boolean,
   extraHeaders?: Record<string, string>,
+  inferredBetas: string[] = [],
 ): Record<string, string> {
   const cliVersion = cloaking["cli-version"] || DEFAULT_CLI_VERSION;
   const entrypoint = cloaking.entrypoint || DEFAULT_ENTRYPOINT;
@@ -143,19 +156,22 @@ function buildHeaders(
   }
 
   const beta = headers["anthropic-beta"];
-
-  if (typeof beta == "string") {
-    const betas = beta
-      .split(",")
-      .map((b) => b.trim())
-      .filter(Boolean);
-    if (!betas.includes(OAUTH_BETA)) {
-      betas.unshift(OAUTH_BETA);
-    }
-    headers["anthropic-beta"] = [...new Set(betas)].join(",");
-  } else {
-    headers["anthropic-beta"] = buildBetaHeader(model, !!structured);
+  const betas =
+    typeof beta === "string"
+      ? beta
+          .split(",")
+          .map((b) => b.trim())
+          .filter(Boolean)
+      : buildBetaHeader(model, !!structured)
+          .split(",")
+          .map((b) => b.trim())
+          .filter(Boolean);
+  if (!betas.includes(OAUTH_BETA)) {
+    betas.unshift(OAUTH_BETA);
   }
+  headers["anthropic-beta"] = [...new Set([...betas, ...inferredBetas])].join(
+    ",",
+  );
 
   return headers;
 }
@@ -213,6 +229,7 @@ export async function callAnthropicMessages(
     apiKeyHash,
     structured,
     extractPassthroughHeaders(request.headers),
+    inferredBetasFromBody(body),
   );
 
   const response = await fetch(url, {
@@ -248,6 +265,9 @@ export async function callAnthropicCountTokens(
     model,
     config.cloaking,
     apiKeyHash,
+    undefined,
+    undefined,
+    inferredBetasFromBody(body),
   );
 
   const response = await fetch(url, {

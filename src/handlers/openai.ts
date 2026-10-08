@@ -15,7 +15,11 @@ import {
   makeResponsesState,
   anthropicSSEToResponses,
 } from "../upstream/translator";
-import { handleStreamingResponse, readSseEvents, extractUsageFromSSE } from "../upstream/streaming";
+import {
+  handleStreamingResponse,
+  readSseEvents,
+  extractUsageFromSSE,
+} from "../upstream/streaming";
 import {
   proxyStreamingWithFailover,
   classifyAnthropicError,
@@ -25,9 +29,18 @@ import {
 
 function tryParseJson(s: string): any {
   if (!s) return undefined;
-  try { return JSON.parse(s); } catch { return undefined; }
+  try {
+    return JSON.parse(s);
+  } catch {
+    return undefined;
+  }
 }
-import { normalizeCodexResponsesBody } from "../upstream/codex-api";
+import {
+  callCodexResponses,
+  normalizeCodexCompactBody,
+  normalizeCodexResponsesBody,
+  RESPONSES_COMPACT_PATH,
+} from "../upstream/codex-api";
 import { normalizeCursorResponsesBody } from "../upstream/cursor-api";
 import {
   chatToResponsesRequest,
@@ -354,6 +367,97 @@ async function proxyCodexResponses(args: {
   });
 }
 
+export function createResponsesCompactHandler(
+  config: Config,
+  registry: ProviderRegistry,
+) {
+  return async (req: Request, resp: ExpressResponse): Promise<void> => {
+    try {
+      const body = req.body || {};
+      const model = resolveModel(body.model || "gpt-5.5");
+      body.model = model;
+      const provider = registry.forModel(model);
+      tagStatsModel(resp, model, provider.id);
+
+      if (provider.id !== "codex") {
+        resp.status(400).json({
+          error: {
+            message: `responses/compact is only supported for the codex provider, got ${provider.id}`,
+            type: "unsupported_endpoint",
+          },
+        });
+        return;
+      }
+
+      const compactBody = normalizeCodexCompactBody(body);
+
+      await proxyWithRetry("ResponsesCompact(codex)", resp, config, {
+        manager: provider.manager,
+        upstream: (account, signal) =>
+          callCodexResponses({
+            body: compactBody,
+            request: req,
+            account,
+            config,
+            signal,
+            path: RESPONSES_COMPACT_PATH,
+          }),
+        success: async (upstream, account) => {
+          let usage: any = null;
+          let streamUsage: any = null;
+          const contentType = upstream.headers.get("content-type") || "";
+
+          if (contentType.includes("text/event-stream")) {
+            const result = await handleStreamingResponse(upstream, resp);
+            streamUsage = result.usage;
+            if (!result.completed && !result.clientDisconnected) {
+              provider.manager.recordFailure(
+                account.token.email,
+                "network",
+                "stream terminated before completion",
+              );
+              return;
+            }
+          } else {
+            const text = await upstream.text();
+            try {
+              usage = JSON.parse(text)?.usage ?? null;
+            } catch {
+              usage = null;
+            }
+            if (contentType) resp.setHeader("Content-Type", contentType);
+            resp.status(upstream.status).send(text);
+          }
+
+          const codexCompactUsage = {
+            inputTokens: usage?.input_tokens || streamUsage?.inputTokens || 0,
+            outputTokens:
+              usage?.output_tokens || streamUsage?.outputTokens || 0,
+            cacheCreationInputTokens: 0,
+            cacheReadInputTokens:
+              usage?.input_tokens_details?.cached_tokens ||
+              streamUsage?.cacheReadInputTokens ||
+              0,
+            reasoningOutputTokens:
+              usage?.output_tokens_details?.reasoning_tokens ||
+              streamUsage?.reasoningOutputTokens ||
+              0,
+          };
+          provider.manager.recordSuccess(
+            account.token.email,
+            codexCompactUsage,
+          );
+          tagStatsUsage(resp, codexCompactUsage);
+        },
+        errorAdapter: openaiErrorBody,
+      });
+    } catch (err: any) {
+      console.error("Responses compact error:", err.message);
+      internalError(resp);
+    }
+  };
+}
+
 /**
  * Cursor-specific path for /v1/chat/completions. Cursor's upstream is
  * stream-only, so for `stream:false` we drive the same streaming SSE
@@ -603,7 +707,10 @@ export function createChatCompletionsHandler(
             errorAdapter: openaiErrorBody,
           });
         } catch (err: any) {
-          console.error("ChatCompletions streaming-failover error:", err?.message);
+          console.error(
+            "ChatCompletions streaming-failover error:",
+            err?.message,
+          );
           internalError(resp);
         }
         return;

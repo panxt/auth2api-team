@@ -2,9 +2,11 @@ import { Request } from "express";
 import { Config } from "../config";
 import { AvailableAccount } from "../accounts/manager";
 import { withTimeoutSignal } from "../utils/abort";
+import { v4 as uuidv4 } from "uuid";
 
 const BASE_URL = "https://chatgpt.com/backend-api";
 const RESPONSES_PATH = "/codex/responses";
+export const RESPONSES_COMPACT_PATH = "/codex/responses/compact";
 
 const DEFAULT_ORIGINATOR = "codex_cli_rs";
 // Bumped from 0.40.0 — backend now version-gates `gpt-5.3-codex` and rejects
@@ -104,12 +106,52 @@ export function normalizeCodexResponsesBody(body: any): any {
   return next;
 }
 
+export function normalizeCodexCompactBody(body: any): any {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  const allowed = [
+    "model",
+    "input",
+    "instructions",
+    "tools",
+    "parallel_tool_calls",
+    "reasoning",
+    "text",
+    "previous_response_id",
+  ] as const;
+  const next: any = {};
+  for (const key of allowed) {
+    if (body[key] !== undefined) next[key] = body[key];
+  }
+  return next;
+}
+
+type CodexResponsesPath = typeof RESPONSES_PATH | typeof RESPONSES_COMPACT_PATH;
+
 export interface CallCodexResponsesOptions {
   body?: any;
   request: Request;
   account: AvailableAccount;
   config: Config;
   signal?: AbortSignal;
+  path?: CodexResponsesPath;
+}
+
+function firstHeader(req: Request, name: string): string {
+  const value = req.headers[name.toLowerCase()];
+  if (Array.isArray(value)) return value[0] || "";
+  return typeof value === "string" ? value : "";
+}
+
+function compactSessionSeed(body: any, request: Request): string {
+  const sessionId = firstHeader(request, "session_id").trim();
+  if (sessionId) return sessionId;
+  const conversationId = firstHeader(request, "conversation_id").trim();
+  if (conversationId) return conversationId;
+  const promptCacheKey =
+    body && typeof body.prompt_cache_key === "string"
+      ? body.prompt_cache_key.trim()
+      : "";
+  return promptCacheKey || uuidv4();
 }
 
 export async function callCodexResponses(
@@ -118,15 +160,22 @@ export async function callCodexResponses(
   const { request, account, config } = options;
   const body = options.body ?? request.body;
   const stream = !!body.stream;
-  const url = `${BASE_URL}${RESPONSES_PATH}`;
+  const path = options.path || RESPONSES_PATH;
+  const url = `${BASE_URL}${path}`;
   const timeoutMs = stream
     ? config.timeouts["stream-messages-ms"]
     : config.timeouts["messages-ms"];
+  const headers = buildHeaders(account, stream, config);
+  if (path === RESPONSES_COMPACT_PATH) {
+    const seed = compactSessionSeed(body, request);
+    headers.session_id = seed;
+    headers.conversation_id = seed;
+  }
 
   try {
     return await fetch(url, {
       method: "POST",
-      headers: buildHeaders(account, stream, config),
+      headers,
       body: JSON.stringify(body),
       signal: withTimeoutSignal(timeoutMs, options.signal),
     });

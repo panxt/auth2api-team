@@ -6,6 +6,7 @@ import { ProviderRegistry } from "./providers/registry";
 import { extractApiKey, hashApiKey } from "./utils/common";
 import {
   createChatCompletionsHandler,
+  createResponsesCompactHandler,
   createResponsesHandler,
 } from "./handlers/openai";
 import {
@@ -1531,6 +1532,28 @@ export function createServer(
     requireQuota,
     enforceKeyRateLimit,
     createResponsesHandler(config, registry),
+  );
+  const responsesCompactHandler = createResponsesCompactHandler(config, registry);
+  app.post(
+    "/v1/responses/compact",
+    requireModelAccess,
+    requireQuota,
+    enforceKeyRateLimit,
+    responsesCompactHandler,
+  );
+  app.post(
+    "/codex/responses/compact",
+    requireModelAccess,
+    requireQuota,
+    enforceKeyRateLimit,
+    responsesCompactHandler,
+  );
+  app.post(
+    "/backend-api/codex/responses/compact",
+    requireModelAccess,
+    requireQuota,
+    enforceKeyRateLimit,
+    responsesCompactHandler,
   );
 
   // Routes — Anthropic native passthrough

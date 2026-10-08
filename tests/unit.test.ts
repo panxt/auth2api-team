@@ -403,7 +403,8 @@ test("proxyWithRetry treats Anthropic extra-usage 400 as an account failure", as
   const manager: any = {
     provider: "anthropic",
     getNextAccount: () => {
-      while (idx < accounts.length && cooled.has(accounts[idx].token.email)) idx++;
+      while (idx < accounts.length && cooled.has(accounts[idx].token.email))
+        idx++;
       if (idx >= accounts.length) {
         return { account: null, failureKind: "forbidden", retryAfterMs: 1000 };
       }
@@ -440,9 +441,7 @@ test("proxyWithRetry treats Anthropic extra-usage 400 as an account failure", as
     },
   });
 
-  assert.deepEqual(failures, [
-    { email: "exhausted@x.com", kind: "forbidden" },
-  ]);
+  assert.deepEqual(failures, [{ email: "exhausted@x.com", kind: "forbidden" }]);
   assert.equal(resp.body, "ok");
   assert.equal(resp.locals.stats.failureKind, null);
 });
@@ -450,13 +449,17 @@ test("proxyWithRetry treats Anthropic extra-usage 400 as an account failure", as
 test("proxyWithRetry forwards Anthropic extra-usage 400 after all accounts fail", async () => {
   const resp = makeMockResponse();
   resp.locals.stats = {};
-  const accounts = [{ token: { email: "a@x.com" } }, { token: { email: "b@x.com" } }];
+  const accounts = [
+    { token: { email: "a@x.com" } },
+    { token: { email: "b@x.com" } },
+  ];
   let idx = 0;
   const cooled = new Set<string>();
   const manager: any = {
     provider: "anthropic",
     getNextAccount: () => {
-      while (idx < accounts.length && cooled.has(accounts[idx].token.email)) idx++;
+      while (idx < accounts.length && cooled.has(accounts[idx].token.email))
+        idx++;
       if (idx >= accounts.length) {
         return { account: null, failureKind: "forbidden", retryAfterMs: 1000 };
       }
@@ -490,13 +493,17 @@ test("proxyWithRetry forwards Anthropic extra-usage 400 after all accounts fail"
 test("proxyWithRetry forwards the real upstream 403 when every account is exhausted", async () => {
   const resp = makeMockResponse();
   resp.locals.stats = {};
-  const accounts = [{ token: { email: "a@x.com" } }, { token: { email: "b@x.com" } }];
+  const accounts = [
+    { token: { email: "a@x.com" } },
+    { token: { email: "b@x.com" } },
+  ];
   let idx = 0;
   const cooled = new Set<string>();
   const manager: any = {
     provider: "anthropic",
     getNextAccount: () => {
-      while (idx < accounts.length && cooled.has(accounts[idx].token.email)) idx++;
+      while (idx < accounts.length && cooled.has(accounts[idx].token.email))
+        idx++;
       if (idx >= accounts.length) {
         return { account: null, failureKind: "forbidden", retryAfterMs: 1000 };
       }
@@ -511,9 +518,12 @@ test("proxyWithRetry forwards the real upstream 403 when every account is exhaus
     manager,
     maxRetries: 5,
     upstream: async () =>
-      new Response(JSON.stringify({ error: { message: "extra usage not enabled" } }), {
-        status: 403,
-      }),
+      new Response(
+        JSON.stringify({ error: { message: "extra usage not enabled" } }),
+        {
+          status: 403,
+        },
+      ),
     success: async () => {},
   });
 
@@ -770,7 +780,6 @@ test("resolveModel maps aliases", () => {
   assert.equal(resolveModel("haiku"), "claude-haiku-4-5-20251001");
 });
 
-
 test("resolveModel normalizes Codex GPT-6 aliases", () => {
   assert.equal(normalizeModelName(" GPT_6  "), "gpt-6");
   assert.equal(resolveModel("GPT-6"), "gpt-6");
@@ -951,10 +960,36 @@ test("openaiToAnthropic translates tool role messages", () => {
   // assistant message with tool_use
   assert.equal(result.messages[1].role, "assistant");
   assert.equal(result.messages[1].content[0].type, "tool_use");
+  assert.deepEqual(result.messages[1].content[0].input, { city: "NYC" });
   // tool result
   assert.equal(result.messages[2].role, "user");
   assert.equal(result.messages[2].content[0].type, "tool_result");
   assert.equal(result.messages[2].content[0].tool_use_id, "call_1");
+});
+
+test("openaiToAnthropic tolerates malformed assistant tool arguments", () => {
+  const result = openaiToAnthropic({
+    model: "sonnet",
+    messages: [
+      {
+        role: "assistant",
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: { name: "lookup", arguments: "{not-json" },
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.deepEqual(result.messages[0].content[0], {
+    type: "tool_use",
+    id: "call_1",
+    name: "lookup",
+    input: {},
+  });
 });
 
 // ══════════════════════════════════════════════════
@@ -1446,8 +1481,12 @@ test("StatsRecorder windowed snapshot: today / month / all roll up consistently"
   const earlierThisMonth = isFirst
     ? // today is the 1st → put the "month-only" event in the *previous* month
       // so it lands outside both today and this month
-      new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15)).toISOString()
-    : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 30)).toISOString();
+      new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15),
+      ).toISOString()
+    : new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 30),
+      ).toISOString();
   // A timestamp ~70 days ago — outside today and this month.
   const old = new Date(now.getTime() - 70 * 86400_000).toISOString();
 
@@ -1482,9 +1521,15 @@ test("StatsRecorder windowed snapshot: today / month / all roll up consistently"
 test("StatsRecorder windowed byClientModel splits per model", () => {
   const recorder = new StatsRecorder();
   const todayIso = new Date().toISOString();
-  recorder.applyEvent(makeStatsEvent({ ts: todayIso, model: "claude-opus-4-8" }));
-  recorder.applyEvent(makeStatsEvent({ ts: todayIso, model: "claude-sonnet-4-6" }));
-  recorder.applyEvent(makeStatsEvent({ ts: todayIso, model: "claude-sonnet-4-6" }));
+  recorder.applyEvent(
+    makeStatsEvent({ ts: todayIso, model: "claude-opus-4-8" }),
+  );
+  recorder.applyEvent(
+    makeStatsEvent({ ts: todayIso, model: "claude-sonnet-4-6" }),
+  );
+  recorder.applyEvent(
+    makeStatsEvent({ ts: todayIso, model: "claude-sonnet-4-6" }),
+  );
   const today = recorder.getSnapshot("today");
   const hash = "a".repeat(64);
   assert.equal(today.byClientModel[`${hash}|claude-opus-4-8`].requests, 1);
