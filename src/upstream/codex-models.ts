@@ -9,13 +9,26 @@ const CLIENT_VERSION = "auth2api/1.0.0";
 // call fails. User-confirmed list of models currently accepted by the
 // ChatGPT-account codex backend; kept private since the upstream proxy is the
 // authoritative source — this list only papers over startup and outages.
-const FALLBACK_MODELS = [
-  "gpt-5.5",
-  "gpt-5.4",
-  "gpt-5.4-mini",
-  "gpt-5.3-codex",
-  "gpt-5.2",
-];
+// ChatGPT-account Codex currently advertises more slugs than /codex/responses
+// will accept for this account type. Only expose models we have verified work,
+// otherwise Claude Code's /model command can switch to a listed-but-rejected
+// slug and fail on the validation request.
+const SUPPORTED_CHATGPT_CODEX_MODELS = new Set(["gpt-5.5"]);
+
+const FALLBACK_MODELS = ["gpt-5.5"];
+
+function filterSupportedModels(models: UpstreamModel[]): UpstreamModel[] {
+  return models.filter((m) => SUPPORTED_CHATGPT_CODEX_MODELS.has(m.slug));
+}
+
+function toModelList(
+  models: UpstreamModel[],
+): Array<{ id: string; owned_by: string }> {
+  return filterSupportedModels(models).map((m) => ({
+    id: m.slug,
+    owned_by: "openai",
+  }));
+}
 
 interface UpstreamModel {
   slug: string;
@@ -104,7 +117,7 @@ export async function listCodexModels(
 ): Promise<Array<{ id: string; owned_by: string }>> {
   // Cache hit within TTL — return immediately.
   if (cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) {
-    return cache.models.map((m) => ({ id: m.slug, owned_by: "openai" }));
+    return toModelList(cache.models);
   }
 
   const fresh = await fetchUpstream(manager);
@@ -114,12 +127,12 @@ export async function listCodexModels(
       etag: fresh.etag,
       models: fresh.models,
     };
-    return fresh.models.map((m) => ({ id: m.slug, owned_by: "openai" }));
+    return toModelList(fresh.models);
   }
 
   // Stale-while-error: prefer slightly-stale cache over fallback if we have one.
   if (cache) {
-    return cache.models.map((m) => ({ id: m.slug, owned_by: "openai" }));
+    return toModelList(cache.models);
   }
 
   return FALLBACK_MODELS.map((id) => ({ id, owned_by: "openai" }));

@@ -20,6 +20,10 @@ import {
 import { buildRegistry } from "../src/providers/registry";
 import { generateCodexAuthURL } from "../src/auth/codex/oauth";
 import { normalizeCodexResponsesBody } from "../src/upstream/codex-api";
+import {
+  listCodexModels,
+  __resetCodexModelsCache,
+} from "../src/upstream/codex-models";
 import { anthropicToResponsesRequest } from "../src/upstream/responses-translator";
 import { generatePKCECodes } from "../src/auth/pkce";
 import {
@@ -137,7 +141,10 @@ test("normalizeCodexResponsesBody strips fields the codex backend 400s on", () =
     parallel_tool_calls: true,
     user: "user_abc123",
   });
-  assert.ok(!("max_output_tokens" in out), "max_output_tokens must be stripped");
+  assert.ok(
+    !("max_output_tokens" in out),
+    "max_output_tokens must be stripped",
+  );
   assert.ok(
     !("parallel_tool_calls" in out),
     "parallel_tool_calls must be stripped",
@@ -170,6 +177,74 @@ test("Claude Code's metadata.user_id survives translation but not normalization"
   const out = normalizeCodexResponsesBody(translated);
   assert.ok(!("user" in out));
   assert.ok(!("max_output_tokens" in out));
+});
+
+// ══════════════════════════════════════════════════
+// upstream/codex-models.ts — ChatGPT-account supported models
+// ══════════════════════════════════════════════════
+
+test("listCodexModels filters upstream-advertised unsupported ChatGPT-account models", async () => {
+  __resetCodexModelsCache();
+  const tmpDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "auth2api-codex-models-"),
+  );
+  const restoreFetch = withFetchStub(async () => {
+    return new Response(
+      JSON.stringify({
+        models: [
+          { slug: "gpt-6" },
+          { slug: "gpt-6-sol" },
+          { slug: "gpt-6-codex" },
+          { slug: "gpt-5.5" },
+          { slug: "gpt-5.4" },
+          { slug: "gpt-5.4-mini" },
+          { slug: "gpt-5.3-codex" },
+          { slug: "gpt-5.2" },
+        ],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  });
+  try {
+    const manager = new AccountManager(tmpDir, {
+      provider: "codex",
+      refresh: async () => ({}) as any,
+    });
+    manager.addAccount({
+      accessToken: "at",
+      refreshToken: "rt",
+      email: "x@y.z",
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      accountUuid: "acct",
+      provider: "codex",
+    });
+
+    const models = await listCodexModels(manager);
+    assert.deepEqual(models, [{ id: "gpt-5.5", owned_by: "openai" }]);
+  } finally {
+    restoreFetch();
+    __resetCodexModelsCache();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("listCodexModels fallback exposes only verified ChatGPT-account models", async () => {
+  __resetCodexModelsCache();
+  const tmpDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "auth2api-codex-models-"),
+  );
+  try {
+    const manager = new AccountManager(tmpDir, {
+      provider: "codex",
+      refresh: async () => ({}) as any,
+    });
+
+    const models = await listCodexModels(manager);
+    assert.deepEqual(models, [{ id: "gpt-5.5", owned_by: "openai" }]);
+  } finally {
+    __resetCodexModelsCache();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 // ══════════════════════════════════════════════════
@@ -270,7 +345,8 @@ test("codex AccountManager.recordRateLimit populates quotaPool 7d, leaves 5h nul
     });
     // Feed the live header set with the x-codex- prefix restored.
     const h: Record<string, string> = {};
-    for (const [k, v] of Object.entries(LIVE_CODEX_HEADERS)) h[`x-codex-${k}`] = v;
+    for (const [k, v] of Object.entries(LIVE_CODEX_HEADERS))
+      h[`x-codex-${k}`] = v;
     m.recordRateLimit("c@x.com", new Headers(h));
 
     const pool = m.quotaPool();
@@ -1221,7 +1297,10 @@ function makeNotifyConfig(): Config2 {
 }
 
 function withFetchStub(
-  stub: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+  stub: (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => Promise<Response>,
 ): () => void {
   const orig = globalThis.fetch;
   globalThis.fetch = stub as typeof fetch;
@@ -1255,10 +1334,10 @@ test("notifyServerReload posts to /admin/reload with the first api-key as Bearer
   let seen: { url: string; init?: RequestInit } | null = null;
   const restoreFetch = withFetchStub(async (input, init) => {
     seen = { url: String(input), init };
-    return new Response(
-      JSON.stringify({ reloaded: {}, generated_at: "now" }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ reloaded: {}, generated_at: "now" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
   });
   const cap = captureLogs();
   try {
@@ -1274,7 +1353,9 @@ test("notifyServerReload posts to /admin/reload with the first api-key as Bearer
     (seen!.init?.headers as Record<string, string>)?.Authorization,
     "Bearer sk-test",
   );
-  assert.ok(cap.logs.some((l) => l.includes("Notified running auth2api server")));
+  assert.ok(
+    cap.logs.some((l) => l.includes("Notified running auth2api server")),
+  );
   assert.equal(cap.warns.length, 0);
 });
 
