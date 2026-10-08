@@ -810,6 +810,10 @@ function closeOpenBlocks(state: ResponsesToAnthropicState): string[] {
   return out;
 }
 
+function isIncompleteMaxOutputTokensError(message: string): boolean {
+  return /incomplete/i.test(message) && /max_output_tokens/i.test(message);
+}
+
 export function responsesSSEToAnthropic(
   event: string,
   data: any,
@@ -979,8 +983,25 @@ export function responsesSSEToAnthropic(
 
     case "response.failed": {
       const msg = data?.response?.error?.message || "Upstream error";
+      const r = data?.response;
       const out = ensureMessageStart(state);
       out.push(...closeOpenBlocks(state));
+      if (isIncompleteMaxOutputTokensError(msg)) {
+        if (r?.usage) {
+          state.inputTokens = r.usage.input_tokens || 0;
+          state.outputTokens = r.usage.output_tokens || 0;
+        }
+        state.stopReason = "max_tokens";
+        out.push(
+          sseEvent("message_delta", {
+            type: "message_delta",
+            delta: { stop_reason: state.stopReason, stop_sequence: null },
+            usage: { output_tokens: state.outputTokens },
+          }),
+        );
+        out.push(sseEvent("message_stop", { type: "message_stop" }));
+        return out;
+      }
       out.push(
         sseEvent("error", {
           type: "error",

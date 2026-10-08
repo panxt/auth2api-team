@@ -199,7 +199,16 @@ export async function streamUntilCommitOrFailover(
       emitTransformed(ev);
     }
 
-    if (committed) return null;
+    if (committed) {
+      // After commit we cannot fail over. Still pass non-failoverable error
+      // events through the translator so protocol adapters can turn benign
+      // terminal conditions (e.g. codex max_output_tokens incomplete) into a
+      // well-formed client-facing stop instead of silently truncating.
+      if (useTransform && isErrorEvent && !classification!.failover) {
+        emitTransformed(ev);
+      }
+      return null;
+    }
 
     if (isErrorEvent) {
       if (classification!.failover) {

@@ -1938,6 +1938,134 @@ test("codex /v1/chat/completions translates Chat → Responses upstream and SSE 
   assert.equal(jsonResp.body.choices[0].finish_reason, "stop");
 });
 
+test("codex /v1/messages maps failed max_output_tokens after content to max_tokens stop", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex-failed-incomplete@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+
+  const ev = (event: string, data: unknown) =>
+    `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  const restoreFetch = withMockedFetch(async () => {
+    const body =
+      ev("response.output_text.delta", {
+        type: "response.output_text.delta",
+        delta: "partial before fail",
+      }) +
+      ev("response.failed", {
+        type: "response.failed",
+        response: {
+          id: "resp_failed_incomplete",
+          status: "failed",
+          error: {
+            message: "Upstream response incomplete: max_output_tokens",
+          },
+          usage: { input_tokens: 13, output_tokens: 8 },
+        },
+      });
+    return new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const streamResp = await requestText({
+    server,
+    method: "POST",
+    path: "/v1/messages",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-opus-4-8",
+      max_tokens: 50,
+      messages: [{ role: "user", content: "long task" }],
+      stream: true,
+    },
+  });
+
+  assert.equal(streamResp.status, 200);
+  assert.match(streamResp.body, /event: message_start/);
+  assert.match(streamResp.body, /"text":"partial before fail"/);
+  assert.match(streamResp.body, /"stop_reason":"max_tokens"/);
+  assert.match(streamResp.body, /event: message_stop/);
+  assert.doesNotMatch(streamResp.body, /event: error/);
+  assert.doesNotMatch(streamResp.body, /Upstream response incomplete/);
+});
+
+test("codex /v1/messages maps incomplete max_output_tokens to max_tokens stop", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex-incomplete@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+
+  const ev = (event: string, data: unknown) =>
+    `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  const restoreFetch = withMockedFetch(async () => {
+    const body =
+      ev("response.output_text.delta", {
+        type: "response.output_text.delta",
+        delta: "partial answer",
+      }) +
+      ev("response.completed", {
+        type: "response.completed",
+        response: {
+          id: "resp_incomplete",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          usage: { input_tokens: 11, output_tokens: 7 },
+        },
+      });
+    return new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const streamResp = await requestText({
+    server,
+    method: "POST",
+    path: "/v1/messages",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-opus-4-8",
+      max_tokens: 50,
+      messages: [{ role: "user", content: "long task" }],
+      stream: true,
+    },
+  });
+
+  assert.equal(streamResp.status, 200);
+  assert.match(streamResp.body, /event: message_start/);
+  assert.match(streamResp.body, /"text":"partial answer"/);
+  assert.match(streamResp.body, /"stop_reason":"max_tokens"/);
+  assert.match(streamResp.body, /event: message_stop/);
+  assert.doesNotMatch(streamResp.body, /event: error/);
+  assert.doesNotMatch(streamResp.body, /Upstream response incomplete/);
+});
+
 test("codex /v1/messages maps Claude SDK alias claude-opus-4-8 to upstream gpt-5.5", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   saveToken(
