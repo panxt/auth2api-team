@@ -1938,6 +1938,97 @@ test("codex /v1/chat/completions translates Chat → Responses upstream and SSE 
   assert.equal(jsonResp.body.choices[0].finish_reason, "stop");
 });
 
+test("codex /v1/messages maps Claude SDK alias claude-opus-4-8 to upstream gpt-5.5", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex-alias@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+
+  let receivedUpstreamBody: any = null;
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    assert.equal(
+      String(input),
+      "https://chatgpt.com/backend-api/codex/responses",
+    );
+    receivedUpstreamBody = JSON.parse(String(init?.body || "{}"));
+    return new Response(codexResponsesSseBody(["alias-ok"]), {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const streamResp = await requestText({
+    server,
+    method: "POST",
+    path: "/v1/messages",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-opus-4-8",
+      max_tokens: 50,
+      messages: [{ role: "user", content: "Reply: alias-ok" }],
+      stream: true,
+    },
+  });
+
+  assert.equal(streamResp.status, 200);
+  assert.equal(receivedUpstreamBody.model, "gpt-5.5");
+  assert.equal(receivedUpstreamBody.stream, true);
+  assert.equal(receivedUpstreamBody.max_output_tokens, undefined);
+  assert.match(streamResp.body, /event: message_start/);
+  assert.match(streamResp.body, /"model":"claude-opus-4-8"/);
+  assert.match(streamResp.body, /"type":"text_delta","text":"alias-ok"/);
+  assert.match(streamResp.body, /event: message_stop/);
+});
+
+test("codex count_tokens maps Claude SDK alias claude-opus-4-8 to local estimate", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex-alias-count@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+  const restoreFetch = withMockedFetch(async () => {
+    throw new Error("count_tokens alias must not call upstream");
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/messages/count_tokens",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-opus-4-8",
+      messages: [{ role: "user", content: "hello alias" }],
+    },
+  });
+
+  assert.equal(resp.status, 200);
+  assert.equal(typeof resp.body.input_tokens, "number");
+  assert.ok(resp.body.input_tokens > 0);
+});
+
 test("codex /v1/messages translates Anthropic → Responses upstream and SSE → Anthropic back", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   saveToken(

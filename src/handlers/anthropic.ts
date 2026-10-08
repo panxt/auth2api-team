@@ -42,6 +42,13 @@ function internalError(resp: ExpressResponse): void {
   }
 }
 
+const CODEX_CLAUDE_SDK_ALIAS = "claude-opus-4-8";
+const CODEX_CLAUDE_SDK_ALIAS_TARGET = "gpt-5.5";
+
+function isCodexClaudeSdkAlias(model: string): boolean {
+  return model === CODEX_CLAUDE_SDK_ALIAS;
+}
+
 /**
  * Codex-specific path for /v1/messages. Translates the Anthropic Messages
  * request into a Responses request, applies codex's required defaults
@@ -241,12 +248,17 @@ export function createMessagesHandler(
       }
 
       const model = resolveModel(body.model || "claude-sonnet-4-6");
+      const upstreamModel = isCodexClaudeSdkAlias(model)
+        ? CODEX_CLAUDE_SDK_ALIAS_TARGET
+        : model;
       // Persist the resolved name into the body so the upstream call sees the
       // canonical Anthropic model id (e.g. "opus" → "claude-opus-4-8")
-      // rather than the alias the client sent.
-      body.model = model;
-      const provider = registry.forModel(model);
-      tagStatsModel(resp, model, provider.id);
+      // rather than the alias the client sent. The temporary Claude SDK alias
+      // keeps the client-facing model as claude-opus-4-8, while Codex upstream
+      // receives the only currently verified ChatGPT-account slug: gpt-5.5.
+      body.model = upstreamModel;
+      const provider = registry.forModel(upstreamModel);
+      tagStatsModel(resp, upstreamModel, provider.id);
 
       // Codex's upstream is the OpenAI Responses API; route /v1/messages
       // through a dedicated translator path that converts Anthropic
@@ -383,11 +395,15 @@ export function createCountTokensHandler(
     try {
       const body = req.body;
       const model = resolveModel(body?.model || "claude-sonnet-4-6");
+      const upstreamModel = isCodexClaudeSdkAlias(model)
+        ? CODEX_CLAUDE_SDK_ALIAS_TARGET
+        : model;
       // Resolved model name (e.g. alias expanded) needs to be in the body
-      // so the upstream count-tokens call uses the canonical id.
-      if (body) body.model = model;
-      const provider = registry.forModel(model);
-      tagStatsModel(resp, model, provider.id);
+      // so the upstream count-tokens call uses the canonical id. The temporary
+      // Claude SDK alias maps to the Codex slug before provider selection.
+      if (body) body.model = upstreamModel;
+      const provider = registry.forModel(upstreamModel);
+      tagStatsModel(resp, upstreamModel, provider.id);
 
       if (!provider.callCountTokens) {
         // Codex has no count_tokens endpoint. Claude Code calls this route to
