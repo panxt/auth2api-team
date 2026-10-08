@@ -10,9 +10,6 @@ const CLIENT_VERSION = "auth2api/1.0.0";
 // ChatGPT-account codex backend; kept private since the upstream proxy is the
 // authoritative source — this list only papers over startup and outages.
 const FALLBACK_MODELS = [
-  "gpt-6",
-  "gpt-6-sol",
-  "gpt-6-codex",
   "gpt-5.5",
   "gpt-5.4",
   "gpt-5.4-mini",
