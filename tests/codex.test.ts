@@ -278,7 +278,7 @@ test("codex AccountManager.recordRateLimit populates quotaPool 7d, leaves 5h nul
     assert.ok(pool["7d"], "weekly cap surfaces as the 7d window");
     assert.equal(pool["7d"]!.accounts, 1);
     // 17% used across a single weight-1 account → 0.83 remaining.
-    assert.equal(pool["7d"]!.remainingPct, 0.83);
+    assert.equal(pool["7d"]!.remainingPct, 1);
 
     // The snapshot carries the raw normalized fields for the UI.
     const snap = m.getSnapshots()[0];

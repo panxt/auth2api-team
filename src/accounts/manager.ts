@@ -545,10 +545,11 @@ export class AccountManager {
 
   /** Parse a utilization header value (0..1), or null if unknown. May be a
    *  fraction (0.42) or a percent (42). */
-  private parseUtil(raw: string | undefined): number | null {
+  private parseUtil(raw: string | undefined, normalized = false): number | null {
     if (raw == null) return null;
     const n = Number(raw);
     if (!Number.isFinite(n)) return null;
+    if (normalized) return Math.min(Math.max(n, 0), 1);
     return n > 1 ? n / 100 : n;
   }
 
@@ -756,14 +757,35 @@ export class AccountManager {
     let hasData = false;
     for (const acct of this.accounts.values()) {
       if (acct.disabled) continue; // disabled can't serve → not capacity
+      const rawValue = acct.rateLimit?.fields?.[utilKey];
+      const fields = acct.rateLimit?.fields;
+      const hasCodexWindowMeta = !!fields && (
+        fields["unified-5h-window-minutes"] != null ||
+        fields["unified-7d-window-minutes"] != null
+      );
+      const hasWindowMeta =
+        fields?.[utilKey.replace("-utilization", "-window-minutes")] != null;
+      const rawU = this.parseUtil(rawValue, hasCodexWindowMeta);
+      // Codex normalized fields are per-account definitive: if the requested
+      // slot is absent, that account should not add capacity to this slot.
+      // Anthropic lacks window metadata, so missing utilization there still
+      // contributes idle/full capacity once any account has data.
+      if (hasCodexWindowMeta && rawValue == null) continue;
       const w = this.weightOf(acct);
-      const rawU = this.parseUtil(acct.rateLimit?.fields?.[utilKey]);
       const resetRaw = Number(acct.rateLimit?.fields?.[resetKey]);
       const hasReset = Number.isFinite(resetRaw);
+      // Anthropic reset headers are ISO-ish / ms-derived in old snapshots; Codex
+      // quota normalization stores unix seconds. Treat very small numeric resets
+      // as unix seconds and only expire those after converting to ms.
+      const resetMs = hasReset
+        ? resetRaw < 10_000_000_000
+          ? resetRaw * 1000
+          : resetRaw
+        : NaN;
       // Only zero-out when we KNOW the window expired (reset timestamp in the
       // past → a fresh window opens on the next request). No reset header ⇒
       // trust the reported utilization as current.
-      const expired = hasReset && resetRaw * 1000 <= now;
+      const expired = hasReset && resetMs <= now;
       if (rawU != null) hasData = true;
       accounts++;
       capacity += w;
@@ -771,7 +793,7 @@ export class AccountManager {
         const clamped = Math.min(Math.max(rawU, 0), 1);
         used += w * clamped;
         maxUtil = maxUtil == null ? rawU : Math.max(maxUtil, rawU);
-        if (hasReset && resetRaw * 1000 > now) {
+        if (hasReset && resetMs > now) {
           soonest = soonest == null ? resetRaw : Math.min(soonest, resetRaw);
         }
       }
