@@ -1066,6 +1066,37 @@ test("POST /admin/reload requires the API key", async (t) => {
   assert.equal(wrongAuth.status, 403);
 });
 
+
+test("codex count_tokens returns compatibility estimate instead of 501", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(authDir, {
+    ...makeToken({
+      email: "codex@example.com",
+      accountUuid: "codex-uuid",
+      provider: "codex",
+    }),
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/messages/count_tokens",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hello" }],
+    },
+  });
+
+  assert.equal(resp.status, 200);
+  assert.equal(resp.body.input_tokens, 0);
+});
+
 test("count_tokens with empty body returns upstream client error, not network error", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   const manager = makeManager(authDir, [makeToken()]);

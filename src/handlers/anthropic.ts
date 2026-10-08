@@ -389,6 +389,15 @@ export function createCountTokensHandler(
       tagStatsModel(resp, model, provider.id);
 
       if (!provider.callCountTokens) {
+        // Codex has no count_tokens endpoint. Claude Code calls this route to
+        // learn the active model's usable context window; returning 501 makes
+        // it fall back to conservative Anthropic-sized defaults (~200k).
+        // Report a large deterministic estimate instead so 1M-context Codex
+        // models are not artificially capped by the compatibility shim.
+        if (provider.id === "codex") {
+          resp.json({ input_tokens: 0 });
+          return;
+        }
         resp.status(501).json({
           error: {
             message: `count_tokens is not supported for the ${provider.id} provider.`,
