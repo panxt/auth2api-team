@@ -981,9 +981,11 @@ export function responsesSSEToAnthropic(
       return out;
     }
 
+    case "error":
     case "response.failed": {
-      const msg = data?.response?.error?.message || "Upstream error";
       const r = data?.response;
+      const msg =
+        r?.error?.message || data?.error?.message || data?.message || "Upstream error";
       const out = ensureMessageStart(state);
       out.push(...closeOpenBlocks(state));
       if (isIncompleteMaxOutputTokensError(msg)) {

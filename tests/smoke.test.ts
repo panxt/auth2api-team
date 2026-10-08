@@ -1938,6 +1938,70 @@ test("codex /v1/chat/completions translates Chat → Responses upstream and SSE 
   assert.equal(jsonResp.body.choices[0].finish_reason, "stop");
 });
 
+test("codex /v1/messages maps error max_output_tokens after content to max_tokens stop", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex-error-incomplete@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+
+  const ev = (event: string, data: unknown) =>
+    `event: ${event}
+data: ${JSON.stringify(data)}
+
+`;
+  const restoreFetch = withMockedFetch(async () => {
+    const body =
+      ev("response.output_text.delta", {
+        type: "response.output_text.delta",
+        delta: "partial before error",
+      }) +
+      ev("error", {
+        type: "error",
+        error: {
+          type: "upstream_error",
+          message: "Upstream response incomplete: max_output_tokens",
+        },
+      });
+    return new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const streamResp = await requestText({
+    server,
+    method: "POST",
+    path: "/v1/messages",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "claude-opus-4-8",
+      max_tokens: 50,
+      messages: [{ role: "user", content: "long task" }],
+      stream: true,
+    },
+  });
+
+  assert.equal(streamResp.status, 200);
+  assert.match(streamResp.body, /event: message_start/);
+  assert.match(streamResp.body, /"text":"partial before error"/);
+  assert.match(streamResp.body, /"stop_reason":"max_tokens"/);
+  assert.match(streamResp.body, /event: message_stop/);
+  assert.doesNotMatch(streamResp.body, /event: error/);
+  assert.doesNotMatch(streamResp.body, /Upstream response incomplete/);
+});
+
 test("codex /v1/messages maps failed max_output_tokens after content to max_tokens stop", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   saveToken(
