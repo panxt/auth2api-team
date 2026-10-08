@@ -396,6 +396,7 @@ export function createResponsesCompactHandler(
         upstream: (account, signal) =>
           callCodexResponses({
             body: compactBody,
+            seedBody: body,
             request: req,
             account,
             config,

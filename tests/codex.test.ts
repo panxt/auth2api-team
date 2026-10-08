@@ -268,6 +268,87 @@ test("listCodexModels filters upstream-advertised unsupported ChatGPT-account mo
   }
 });
 
+test("listCodexModels returns fallback when upstream fetch rejects", async () => {
+  __resetCodexModelsCache();
+  const tmpDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "auth2api-codex-models-"),
+  );
+  const restoreFetch = withFetchStub(async () => {
+    throw new Error("upstream unavailable");
+  });
+  try {
+    const manager = new AccountManager(tmpDir, {
+      provider: "codex",
+      refresh: async () => ({}) as any,
+    });
+    manager.addAccount({
+      accessToken: "at",
+      refreshToken: "rt",
+      email: "x@y.z",
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      accountUuid: "acct",
+      provider: "codex",
+    });
+
+    const models = await listCodexModels(manager);
+    assert.deepEqual(models, [{ id: "gpt-5.5", owned_by: "openai" }]);
+  } finally {
+    restoreFetch();
+    __resetCodexModelsCache();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("listCodexModels uses codex client headers and version query", async () => {
+  __resetCodexModelsCache();
+  const tmpDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "auth2api-codex-models-"),
+  );
+  let sawExpectedRequest = false;
+  const restoreFetch = withFetchStub(async (input, init) => {
+    const url = String(input);
+    assert.doesNotMatch(
+      url,
+      /client_version=auth2api%2F1\.0\.0|client_version=auth2api\/1\.0\.0/,
+    );
+    assert.match(url, /client_version=0\.138\.0/);
+    const headers = init?.headers as Record<string, string>;
+    assert.equal(headers.version, "0.138.0");
+    assert.match(
+      headers["User-Agent"] || headers["user-agent"],
+      /codex|ChatGPT|auth2api/i,
+    );
+    assert.ok(headers.originator);
+    sawExpectedRequest = true;
+    return new Response(JSON.stringify({ models: [{ slug: "gpt-5.5" }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  });
+  try {
+    const manager = new AccountManager(tmpDir, {
+      provider: "codex",
+      refresh: async () => ({}) as any,
+    });
+    manager.addAccount({
+      accessToken: "at",
+      refreshToken: "rt",
+      email: "x@y.z",
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      accountUuid: "acct",
+      provider: "codex",
+    });
+
+    const models = await listCodexModels(manager);
+    assert.equal(sawExpectedRequest, true);
+    assert.deepEqual(models, [{ id: "gpt-5.5", owned_by: "openai" }]);
+  } finally {
+    restoreFetch();
+    __resetCodexModelsCache();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("listCodexModels fallback exposes only verified ChatGPT-account models", async () => {
   __resetCodexModelsCache();
   const tmpDir = fs.mkdtempSync(

@@ -1,7 +1,16 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import { Config, isDebugLevel, ApiKeyEntry, canReadAll, resolveAuthDir, effectiveDailyCaps, todayUtc, DailyOverride } from "./config";
+import {
+  Config,
+  isDebugLevel,
+  ApiKeyEntry,
+  canReadAll,
+  resolveAuthDir,
+  effectiveDailyCaps,
+  todayUtc,
+  DailyOverride,
+} from "./config";
 import { ProviderRegistry } from "./providers/registry";
 import { extractApiKey, hashApiKey } from "./utils/common";
 import {
@@ -42,7 +51,12 @@ import {
   isMcpServerFull,
   mcpQuotaError,
 } from "./usage/mcp-access";
-import { LoggingConfig, RoutingConfig, PrewarmConfig, NotifyConfig } from "./config";
+import {
+  LoggingConfig,
+  RoutingConfig,
+  PrewarmConfig,
+  NotifyConfig,
+} from "./config";
 import { Notifier } from "./notify/notifier";
 import type { SettingsStore } from "./storage/types";
 
@@ -170,7 +184,9 @@ export function createServer(
     }
     const entry = config["api-keys"].get(key);
     if (!entry || !entry.enabled) {
-      res.status(403).json({ error: { message: "Invalid or disabled API key" } });
+      res
+        .status(403)
+        .json({ error: { message: "Invalid or disabled API key" } });
       return;
     }
     // Absolute expiry — reject at/after expires-at (401, distinct from disabled).
@@ -225,12 +241,44 @@ export function createServer(
     const day = quotaTracker.consumed(hash, { window: "day" });
     const who = `${entry.label || "(unlabeled)"} · ${hash.slice(0, 12)}`;
     const period = (w: "month" | "day") =>
-      w === "month" ? new Date().toISOString().slice(0, 7) : new Date().toISOString().slice(0, 10);
-    const caps: Array<{ cap?: number; used: number; window: "month" | "day"; metric: string; unit: string }> = [
-      { cap: q["monthly-cost-usd"], used: month.costUsd, window: "month", metric: "月成本", unit: "$" },
-      { cap: q["monthly-tokens"], used: month.tokens, window: "month", metric: "月 Token", unit: "" },
-      { cap: daily["daily-cost-usd"], used: day.costUsd, window: "day", metric: "日成本", unit: "$" },
-      { cap: daily["daily-tokens"], used: day.tokens, window: "day", metric: "日 Token", unit: "" },
+      w === "month"
+        ? new Date().toISOString().slice(0, 7)
+        : new Date().toISOString().slice(0, 10);
+    const caps: Array<{
+      cap?: number;
+      used: number;
+      window: "month" | "day";
+      metric: string;
+      unit: string;
+    }> = [
+      {
+        cap: q["monthly-cost-usd"],
+        used: month.costUsd,
+        window: "month",
+        metric: "月成本",
+        unit: "$",
+      },
+      {
+        cap: q["monthly-tokens"],
+        used: month.tokens,
+        window: "month",
+        metric: "月 Token",
+        unit: "",
+      },
+      {
+        cap: daily["daily-cost-usd"],
+        used: day.costUsd,
+        window: "day",
+        metric: "日成本",
+        unit: "$",
+      },
+      {
+        cap: daily["daily-tokens"],
+        used: day.tokens,
+        window: "day",
+        metric: "日 Token",
+        unit: "",
+      },
     ];
     for (const c of caps) {
       if (!c.cap || c.cap <= 0) continue;
@@ -335,7 +383,9 @@ export function createServer(
             : null);
         const requestId =
           c?.requestId ??
-          (body && typeof body?.request_id === "string" ? body.request_id : null);
+          (body && typeof body?.request_id === "string"
+            ? body.request_id
+            : null);
         requestLogger.record({
           ts: event.ts,
           apiKeyHash: input.apiKeyHash,
@@ -410,21 +460,67 @@ export function createServer(
     };
     const keyMonth = tracker.consumed(keyHash, { window: "month" });
     const keyDay = tracker.consumed(keyHash, { window: "day" });
-    const mdlMonth = tracker.consumed(keyHash, { window: "month", model: requestedModel });
-    const mdlDay = tracker.consumed(keyHash, { window: "day", model: requestedModel });
+    const mdlMonth = tracker.consumed(keyHash, {
+      window: "month",
+      model: requestedModel,
+    });
+    const mdlDay = tracker.consumed(keyHash, {
+      window: "day",
+      model: requestedModel,
+    });
 
     const checks: Check[] = [
-      { cap: q["monthly-tokens"], used: keyMonth.tokens, window: "month", msg: "Monthly token quota exceeded" },
-      { cap: q["monthly-cost-usd"], used: keyMonth.costUsd, window: "month", msg: "Monthly cost budget exceeded" },
-      { cap: dailyCaps["daily-tokens"], used: keyDay.tokens, window: "day", msg: "Daily token quota exceeded" },
-      { cap: dailyCaps["daily-cost-usd"], used: keyDay.costUsd, window: "day", msg: "Daily cost budget exceeded" },
+      {
+        cap: q["monthly-tokens"],
+        used: keyMonth.tokens,
+        window: "month",
+        msg: "Monthly token quota exceeded",
+      },
+      {
+        cap: q["monthly-cost-usd"],
+        used: keyMonth.costUsd,
+        window: "month",
+        msg: "Monthly cost budget exceeded",
+      },
+      {
+        cap: dailyCaps["daily-tokens"],
+        used: keyDay.tokens,
+        window: "day",
+        msg: "Daily token quota exceeded",
+      },
+      {
+        cap: dailyCaps["daily-cost-usd"],
+        used: keyDay.costUsd,
+        window: "day",
+        msg: "Daily cost budget exceeded",
+      },
     ];
     if (modelCaps) {
       checks.push(
-        { cap: modelCaps["monthly-tokens"], used: mdlMonth.tokens, window: "month", msg: `Monthly token quota exceeded for model ${requestedModel}` },
-        { cap: modelCaps["monthly-cost-usd"], used: mdlMonth.costUsd, window: "month", msg: `Monthly cost budget exceeded for model ${requestedModel}` },
-        { cap: modelCaps["daily-tokens"], used: mdlDay.tokens, window: "day", msg: `Daily token quota exceeded for model ${requestedModel}` },
-        { cap: modelCaps["daily-cost-usd"], used: mdlDay.costUsd, window: "day", msg: `Daily cost budget exceeded for model ${requestedModel}` },
+        {
+          cap: modelCaps["monthly-tokens"],
+          used: mdlMonth.tokens,
+          window: "month",
+          msg: `Monthly token quota exceeded for model ${requestedModel}`,
+        },
+        {
+          cap: modelCaps["monthly-cost-usd"],
+          used: mdlMonth.costUsd,
+          window: "month",
+          msg: `Monthly cost budget exceeded for model ${requestedModel}`,
+        },
+        {
+          cap: modelCaps["daily-tokens"],
+          used: mdlDay.tokens,
+          window: "day",
+          msg: `Daily token quota exceeded for model ${requestedModel}`,
+        },
+        {
+          cap: modelCaps["daily-cost-usd"],
+          used: mdlDay.costUsd,
+          window: "day",
+          msg: `Daily cost budget exceeded for model ${requestedModel}`,
+        },
       );
     }
 
@@ -432,10 +528,16 @@ export function createServer(
       if (c.cap != null && c.used >= c.cap) {
         res.setHeader(
           "Retry-After",
-          String(c.window === "day" ? secondsUntilDayResetUTC() : secondsUntilMonthResetUTC()),
+          String(
+            c.window === "day"
+              ? secondsUntilDayResetUTC()
+              : secondsUntilMonthResetUTC(),
+          ),
         );
         markCategory(res, "policy");
-        res.status(429).json({ error: { message: c.msg, type: "quota_exceeded" } });
+        res
+          .status(429)
+          .json({ error: { message: c.msg, type: "quota_exceeded" } });
         return;
       }
     }
@@ -449,7 +551,8 @@ export function createServer(
   const requireModelAccess: express.RequestHandler = (req, res, next) => {
     const entry = res.locals.apiKey as ApiKeyEntry | undefined;
     if (!hasModelRestriction(entry)) return next();
-    const requested = (req.body?.model as string | undefined) || "claude-sonnet-4-6";
+    const requested =
+      (req.body?.model as string | undefined) || "claude-sonnet-4-6";
     if (!isModelAllowed(entry, requested)) {
       markCategory(res, "policy");
       res.status(403).json({
@@ -474,21 +577,23 @@ export function createServer(
     if (rl.rpm != null && !checkKeyRpm(keyId, rl.rpm)) {
       res.setHeader("Retry-After", "60");
       markCategory(res, "policy");
-      res
-        .status(429)
-        .json({
-          error: { message: "Per-key request rate limit exceeded", type: "rate_limit" },
-        });
+      res.status(429).json({
+        error: {
+          message: "Per-key request rate limit exceeded",
+          type: "rate_limit",
+        },
+      });
       return;
     }
     if (rl.concurrency != null) {
       if (!acquireConcurrency(keyId, rl.concurrency)) {
         markCategory(res, "policy");
-        res
-          .status(429)
-          .json({
-            error: { message: "Per-key concurrency limit exceeded", type: "rate_limit" },
-          });
+        res.status(429).json({
+          error: {
+            message: "Per-key concurrency limit exceeded",
+            type: "rate_limit",
+          },
+        });
         return;
       }
       let released = false;
@@ -528,7 +633,9 @@ export function createServer(
   const requireReadAll: express.RequestHandler = (_req, res, next) => {
     const entry = res.locals.apiKey as ApiKeyEntry | undefined;
     if (!entry || !canReadAll(entry)) {
-      res.status(403).json({ error: { message: "Admin or auditor API key required" } });
+      res
+        .status(403)
+        .json({ error: { message: "Admin or auditor API key required" } });
       return;
     }
     next();
@@ -559,8 +666,7 @@ export function createServer(
       return;
     }
     const w = req.query.window;
-    const window =
-      w === "today" || w === "month" || w === "all" ? w : "all";
+    const window = w === "today" || w === "month" || w === "all" ? w : "all";
     res.json({
       ...statsRecorder.getSnapshot(window),
       generated_at: new Date().toISOString(),
@@ -586,7 +692,10 @@ export function createServer(
       return;
     }
     const requested = Number(req.query.days);
-    const days = Number.isFinite(requested) && requested > 0 ? Math.min(365, requested) : 30;
+    const days =
+      Number.isFinite(requested) && requested > 0
+        ? Math.min(365, requested)
+        : 30;
     res.json({
       days: statsRecorder.getTimeseries(days),
       window: { days },
@@ -613,7 +722,14 @@ export function createServer(
       const cursor = Number.isFinite(cursorRaw) ? cursorRaw : undefined;
       const str = (v: unknown) =>
         typeof v === "string" && v.length ? v : undefined;
-      const validCats = ["upstream", "service", "policy", "client", "ok", "mcp"];
+      const validCats = [
+        "upstream",
+        "service",
+        "policy",
+        "client",
+        "ok",
+        "mcp",
+      ];
 
       // hash → human name (label || owner). Keys are few; rebuild per request
       // so renames/new keys reflect immediately.
@@ -644,8 +760,13 @@ export function createServer(
       const page = requestLogger.query({
         limit,
         cursor,
-        status: q.status === "failure" || q.status === "success" ? q.status : undefined,
-        category: validCats.includes(q.category as string) ? (q.category as any) : undefined,
+        status:
+          q.status === "failure" || q.status === "success"
+            ? q.status
+            : undefined,
+        category: validCats.includes(q.category as string)
+          ? (q.category as any)
+          : undefined,
         apiKeyPrefix: str(q.apiKey),
         apiKeyHashes,
         email: str(q.email),
@@ -664,7 +785,11 @@ export function createServer(
         keyName: nameByHash.get(r.apiKeyHash) ?? null,
         apiKeyHash: undefined,
       }));
-      res.json({ logs: rows, nextCursor: page.nextCursor, generated_at: new Date().toISOString() });
+      res.json({
+        logs: rows,
+        nextCursor: page.nextCursor,
+        generated_at: new Date().toISOString(),
+      });
     });
 
     app.get("/admin/logging/config", requireAdmin, (_req, res) => {
@@ -673,10 +798,14 @@ export function createServer(
 
     app.put("/admin/logging/config", requireAdmin, (req, res) => {
       try {
-        const next = requestLogger.updateConfig((req.body || {}) as Partial<LoggingConfig>);
+        const next = requestLogger.updateConfig(
+          (req.body || {}) as Partial<LoggingConfig>,
+        );
         res.json(next);
       } catch (err: any) {
-        res.status(400).json({ error: { message: err?.message || String(err) } });
+        res
+          .status(400)
+          .json({ error: { message: err?.message || String(err) } });
       }
     });
   }
@@ -688,9 +817,13 @@ export function createServer(
     });
     app.put("/admin/notify/config", requireAdmin, (req, res) => {
       try {
-        res.json(notifier.updateConfig((req.body || {}) as Partial<NotifyConfig>));
+        res.json(
+          notifier.updateConfig((req.body || {}) as Partial<NotifyConfig>),
+        );
       } catch (err: any) {
-        res.status(400).json({ error: { message: err?.message || String(err) } });
+        res
+          .status(400)
+          .json({ error: { message: err?.message || String(err) } });
       }
     });
     // Send a test card now (bypasses enabled + dedup); reports the real error.
@@ -699,7 +832,9 @@ export function createServer(
         await notifier.test();
         res.json({ ok: true });
       } catch (err: any) {
-        res.status(400).json({ error: { message: err?.message || String(err) } });
+        res
+          .status(400)
+          .json({ error: { message: err?.message || String(err) } });
       }
     });
   }
@@ -716,7 +851,9 @@ export function createServer(
         );
         res.json(next);
       } catch (err: any) {
-        res.status(400).json({ error: { message: err?.message || String(err) } });
+        res
+          .status(400)
+          .json({ error: { message: err?.message || String(err) } });
       }
     });
   }
@@ -733,18 +870,16 @@ export function createServer(
         );
         res.json(next);
       } catch (err: any) {
-        res.status(400).json({ error: { message: err?.message || String(err) } });
+        res
+          .status(400)
+          .json({ error: { message: err?.message || String(err) } });
       }
     });
     // Run history (scheduled + manual), newest first, persisted across
     // restarts. Paginated: ?limit=&cursor= (cursor from previous nextCursor).
     app.get("/admin/prewarm/history", requireAdmin, (req, res) => {
-      const limit = Math.min(
-        Math.max(Number(req.query.limit) || 20, 1),
-        100,
-      );
-      const cursor =
-        req.query.cursor != null ? Number(req.query.cursor) : null;
+      const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
+      const cursor = req.query.cursor != null ? Number(req.query.cursor) : null;
       const page = prewarmScheduler.historyPage({
         limit,
         cursor: Number.isFinite(cursor as number) ? cursor : null,
@@ -760,7 +895,9 @@ export function createServer(
       if (err instanceof McpError) {
         const status =
           err.code === "not_found" ? 404 : err.code === "conflict" ? 409 : 400;
-        res.status(status).json({ error: { message: err.message, type: err.code } });
+        res
+          .status(status)
+          .json({ error: { message: err.message, type: err.code } });
         return;
       }
       console.error("[mcp] unexpected error:", err);
@@ -769,7 +906,10 @@ export function createServer(
 
     // Read: admin + auditor (header values are never returned).
     app.get("/admin/mcp/servers", requireReadAll, (_req, res) => {
-      res.json({ servers: ctrl.list(), generated_at: new Date().toISOString() });
+      res.json({
+        servers: ctrl.list(),
+        generated_at: new Date().toISOString(),
+      });
     });
     // Mutations: admin-only. Persisted to SettingsStore + hot-reconnect.
     app.post("/admin/mcp/servers", requireAdmin, (req, res) => {
@@ -803,18 +943,25 @@ export function createServer(
     });
     // Tool list for a server (admin+auditor) — powers the UI tool view + the
     // per-tool grant picker.
-    app.get("/admin/mcp/servers/:id/tools", requireReadAll, async (req, res) => {
-      try {
-        res.json({ tools: await ctrl.tools(req.params.id) });
-      } catch (err) {
-        if (err instanceof McpError) {
-          handleMcpError(err, res);
-        } else {
-          // upstream unreachable → 200 with empty + reason, so UI can show it
-          res.json({ tools: [], error: (err as any)?.message || String(err) });
+    app.get(
+      "/admin/mcp/servers/:id/tools",
+      requireReadAll,
+      async (req, res) => {
+        try {
+          res.json({ tools: await ctrl.tools(req.params.id) });
+        } catch (err) {
+          if (err instanceof McpError) {
+            handleMcpError(err, res);
+          } else {
+            // upstream unreachable → 200 with empty + reason, so UI can show it
+            res.json({
+              tools: [],
+              error: (err as any)?.message || String(err),
+            });
+          }
         }
-      }
-    });
+      },
+    );
 
     // Meter one MCP tool call: feed stats + quota + request log, reusing the
     // /v1 event shape (endpoint = "MCP <server>/<tool>", no tokens).
@@ -872,7 +1019,8 @@ export function createServer(
       const entry = res.locals.apiKey as ApiKeyEntry | undefined;
       const gctx = {
         allowedServerIds: mcpFanoutServerIds(entry, ctrl.enabledIds()),
-        isToolAllowed: (sid: string, tool: string) => isMcpToolAllowed(entry, sid, tool),
+        isToolAllowed: (sid: string, tool: string) =>
+          isMcpToolAllowed(entry, sid, tool),
         isServerFull: (sid: string) => isMcpServerFull(entry, sid),
         controller: ctrl,
         overQuota: (sid: string) =>
@@ -907,7 +1055,9 @@ export function createServer(
     app.get("/mcp", (_req, res) =>
       res
         .status(405)
-        .json({ error: { message: "SSE stream not supported (stateless JSON mode)" } }),
+        .json({
+          error: { message: "SSE stream not supported (stateless JSON mode)" },
+        }),
     );
     app.delete("/mcp", (_req, res) => res.status(204).end());
   }
@@ -926,7 +1076,9 @@ export function createServer(
       if (!seeAll && entry.key !== requester?.key) continue;
       const hash = hashApiKey(entry.key);
       const consumed = quotaTracker ? quotaTracker.consumed(hash) : null;
-      const dayC = quotaTracker ? quotaTracker.consumed(hash, { window: "day" }) : null;
+      const dayC = quotaTracker
+        ? quotaTracker.consumed(hash, { window: "day" })
+        : null;
       const q = entry.quota;
       const dailyCaps = effectiveDailyCaps(entry);
       const ov = entry["daily-override"];
@@ -984,7 +1136,9 @@ export function createServer(
       if (err instanceof ManagedKeyError) {
         const status =
           err.code === "not_found" ? 404 : err.code === "read_only" ? 409 : 400;
-        res.status(status).json({ error: { message: err.message, type: err.code } });
+        res
+          .status(status)
+          .json({ error: { message: err.message, type: err.code } });
         return;
       }
       console.error("[keys] unexpected error:", err);
@@ -1073,9 +1227,13 @@ export function createServer(
           : {
               date: todayUtc(),
               "daily-cost-usd":
-                cost != null && cost !== "" && Number(cost) > 0 ? Number(cost) : undefined,
+                cost != null && cost !== "" && Number(cost) > 0
+                  ? Number(cost)
+                  : undefined,
               "daily-tokens":
-                tokens != null && tokens !== "" && Number(tokens) > 0 ? Number(tokens) : undefined,
+                tokens != null && tokens !== "" && Number(tokens) > 0
+                  ? Number(tokens)
+                  : undefined,
             };
         res.json(store.setDailyOverride(req.params.id, override));
       } catch (err) {
@@ -1098,110 +1256,141 @@ export function createServer(
   // PATCH  /admin/accounts/:provider/:email — body { disabled: bool } toggles
   // the operator-disabled flag (skip in selection + refresh, but keep file).
   // Both admin-only.
-  app.delete(
-    "/admin/accounts/:provider/:email",
-    requireAdmin,
-    (req, res) => {
-      const provider = registry.get(req.params.provider as ProviderId);
-      if (!provider) {
-        res.status(404).json({ error: { message: `unknown provider ${req.params.provider}` } });
-        return;
-      }
-      const email = decodeURIComponent(req.params.email);
-      const removed = provider.manager.removeAccount(email);
-      if (!removed) {
-        res.status(404).json({ error: { message: `no account ${email} loaded for ${provider.id}` } });
-        return;
-      }
-      res.json({ ok: true, provider: provider.id, email });
-    },
-  );
-
-  app.patch(
-    "/admin/accounts/:provider/:email",
-    requireAdmin,
-    (req, res) => {
-      const provider = registry.get(req.params.provider as ProviderId);
-      if (!provider) {
-        res.status(404).json({ error: { message: `unknown provider ${req.params.provider}` } });
-        return;
-      }
-      const email = decodeURIComponent(req.params.email);
-      const body = (req.body || {}) as {
-        disabled?: unknown;
-        monthlyBudgetUsd?: unknown;
-        tierLabel?: unknown;
-        concurrencyWeight?: unknown;
-      };
-
-      // Budget / tier / weight annotations. Accept number|null / string|null;
-      // undefined (absent) means "leave unchanged".
-      const hasBudget = "monthlyBudgetUsd" in body;
-      const hasTier = "tierLabel" in body;
-      const hasWeight = "concurrencyWeight" in body;
-      if (hasBudget || hasTier || hasWeight) {
-        if (
-          hasBudget &&
-          body.monthlyBudgetUsd !== null &&
-          typeof body.monthlyBudgetUsd !== "number"
-        ) {
-          res.status(400).json({ error: { message: "monthlyBudgetUsd must be a number or null" } });
-          return;
-        }
-        if (hasTier && body.tierLabel !== null && typeof body.tierLabel !== "string") {
-          res.status(400).json({ error: { message: "tierLabel must be a string or null" } });
-          return;
-        }
-        if (
-          hasWeight &&
-          body.concurrencyWeight !== null &&
-          (typeof body.concurrencyWeight !== "number" || body.concurrencyWeight <= 0)
-        ) {
-          res.status(400).json({ error: { message: "concurrencyWeight must be a positive number or null" } });
-          return;
-        }
-        const ok = provider.manager.setBudget(email, {
-          monthlyBudgetUsd: hasBudget
-            ? (body.monthlyBudgetUsd as number | null)
-            : undefined,
-          tierLabel: hasTier ? (body.tierLabel as string | null) : undefined,
-          concurrencyWeight: hasWeight
-            ? (body.concurrencyWeight as number | null)
-            : undefined,
+  app.delete("/admin/accounts/:provider/:email", requireAdmin, (req, res) => {
+    const provider = registry.get(req.params.provider as ProviderId);
+    if (!provider) {
+      res
+        .status(404)
+        .json({
+          error: { message: `unknown provider ${req.params.provider}` },
         });
-        if (!ok) {
-          res.status(404).json({ error: { message: `no account ${email} loaded for ${provider.id}` } });
-          return;
-        }
-      }
-
-      // Disabled toggle (optional — may be combined with budget in one PATCH).
-      let disabled: boolean | undefined;
-      if ("disabled" in body) {
-        if (typeof body.disabled !== "boolean") {
-          res.status(400).json({ error: { message: "disabled must be a boolean" } });
-          return;
-        }
-        const next = provider.manager.setDisabled(email, body.disabled);
-        if (next === null) {
-          res.status(404).json({ error: { message: `no account ${email} loaded for ${provider.id}` } });
-          return;
-        }
-        disabled = next;
-      }
-
-      if (!hasBudget && !hasTier && !hasWeight && disabled === undefined) {
-        res.status(400).json({
-          error: {
-            message:
-              "body must set at least one of { disabled, monthlyBudgetUsd, tierLabel, concurrencyWeight }",
-          },
+      return;
+    }
+    const email = decodeURIComponent(req.params.email);
+    const removed = provider.manager.removeAccount(email);
+    if (!removed) {
+      res
+        .status(404)
+        .json({
+          error: { message: `no account ${email} loaded for ${provider.id}` },
         });
+      return;
+    }
+    res.json({ ok: true, provider: provider.id, email });
+  });
+
+  app.patch("/admin/accounts/:provider/:email", requireAdmin, (req, res) => {
+    const provider = registry.get(req.params.provider as ProviderId);
+    if (!provider) {
+      res
+        .status(404)
+        .json({
+          error: { message: `unknown provider ${req.params.provider}` },
+        });
+      return;
+    }
+    const email = decodeURIComponent(req.params.email);
+    const body = (req.body || {}) as {
+      disabled?: unknown;
+      monthlyBudgetUsd?: unknown;
+      tierLabel?: unknown;
+      concurrencyWeight?: unknown;
+    };
+
+    // Budget / tier / weight annotations. Accept number|null / string|null;
+    // undefined (absent) means "leave unchanged".
+    const hasBudget = "monthlyBudgetUsd" in body;
+    const hasTier = "tierLabel" in body;
+    const hasWeight = "concurrencyWeight" in body;
+    if (hasBudget || hasTier || hasWeight) {
+      if (
+        hasBudget &&
+        body.monthlyBudgetUsd !== null &&
+        typeof body.monthlyBudgetUsd !== "number"
+      ) {
+        res
+          .status(400)
+          .json({
+            error: { message: "monthlyBudgetUsd must be a number or null" },
+          });
         return;
       }
-      res.json({ ok: true, provider: provider.id, email, disabled });
-    },
-  );
+      if (
+        hasTier &&
+        body.tierLabel !== null &&
+        typeof body.tierLabel !== "string"
+      ) {
+        res
+          .status(400)
+          .json({ error: { message: "tierLabel must be a string or null" } });
+        return;
+      }
+      if (
+        hasWeight &&
+        body.concurrencyWeight !== null &&
+        (typeof body.concurrencyWeight !== "number" ||
+          body.concurrencyWeight <= 0)
+      ) {
+        res
+          .status(400)
+          .json({
+            error: {
+              message: "concurrencyWeight must be a positive number or null",
+            },
+          });
+        return;
+      }
+      const ok = provider.manager.setBudget(email, {
+        monthlyBudgetUsd: hasBudget
+          ? (body.monthlyBudgetUsd as number | null)
+          : undefined,
+        tierLabel: hasTier ? (body.tierLabel as string | null) : undefined,
+        concurrencyWeight: hasWeight
+          ? (body.concurrencyWeight as number | null)
+          : undefined,
+      });
+      if (!ok) {
+        res
+          .status(404)
+          .json({
+            error: { message: `no account ${email} loaded for ${provider.id}` },
+          });
+        return;
+      }
+    }
+
+    // Disabled toggle (optional — may be combined with budget in one PATCH).
+    let disabled: boolean | undefined;
+    if ("disabled" in body) {
+      if (typeof body.disabled !== "boolean") {
+        res
+          .status(400)
+          .json({ error: { message: "disabled must be a boolean" } });
+        return;
+      }
+      const next = provider.manager.setDisabled(email, body.disabled);
+      if (next === null) {
+        res
+          .status(404)
+          .json({
+            error: { message: `no account ${email} loaded for ${provider.id}` },
+          });
+        return;
+      }
+      disabled = next;
+    }
+
+    if (!hasBudget && !hasTier && !hasWeight && disabled === undefined) {
+      res.status(400).json({
+        error: {
+          message:
+            "body must set at least one of { disabled, monthlyBudgetUsd, tierLabel, concurrencyWeight }",
+        },
+      });
+      return;
+    }
+    res.json({ ok: true, provider: provider.id, email, disabled });
+  });
 
   // POST /admin/accounts/:provider/:email/refresh — actively renew this one
   // account's OAuth token now (instead of waiting for the auto-refresh loop).
@@ -1214,21 +1403,34 @@ export function createServer(
     async (req, res) => {
       const provider = registry.get(req.params.provider as ProviderId);
       if (!provider) {
-        res.status(404).json({ error: { message: `unknown provider ${req.params.provider}` } });
+        res
+          .status(404)
+          .json({
+            error: { message: `unknown provider ${req.params.provider}` },
+          });
         return;
       }
       const email = decodeURIComponent(req.params.email);
       try {
         const ok = await provider.manager.refreshAccount(email);
         const snapshot =
-          provider.manager.getSnapshots().find((s) => s.email === email) ?? null;
+          provider.manager.getSnapshots().find((s) => s.email === email) ??
+          null;
         if (!snapshot) {
-          res.status(404).json({ error: { message: `no account ${email} loaded for ${provider.id}` } });
+          res
+            .status(404)
+            .json({
+              error: {
+                message: `no account ${email} loaded for ${provider.id}`,
+              },
+            });
           return;
         }
         res.json({ ok, provider: provider.id, email, account: snapshot });
       } catch (err: any) {
-        res.status(500).json({ error: { message: err?.message || String(err) } });
+        res
+          .status(500)
+          .json({ error: { message: err?.message || String(err) } });
       }
     },
   );
@@ -1244,15 +1446,24 @@ export function createServer(
     (req, res) => {
       const provider = registry.get(req.params.provider as ProviderId);
       if (!provider) {
-        res.status(404).json({ error: { message: `unknown provider ${req.params.provider}` } });
+        res
+          .status(404)
+          .json({
+            error: { message: `unknown provider ${req.params.provider}` },
+          });
         return;
       }
       const email = decodeURIComponent(req.params.email);
-      const token = loadAllTokens(resolveAuthDir(config["auth-dir"]), provider.id).find(
-        (t) => t.email === email,
-      );
+      const token = loadAllTokens(
+        resolveAuthDir(config["auth-dir"]),
+        provider.id,
+      ).find((t) => t.email === email);
       if (!token) {
-        res.status(404).json({ error: { message: `no account ${email} loaded for ${provider.id}` } });
+        res
+          .status(404)
+          .json({
+            error: { message: `no account ${email} loaded for ${provider.id}` },
+          });
         return;
       }
       res.json({
@@ -1277,7 +1488,14 @@ export function createServer(
     else if (body.account) bundles = [body.account];
     else if (body.accessToken || body.refreshToken) bundles = [body];
     else {
-      res.status(400).json({ error: { message: "no account(s) in body — expected { account } or { accounts: [...] }" } });
+      res
+        .status(400)
+        .json({
+          error: {
+            message:
+              "no account(s) in body — expected { account } or { accounts: [...] }",
+          },
+        });
       return;
     }
 
@@ -1287,13 +1505,19 @@ export function createServer(
       try {
         const t = raw as Partial<TokenData>;
         if (!t || typeof t.email !== "string" || !t.refreshToken) {
-          errors.push({ email: t?.email, error: "missing email or refreshToken" });
+          errors.push({
+            email: t?.email,
+            error: "missing email or refreshToken",
+          });
           continue;
         }
         const providerId = (t.provider ?? "anthropic") as ProviderId;
         const provider = registry.get(providerId);
         if (!provider) {
-          errors.push({ email: t.email, error: `unknown provider ${providerId}` });
+          errors.push({
+            email: t.email,
+            error: `unknown provider ${providerId}`,
+          });
           continue;
         }
         const token: TokenData = {
@@ -1390,22 +1614,28 @@ export function createServer(
     }
   });
 
-  app.post("/admin/oauth/:provider/exchange", requireAdmin, async (req, res) => {
-    try {
-      const { state, callbackUrl } = (req.body || {}) as {
-        state?: string;
-        callbackUrl?: string;
-      };
-      const result = await exchangeOAuth(
-        registry,
-        state ?? "",
-        callbackUrl ?? "",
-      );
-      res.json(result);
-    } catch (err: any) {
-      res.status(400).json({ error: { message: err?.message || String(err) } });
-    }
-  });
+  app.post(
+    "/admin/oauth/:provider/exchange",
+    requireAdmin,
+    async (req, res) => {
+      try {
+        const { state, callbackUrl } = (req.body || {}) as {
+          state?: string;
+          callbackUrl?: string;
+        };
+        const result = await exchangeOAuth(
+          registry,
+          state ?? "",
+          callbackUrl ?? "",
+        );
+        res.json(result);
+      } catch (err: any) {
+        res
+          .status(400)
+          .json({ error: { message: err?.message || String(err) } });
+      }
+    },
+  );
 
   // GET /admin/ui/whoami — used by the dashboard SPA right after login to
   // verify the entered admin key, and to display the logged-in identity in
@@ -1414,9 +1644,11 @@ export function createServer(
   // seed < "auth2api". Internal identifiers stay "auth2api" regardless.
   const getBrand = (): string => {
     const persisted = settings?.get<string>("brand");
-    return (typeof persisted === "string" && persisted.trim()) ||
+    return (
+      (typeof persisted === "string" && persisted.trim()) ||
       (config.brand && config.brand.trim()) ||
-      "auth2api";
+      "auth2api"
+    );
   };
 
   // Public (no-auth) brand endpoint so the login page + tab title can render it
@@ -1429,7 +1661,8 @@ export function createServer(
   // override (reverts to yaml seed / default).
   if (settings) {
     app.put("/admin/brand", requireAdmin, (req, res) => {
-      const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+      const name =
+        typeof req.body?.name === "string" ? req.body.name.trim() : "";
       settings.set("brand", name);
       res.json({ name: getBrand() });
     });
@@ -1447,7 +1680,11 @@ export function createServer(
       owner: entry.owner ?? null,
       admin: entry.admin,
       role: entry.role ?? (entry.admin ? "admin" : "member"),
-      source: keyStore?.list().find((k) => k.id === hashApiKey(entry.key).slice(0, 12))?.source ?? "config",
+      source:
+        keyStore
+          ?.list()
+          .find((k) => k.id === hashApiKey(entry.key).slice(0, 12))?.source ??
+        "config",
       enabled: entry.enabled,
       // Public base URL for generated access docs (falls back client-side to
       // window.location.origin when unset).
@@ -1504,7 +1741,7 @@ export function createServer(
   app.get("/v1/models", async (_req, res) => {
     const created = Math.floor(Date.now() / 1000);
     const providers = registry.withAccounts();
-    const lists = await Promise.all(providers.map((p) => p.listModels()));
+    const lists = await Promise.all(providers.map((p) => p.listModels(config)));
     const data = lists.flatMap((models) =>
       models.map((m) => ({
         id: m.id,
@@ -1533,7 +1770,10 @@ export function createServer(
     enforceKeyRateLimit,
     createResponsesHandler(config, registry),
   );
-  const responsesCompactHandler = createResponsesCompactHandler(config, registry);
+  const responsesCompactHandler = createResponsesCompactHandler(
+    config,
+    registry,
+  );
   app.post(
     "/v1/responses/compact",
     requireModelAccess,
@@ -1543,6 +1783,7 @@ export function createServer(
   );
   app.post(
     "/codex/responses/compact",
+    requireApiKey,
     requireModelAccess,
     requireQuota,
     enforceKeyRateLimit,
@@ -1550,6 +1791,7 @@ export function createServer(
   );
   app.post(
     "/backend-api/codex/responses/compact",
+    requireApiKey,
     requireModelAccess,
     requireQuota,
     enforceKeyRateLimit,

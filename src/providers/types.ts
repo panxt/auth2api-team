@@ -69,7 +69,7 @@ export interface Provider {
     pkce: PKCECodes,
   ): Promise<TokenData>;
   /** Models advertised on /v1/models when this provider has accounts. */
-  listModels(): Promise<Array<{ id: string; owned_by: string }>>;
+  listModels(config?: Config): Promise<Array<{ id: string; owned_by: string }>>;
   /** Anthropic-Messages → upstream call. */
   callMessages(opts: UpstreamCallContext): Promise<Response>;
   /** Optional — undefined for codex (no count_tokens analog). */

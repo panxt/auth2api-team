@@ -13,13 +13,13 @@ const DEFAULT_ORIGINATOR = "codex_cli_rs";
 // older versions with "requires a newer version of Codex". Matches latest
 // @openai/codex on npm at the time of writing. Override via
 // `cloaking.codex.cli-version` if upstream's minimum changes again.
-const DEFAULT_CLI_VERSION = "0.125.0";
+export const DEFAULT_CODEX_CLI_VERSION = "0.138.0";
 
 function buildUserAgent(config: Config): string {
   const codex = config.cloaking.codex || {};
   if (codex["user-agent"]) return codex["user-agent"];
   const originator = codex.originator || DEFAULT_ORIGINATOR;
-  const version = codex["cli-version"] || DEFAULT_CLI_VERSION;
+  const version = codex["cli-version"] || DEFAULT_CODEX_CLI_VERSION;
   const platform =
     process.platform === "darwin"
       ? "macos"
@@ -36,10 +36,10 @@ export function __buildCodexHeaders(
   stream: boolean,
   config: Config,
 ): Record<string, string> {
-  return buildHeaders(account, stream, config);
+  return buildCodexBaseHeaders(account, stream, config);
 }
 
-function buildHeaders(
+export function buildCodexBaseHeaders(
   account: AvailableAccount,
   stream: boolean,
   config: Config,
@@ -57,7 +57,7 @@ function buildHeaders(
     // The current ChatGPT backend doesn't enforce it, but matching the
     // official client makes us less brittle to future Cloudflare/upstream
     // rules. Reuses cli-version so it stays in sync with the User-Agent.
-    version: codex["cli-version"] || DEFAULT_CLI_VERSION,
+    version: codex["cli-version"] || DEFAULT_CODEX_CLI_VERSION,
   };
   if (account.chatgptAccountId) {
     headers["ChatGPT-Account-ID"] = account.chatgptAccountId;
@@ -129,6 +129,7 @@ type CodexResponsesPath = typeof RESPONSES_PATH | typeof RESPONSES_COMPACT_PATH;
 
 export interface CallCodexResponsesOptions {
   body?: any;
+  seedBody?: any;
   request: Request;
   account: AvailableAccount;
   config: Config;
@@ -165,9 +166,9 @@ export async function callCodexResponses(
   const timeoutMs = stream
     ? config.timeouts["stream-messages-ms"]
     : config.timeouts["messages-ms"];
-  const headers = buildHeaders(account, stream, config);
+  const headers = buildCodexBaseHeaders(account, stream, config);
   if (path === RESPONSES_COMPACT_PATH) {
-    const seed = compactSessionSeed(body, request);
+    const seed = compactSessionSeed(options.seedBody ?? body, request);
     headers.session_id = seed;
     headers.conversation_id = seed;
   }

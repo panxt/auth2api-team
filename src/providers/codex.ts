@@ -48,7 +48,7 @@ export function buildCodexProvider(authDir: string): Provider {
       );
       return { ...token, provider: "codex" };
     },
-    listModels: () => listCodexModels(manager),
+    listModels: (config) => listCodexModels(manager, config),
     callMessages: (opts: UpstreamCallContext) =>
       callCodexResponses({
         body: opts.body,

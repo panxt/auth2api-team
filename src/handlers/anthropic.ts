@@ -14,6 +14,7 @@ import {
   SseEvent,
 } from "../upstream/streaming-failover";
 import { extractUsageFromSSE } from "../upstream/streaming";
+import { estimateMessagesInputTokens } from "../upstream/token-estimate";
 
 function tryParseJson(s: string): any {
   if (!s) return undefined;
@@ -395,7 +396,7 @@ export function createCountTokensHandler(
         // Report a large deterministic estimate instead so 1M-context Codex
         // models are not artificially capped by the compatibility shim.
         if (provider.id === "codex") {
-          resp.json({ input_tokens: 0 });
+          resp.json({ input_tokens: estimateMessagesInputTokens(body) });
           return;
         }
         resp.status(501).json({

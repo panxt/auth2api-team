@@ -1070,7 +1070,7 @@ test("POST /admin/reload requires the API key", async (t) => {
   assert.equal(wrongAuth.status, 403);
 });
 
-test("codex count_tokens returns compatibility estimate instead of 501", async (t) => {
+test("codex count_tokens returns a conservative local estimate", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   saveToken(authDir, {
     ...makeToken({
@@ -1092,12 +1092,20 @@ test("codex count_tokens returns compatibility estimate instead of 501", async (
     headers: { Authorization: "Bearer test-key" },
     body: {
       model: "gpt-5.5",
-      messages: [{ role: "user", content: "hello" }],
+      system: "You are concise.",
+      messages: [
+        { role: "user", content: "hello world" },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "hi" }],
+        },
+      ],
     },
   });
 
   assert.equal(resp.status, 200);
-  assert.equal(resp.body.input_tokens, 0);
+  assert.equal(typeof resp.body.input_tokens, "number");
+  assert.ok(resp.body.input_tokens > 0);
 });
 
 test("count_tokens with empty body returns upstream client error, not network error", async (t) => {
@@ -1326,6 +1334,139 @@ test("codex responses compact route proxies to compact upstream path", async (t)
 
   assert.equal(resp.status, 200);
   assert.deepEqual(resp.body, { usage: { input_tokens: 2, output_tokens: 3 } });
+});
+
+test("codex responses compact aliases require API key", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+  const restoreFetch = withMockedFetch(async () => {
+    throw new Error("upstream must not be called without API key");
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  for (const route of [
+    "/codex/responses/compact",
+    "/backend-api/codex/responses/compact",
+  ]) {
+    const resp = await requestJson({
+      server,
+      method: "POST",
+      path: route,
+      body: { model: "gpt-5.5", input: "hi" },
+    });
+    assert.equal(resp.status, 401, route);
+    assert.equal(resp.body.error.message, "Missing API key");
+  }
+});
+
+test("codex responses compact route uses prompt_cache_key as seed fallback", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+  const restoreFetch = withMockedFetch(async (_input, init) => {
+    const headers = init?.headers as Record<string, string>;
+    assert.equal(headers.session_id, "cache-seed-1");
+    assert.equal(headers.conversation_id, "cache-seed-1");
+    const upstreamBody = JSON.parse(String(init?.body));
+    assert.equal(upstreamBody.prompt_cache_key, undefined);
+    return new Response(
+      JSON.stringify({ usage: { input_tokens: 1, output_tokens: 1 } }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/responses/compact",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      input: "hi",
+      prompt_cache_key: "cache-seed-1",
+    },
+  });
+
+  assert.equal(resp.status, 200);
+});
+
+test("codex responses compact streaming records completed usage", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+  const restoreFetch = withMockedFetch(async () => {
+    const body =
+      'event: response.output_text.delta\ndata: {"delta":"ok"}\n\n' +
+      'event: response.completed\ndata: {"response":{"status":"completed","usage":{"input_tokens":7,"output_tokens":3}}}\n\n';
+    return new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const response = await requestText({
+    server,
+    method: "POST",
+    path: "/v1/responses/compact",
+    headers: { Authorization: "Bearer test-key" },
+    body: { model: "gpt-5.5", input: "hi", stream: true },
+  });
+
+  assert.equal(response.status, 200);
+  assert.match(response.body, /event: response\.completed/);
+
+  const adminResp = await requestJson({
+    server,
+    method: "GET",
+    path: "/admin/accounts",
+    headers: { Authorization: "Bearer test-key" },
+  });
+  const account = adminResp.body.providers.codex.accounts[0];
+  assert.equal(account.totalSuccesses, 1);
+  assert.equal(account.totalInputTokens, 7);
+  assert.equal(account.totalOutputTokens, 3);
+  assert.equal(account.totalCacheCreationInputTokens, 0);
+  assert.equal(account.totalCacheReadInputTokens, 0);
+  assert.equal(account.totalReasoningOutputTokens, 0);
 });
 
 test("responses compact rejects non-codex models", async (t) => {
