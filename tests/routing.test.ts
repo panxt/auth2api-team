@@ -121,3 +121,70 @@ test("capacitySummary: critical when all accounts cooled", () => {
   assert.equal(cap.level, "critical");
   assert.ok(cap.soonestResetAt !== null);
 });
+
+
+test("window cap: 5h threshold skips account and reset restores it", () => {
+  const { m, emails } = mgr([1, 1]);
+  m.setRouting(resolveRoutingConfig({ strategy: "weighted-least-inflight" }));
+  m.setBudget(emails[0], { max5hUtilizationPct: 80 });
+  const reset = Math.floor(Date.now() / 1000) + 3600;
+  m.recordRateLimit(emails[0], new Headers({
+    "anthropic-ratelimit-unified-5h-utilization": "0.8",
+    "anthropic-ratelimit-unified-5h-reset": String(reset),
+  }));
+  assert.equal(m.getNextAccount().account?.token.email, emails[1]);
+  const capped = m.getSnapshots().find((a) => a.email === emails[0])!;
+  assert.equal(capped.available, false);
+  assert.equal(capped.max5hUtilizationPct, 80);
+  assert.equal(capped.windowCapUntil, reset * 1000);
+  m.recordRateLimit(emails[0], new Headers({
+    "anthropic-ratelimit-unified-5h-utilization": "0.8",
+    "anthropic-ratelimit-unified-5h-reset": String(reset - 7200),
+  }));
+  assert.equal(m.getSnapshots().find((a) => a.email === emails[0])!.available, true);
+  assert.equal(m.getNextAccount().account?.token.email, emails[0]);
+});
+
+test("window cap: 7d is independent and missing quota headers allow traffic", () => {
+  const { m, emails } = mgr([1, 1]);
+  m.setRouting(resolveRoutingConfig({ strategy: "weighted-least-inflight" }));
+  m.setBudget(emails[0], { max5hUtilizationPct: 50, max7dUtilizationPct: 90 });
+  // No headers yet: fail open, rather than trapping the account forever.
+  assert.equal(m.getSnapshots()[0].available, true);
+  m.recordRateLimit(emails[0], new Headers({
+    "anthropic-ratelimit-unified-5h-utilization": "0.4",
+    "anthropic-ratelimit-unified-5h-reset": String(Math.floor(Date.now() / 1000) + 3600),
+    "anthropic-ratelimit-unified-7d-utilization": "0.9",
+    "anthropic-ratelimit-unified-7d-reset": String(Math.floor(Date.now() / 1000) + 7200),
+  }));
+  assert.equal(m.getNextAccount().account?.token.email, emails[1]);
+  assert.equal(m.getSnapshots()[0].max7dUtilizationPct, 90);
+});
+
+test("window cap: all capped returns rate limit until the later window reset", () => {
+  const { m, emails } = mgr([1]);
+  m.setBudget(emails[0], { max5hUtilizationPct: 50, max7dUtilizationPct: 50 });
+  const now = Math.floor(Date.now() / 1000);
+  m.recordRateLimit(emails[0], new Headers({
+    "anthropic-ratelimit-unified-5h-utilization": "0.6",
+    "anthropic-ratelimit-unified-5h-reset": String(now + 3600),
+    "anthropic-ratelimit-unified-7d-utilization": "0.6",
+    "anthropic-ratelimit-unified-7d-reset": String(now + 7200),
+  }));
+  const r = m.getNextAccount();
+  assert.equal(r.account, null);
+  assert.equal(r.failureKind, "rate_limit");
+  assert.ok(r.retryAfterMs! > 7100_000 && r.retryAfterMs! <= 7200_000);
+});
+
+test("window cap: settings survive token-file reload", () => {
+  const { m, emails, dir } = mgr([1]);
+  m.setBudget(emails[0], { max5hUtilizationPct: 75, max7dUtilizationPct: 90 });
+  const reloaded = new AccountManager(dir, {
+    provider: "anthropic", refresh: async () => ({}) as any,
+  });
+  reloaded.load();
+  const snap = reloaded.getSnapshots()[0];
+  assert.equal(snap.max5hUtilizationPct, 75);
+  assert.equal(snap.max7dUtilizationPct, 90);
+});

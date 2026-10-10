@@ -292,6 +292,40 @@ test("accepts x-api-key auth and serves models/admin state", async (t) => {
   assert.equal(adminResp.body.providers.codex.account_count, 0);
 });
 
+test("admin account PATCH sets, validates and clears window utilization caps", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const server = await startApp(makeConfig(authDir), manager);
+  t.after(async () => {
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+  const accountPath = "/admin/accounts/anthropic/test%40example.com";
+  const headers = { "x-api-key": "test-key" };
+  const set = await requestJson({
+    server, method: "PATCH", path: accountPath, headers,
+    body: { max5hUtilizationPct: 75, max7dUtilizationPct: 90 },
+  });
+  assert.equal(set.status, 200);
+  assert.equal(manager.getSnapshots()[0].max5hUtilizationPct, 75);
+  assert.equal(manager.getSnapshots()[0].max7dUtilizationPct, 90);
+
+  const invalid = await requestJson({
+    server, method: "PATCH", path: accountPath, headers,
+    body: { max5hUtilizationPct: 0 },
+  });
+  assert.equal(invalid.status, 400);
+  assert.equal(manager.getSnapshots()[0].max5hUtilizationPct, 75);
+
+  const clear = await requestJson({
+    server, method: "PATCH", path: accountPath, headers,
+    body: { max5hUtilizationPct: null },
+  });
+  assert.equal(clear.status, 200);
+  assert.equal(manager.getSnapshots()[0].max5hUtilizationPct, null);
+  assert.equal(manager.getSnapshots()[0].max7dUtilizationPct, 90);
+});
+
 test("proxies a non-stream chat completion through Claude OAuth token", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   const manager = makeManager(authDir, [makeToken()]);

@@ -611,15 +611,21 @@ export async function proxyStreamingWithFailover(
         if (sc) sc.category = result.failureKind ? "upstream" : "service";
         // No more healthy accounts. If we've already committed, the client
         // has a partial stream — just end. Otherwise return a structured
-        // 503-style error to the client. We can't do that easily here
+        // error to the client. We can't do that easily here
         // because flushHeaders hasn't been called; write a JSON body.
         if (!resp.headersSent) {
-          resp.status(503).json({
+          if (result.failureKind === "rate_limit" && result.retryAfterMs) {
+            resp.setHeader("Retry-After", Math.ceil(result.retryAfterMs / 1000).toString());
+          }
+          resp.status(result.failureKind === "rate_limit" ? 429 : 503).json({
             error: {
               message: lastFailoverDetail
                 ? `All upstream accounts exhausted; last error: ${lastFailoverDetail}`
-                : "No upstream account available",
-              type: "no_account_for_provider",
+                : result.failureKind === "rate_limit"
+                  ? "All upstream accounts are rate limited or reached a configured window cap"
+                  : "No upstream account available",
+              type: result.failureKind === "rate_limit"
+                ? "rate_limit_error" : "no_account_for_provider",
               provider: manager.provider,
             },
           });

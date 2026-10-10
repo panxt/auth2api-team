@@ -191,6 +191,11 @@ export function AccountQuotaPanel({ account }: { account: AccountSnapshot }) {
                 </span>
               </div>
               <UtilizationBar pct={u5h.pct} />
+              {account.max5hUtilizationPct != null && (
+                <div className="text-xs text-ink-500 mt-1">
+                  自设上限 {account.max5hUtilizationPct}%
+                </div>
+              )}
             </>
           ) : (
             <FallbackWindow account={account} />
@@ -231,6 +236,11 @@ export function AccountQuotaPanel({ account }: { account: AccountSnapshot }) {
               </span>
             </div>
             <UtilizationBar pct={u7d.pct} />
+            {account.max7dUtilizationPct != null && (
+              <div className="text-xs text-ink-500 mt-1">
+                自设上限 {account.max7dUtilizationPct}%
+              </div>
+            )}
           </>
         ) : (
           <div className="text-xs text-ink-500">

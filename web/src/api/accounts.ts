@@ -37,6 +37,9 @@ export interface AccountSnapshot {
   monthlyBudgetUsd: number | null;
   tierLabel: string | null;
   concurrencyWeight: number;
+  max5hUtilizationPct: number | null;
+  max7dUtilizationPct: number | null;
+  windowCapUntil: number | null;
   inFlight: number;
   peakInFlight: number;
 }
@@ -154,6 +157,8 @@ export const setAccountBudget = (
     monthlyBudgetUsd?: number | null;
     tierLabel?: string | null;
     concurrencyWeight?: number | null;
+    max5hUtilizationPct?: number | null;
+    max7dUtilizationPct?: number | null;
   },
 ) =>
   patch<{ ok: true; provider: string; email: string }>(

@@ -486,6 +486,35 @@ test("codex AccountManager.recordRateLimit populates quotaPool 7d, leaves 5h nul
   }
 });
 
+test("codex weekly utilization cap blocks at threshold and resumes after reset", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-codex-cap-"));
+  try {
+    const m = new AccountManager(dir, {
+      provider: "codex",
+      refresh: async () => ({}) as any,
+    });
+    m.addAccount({
+      accessToken: "tok", refreshToken: "r", email: "c@x.com",
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      accountUuid: "u", provider: "codex",
+    });
+    m.setBudget("c@x.com", { max7dUtilizationPct: 60 });
+    const reset = Math.floor(Date.now() / 1000) + 3600;
+    const headers = (resetAt: number) => new Headers({
+      "x-codex-primary-window-minutes": "10080",
+      "x-codex-primary-used-percent": "65",
+      "x-codex-primary-reset-at": String(resetAt),
+    });
+    m.recordRateLimit("c@x.com", headers(reset));
+    assert.equal(m.getNextAccount().account, null);
+    assert.equal(m.getSnapshots()[0].windowCapUntil, reset * 1000);
+    m.recordRateLimit("c@x.com", headers(reset - 7200));
+    assert.equal(m.getNextAccount().account?.token.email, "c@x.com");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("registry.withAccounts filters empty providers", () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
   try {

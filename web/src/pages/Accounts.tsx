@@ -95,6 +95,13 @@ function cooldownStatus(acct: AccountSnapshot): {
       detail: acct.lastError || undefined,
     };
   }
+  if (acct.windowCapUntil != null && acct.windowCapUntil > now) {
+    return {
+      badge: "窗口上限",
+      className: "badge-warn",
+      detail: `预计 ${new Date(acct.windowCapUntil).toLocaleString()} 恢复`,
+    };
+  }
   if (!acct.available) {
     return { badge: "unavailable", className: "badge-err" };
   }
@@ -265,12 +272,16 @@ export function Accounts() {
     monthlyBudgetUsd: number | null,
     tierLabel: string | null,
     concurrencyWeight: number | null,
+    max5hUtilizationPct: number | null,
+    max7dUtilizationPct: number | null,
   ) {
     try {
       await setAccountBudget(provider, email, {
         monthlyBudgetUsd,
         tierLabel,
         concurrencyWeight,
+        max5hUtilizationPct,
+        max7dUtilizationPct,
       });
       setBudgetEdit(null);
       setTimeout(() => load(false), 300);
@@ -540,9 +551,9 @@ export function Accounts() {
                           <button
                             className="btn-ghost text-xs"
                             onClick={() => setBudgetEdit({ provider: providerId, acct: a })}
-                            title="设置月度预算 / 档位标签(展示用)"
+                            title="设置月度预算、负载权重和窗口用量上限"
                           >
-                            预算
+                            额度设置
                           </button>
                           <button
                             className="btn-ghost text-xs text-rose-400 hover:text-rose-300"
@@ -687,8 +698,12 @@ function BudgetModal({
     monthlyBudgetUsd: number | null,
     tierLabel: string | null,
     concurrencyWeight: number | null,
+    max5hUtilizationPct: number | null,
+    max7dUtilizationPct: number | null,
   ) => void;
 }) {
+  const [cap5h, setCap5h] = useState("");
+  const [cap7d, setCap7d] = useState("");
   const [budget, setBudget] = useState("");
   const [tier, setTier] = useState("");
   const [weight, setWeight] = useState("");
@@ -701,6 +716,8 @@ function BudgetModal({
           : "",
       );
       setTier(edit.acct.tierLabel ?? "");
+      setCap5h(edit.acct.max5hUtilizationPct == null ? "" : String(edit.acct.max5hUtilizationPct));
+      setCap7d(edit.acct.max7dUtilizationPct == null ? "" : String(edit.acct.max7dUtilizationPct));
       setWeight(
         edit.acct.concurrencyWeight && edit.acct.concurrencyWeight !== 1
           ? String(edit.acct.concurrencyWeight)
@@ -712,7 +729,7 @@ function BudgetModal({
   if (!edit) return null;
 
   return (
-    <Modal open={!!edit} onClose={onClose} title={`预算 / 档位 / 权重 — ${edit.acct.email}`}>
+    <Modal open={!!edit} onClose={onClose} title={"账号额度设置 — " + edit.acct.email}>
       <div className="space-y-4">
         <div>
           <label className="block text-sm text-ink-400 mb-1.5">
@@ -759,6 +776,22 @@ function BudgetModal({
             权重越大,高并发时分到越多请求(weighted-least-inflight 策略下)。
           </p>
         </div>
+        <div className="grid grid-cols-2 gap-3">
+          {([
+            ["5 小时窗口上限 (%)", cap5h, setCap5h],
+            ["7 天窗口上限 (%)", cap7d, setCap7d],
+          ] as const).map(([label, value, setter]) => (
+            <div key={label}>
+              <label className="block text-sm text-ink-400 mb-1.5">{label}</label>
+              <input className="input" type="number" min="1" max="100" step="1"
+                placeholder="留空 = 不限制" value={value}
+                onChange={(e) => setter(e.target.value)} />
+            </div>
+          ))}
+        </div>
+        <p className="text-xs text-ink-500">
+          达到上限后暂停分配新请求,窗口重置后自动恢复。仅在上游返回用量和重置时间时生效。
+        </p>
         <div className="flex justify-end gap-2 pt-2">
           <button className="btn-secondary" onClick={onClose}>
             取消
@@ -768,12 +801,23 @@ function BudgetModal({
             onClick={() => {
               const b = budget.trim() === "" ? null : Number(budget);
               const w = weight.trim() === "" ? null : Number(weight);
+              const parseCap = (value: string): number | null =>
+                value.trim() === "" ? null : Number(value);
+              const c5 = parseCap(cap5h);
+              const c7 = parseCap(cap7d);
+              if ([c5, c7].some((v) => v !== null &&
+                (!Number.isFinite(v) || v < 1 || v > 100))) {
+                alert("窗口上限必须为 1–100 的百分比,或留空");
+                return;
+              }
               onSave(
                 edit.provider,
                 edit.acct.email,
                 b != null && !isNaN(b) && b > 0 ? b : null,
                 tier.trim() === "" ? null : tier.trim(),
                 w != null && !isNaN(w) && w > 0 ? w : null,
+                c5,
+                c7,
               );
             }}
           >

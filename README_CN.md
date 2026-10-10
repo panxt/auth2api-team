@@ -325,6 +325,12 @@ v2.0 起内置 Web Dashboard,做日常运维(查用量、增删改 API key、加
 | `/ui/users` | API key CRUD、配额、当月用量。config.yaml 来源的 key 标灰只读 |
 | `/ui/accounts` | 上游账号管理 — 见下 |
 
+### 每账号窗口用量上限
+
+管理员可在账号页的“额度设置”弹窗，为每个上游账号分别设置 5 小时与 7 天窗口的已用百分比上限（1–100，留空表示不限）。达到任一上限后，账号停止接收新请求；对应窗口重置后自动恢复。账号快照会显示设置值与当前是否达到上限。上游未提供窗口用量或重置时间时，不会永久封锁账号。
+
+也可用 PATCH /admin/accounts/:provider/:email 设置 max5hUtilizationPct 和 max7dUtilizationPct，传 null 清除。月度预算仍只展示，不参与限流。
+
 ### 上游账号管理(本节是 v2.0.0 新增)
 
 `/ui/accounts` 每行账号末尾有四个操作:

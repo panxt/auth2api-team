@@ -1295,6 +1295,8 @@ export function createServer(
       monthlyBudgetUsd?: unknown;
       tierLabel?: unknown;
       concurrencyWeight?: unknown;
+      max5hUtilizationPct?: unknown;
+      max7dUtilizationPct?: unknown;
     };
 
     // Budget / tier / weight annotations. Accept number|null / string|null;
@@ -1302,7 +1304,9 @@ export function createServer(
     const hasBudget = "monthlyBudgetUsd" in body;
     const hasTier = "tierLabel" in body;
     const hasWeight = "concurrencyWeight" in body;
-    if (hasBudget || hasTier || hasWeight) {
+    const has5hCap = "max5hUtilizationPct" in body;
+    const has7dCap = "max7dUtilizationPct" in body;
+    if (hasBudget || hasTier || hasWeight || has5hCap || has7dCap) {
       if (
         hasBudget &&
         body.monthlyBudgetUsd !== null &&
@@ -1340,6 +1344,17 @@ export function createServer(
           });
         return;
       }
+      for (const [name, present] of [
+        ["max5hUtilizationPct", has5hCap],
+        ["max7dUtilizationPct", has7dCap],
+      ] as const) {
+        const value = body[name];
+        if (present && value !== null &&
+          (typeof value !== "number" || !Number.isFinite(value) || value < 1 || value > 100)) {
+          res.status(400).json({ error: { message: `${name} must be a number from 1 to 100 or null` } });
+          return;
+        }
+      }
       const ok = provider.manager.setBudget(email, {
         monthlyBudgetUsd: hasBudget
           ? (body.monthlyBudgetUsd as number | null)
@@ -1348,6 +1363,10 @@ export function createServer(
         concurrencyWeight: hasWeight
           ? (body.concurrencyWeight as number | null)
           : undefined,
+        max5hUtilizationPct: has5hCap
+          ? (body.max5hUtilizationPct as number | null) : undefined,
+        max7dUtilizationPct: has7dCap
+          ? (body.max7dUtilizationPct as number | null) : undefined,
       });
       if (!ok) {
         res
@@ -1380,11 +1399,11 @@ export function createServer(
       disabled = next;
     }
 
-    if (!hasBudget && !hasTier && !hasWeight && disabled === undefined) {
+    if (!hasBudget && !hasTier && !hasWeight && !has5hCap && !has7dCap && disabled === undefined) {
       res.status(400).json({
         error: {
           message:
-            "body must set at least one of { disabled, monthlyBudgetUsd, tierLabel, concurrencyWeight }",
+            "body must set at least one of { disabled, monthlyBudgetUsd, tierLabel, concurrencyWeight, max5hUtilizationPct, max7dUtilizationPct }",
         },
       });
       return;
@@ -1537,6 +1556,8 @@ export function createServer(
           monthlyBudgetUsd: t.monthlyBudgetUsd,
           tierLabel: t.tierLabel,
           concurrencyWeight: t.concurrencyWeight,
+          max5hUtilizationPct: t.max5hUtilizationPct,
+          max7dUtilizationPct: t.max7dUtilizationPct,
         };
         saveToken(resolveAuthDir(config["auth-dir"]), token);
         provider.manager.addAccount(token);

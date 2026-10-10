@@ -41,6 +41,9 @@ export interface TokenData {
    *  concurrent traffic under weighted-least-inflight scheduling. Lets a
    *  bigger-tier account ($125) carry more than a smaller one ($25). */
   concurrencyWeight?: number;
+  /** Per-account upstream window utilization cap (1..100%). Unset = unlimited. */
+  max5hUtilizationPct?: number;
+  max7dUtilizationPct?: number;
 }
 
 export interface TokenStorage {
@@ -62,4 +65,6 @@ export interface TokenStorage {
   monthly_budget_usd?: number;
   tier_label?: string;
   concurrency_weight?: number;
+  max_5h_utilization_pct?: number;
+  max_7d_utilization_pct?: number;
 }

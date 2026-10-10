@@ -252,6 +252,10 @@ export interface AccountSnapshot {
   tierLabel: string | null;
   /** Load-balancing weight (default 1). */
   concurrencyWeight: number;
+  max5hUtilizationPct: number | null;
+  max7dUtilizationPct: number | null;
+  /** Time when all active configured window caps reset, in milliseconds. */
+  windowCapUntil: number | null;
   /** Live in-flight client requests on this account. */
   inFlight: number;
   /** Peak in-flight observed. */
@@ -512,6 +516,8 @@ export class AccountManager {
       // logged in again, so they want to use it. Clear the flag both in
       // memory and on the new token we're about to persist.
       token.disabled = false;
+      token.max5hUtilizationPct ??= existing.token.max5hUtilizationPct;
+      token.max7dUtilizationPct ??= existing.token.max7dUtilizationPct;
       existing.disabled = false;
       existing.token = token;
       existing.cooldownUntil = 0;
@@ -556,11 +562,55 @@ export class AccountManager {
   /** Parse 5h-window utilization (0..1) from captured rate-limit headers, or
    *  null if unknown. */
   private util5h(acct: AccountState): number | null {
-    return this.parseUtil(acct.rateLimit?.fields?.["unified-5h-utilization"]);
+    const fields = acct.rateLimit?.fields;
+    const resetValue = fields?.["unified-5h-reset"];
+    if (resetValue) {
+      const numeric = Number(resetValue);
+      const resetMs = Number.isFinite(numeric)
+        ? numeric < 10_000_000_000 ? numeric * 1000 : numeric
+        : Date.parse(resetValue);
+      if (Number.isFinite(resetMs) && resetMs <= Date.now()) return 0;
+    }
+    const normalized = fields?.["unified-5h-window-minutes"] != null ||
+      fields?.["unified-7d-window-minutes"] != null;
+    return this.parseUtil(fields?.["unified-5h-utilization"], normalized);
+  }
+
+  /** Returns the time when all active operator-set window caps can lift. Missing
+   * utilization or reset data cannot safely block an account indefinitely. */
+  private windowCapUntil(acct: AccountState, now: number): number | null {
+    const fields = acct.rateLimit?.fields;
+    if (!fields) return null;
+    const codexNormalized =
+      fields["unified-5h-window-minutes"] != null ||
+      fields["unified-7d-window-minutes"] != null;
+    let latest: number | null = null;
+    for (const [slot, cap] of [
+      ["5h", acct.token.max5hUtilizationPct],
+      ["7d", acct.token.max7dUtilizationPct],
+    ] as const) {
+      if (cap == null) continue;
+      const used = this.parseUtil(fields[`unified-${slot}-utilization`], codexNormalized);
+      const resetValue = fields[`unified-${slot}-reset`];
+      const rawReset = Number(resetValue);
+      const parsedReset = resetValue && !Number.isFinite(rawReset)
+        ? Date.parse(resetValue) : NaN;
+      const reset = Number.isFinite(rawReset) && rawReset > 0
+        ? rawReset < 10_000_000_000 ? rawReset * 1000 : rawReset
+        : Number.isFinite(parsedReset)
+          ? parsedReset
+          : slot === "5h" && acct.windowStartedAt
+            ? new Date(acct.windowStartedAt).getTime() + RATE_LIMIT_WINDOW_MS
+            : NaN;
+      if (used != null && used * 100 >= cap && reset > now) {
+        latest = latest == null ? reset : Math.max(latest, reset);
+      }
+    }
+    return latest;
   }
 
   private isUsable(acct: AccountState, now: number): boolean {
-    if (acct.disabled || acct.cooldownUntil > now) return false;
+    if (acct.disabled || acct.cooldownUntil > now || this.windowCapUntil(acct, now) !== null) return false;
     const cap = this.routing["per-account-max-inflight"];
     if (cap > 0 && acct.inFlight >= cap) return false;
     return true;
@@ -665,12 +715,16 @@ export class AccountManager {
       return { account: null, failureKind: "auth", retryAfterMs: null };
     }
     const firstAcct = this.accounts.get(nonDisabled[0])!;
-    let bestKind: AccountFailureKind = firstAcct.lastFailureKind ?? "network";
-    let bestRemainingMs = Math.max(0, firstAcct.cooldownUntil - now);
+    const firstCap = this.windowCapUntil(firstAcct, now);
+    let bestKind: AccountFailureKind = firstCap !== null
+      ? "rate_limit" : firstAcct.lastFailureKind ?? "network";
+    let bestRemainingMs = Math.max(0, Math.max(firstAcct.cooldownUntil, firstCap ?? 0) - now);
     for (const email of nonDisabled.slice(1)) {
       const acct = this.accounts.get(email)!;
-      const kind = acct.lastFailureKind ?? "network";
-      const remainingMs = Math.max(0, acct.cooldownUntil - now);
+      const capUntil = this.windowCapUntil(acct, now);
+      const kind: AccountFailureKind = capUntil !== null
+        ? "rate_limit" : acct.lastFailureKind ?? "network";
+      const remainingMs = Math.max(0, Math.max(acct.cooldownUntil, capUntil ?? 0) - now);
       if (
         FAILURE_PRIORITY[kind] < FAILURE_PRIORITY[bestKind] ||
         (FAILURE_PRIORITY[kind] === FAILURE_PRIORITY[bestKind] &&
@@ -713,8 +767,9 @@ export class AccountManager {
     for (const acct of this.accounts.values()) {
       inFlight += acct.inFlight;
       if (this.isUsable(acct, now)) usable++;
-      else if (!acct.disabled && acct.cooldownUntil > now) {
-        soonest = Math.min(soonest, acct.cooldownUntil);
+      else if (!acct.disabled) {
+        const unblockAt = Math.max(acct.cooldownUntil, this.windowCapUntil(acct, now) ?? 0);
+        if (unblockAt > now) soonest = Math.min(soonest, unblockAt);
       }
       const u = this.util5h(acct);
       if (u != null) maxUtil = maxUtil == null ? u : Math.max(maxUtil, u);
@@ -1008,7 +1063,7 @@ export class AccountManager {
     const acct = this.accounts.get(email);
     if (!acct) return null;
     if (acct.disabled) return null;
-    if (acct.cooldownUntil > Date.now()) return null;
+    if (!this.isUsable(acct, Date.now())) return null;
     return buildAvailableAccount(this.authDir, email, acct.token, this.provider);
   }
 
@@ -1060,6 +1115,8 @@ export class AccountManager {
       monthlyBudgetUsd?: number | null;
       tierLabel?: string | null;
       concurrencyWeight?: number | null;
+      max5hUtilizationPct?: number | null;
+      max7dUtilizationPct?: number | null;
     },
   ): boolean {
     const acct = this.accounts.get(email);
@@ -1074,6 +1131,14 @@ export class AccountManager {
     if (opts.concurrencyWeight !== undefined) {
       acct.token.concurrencyWeight =
         opts.concurrencyWeight === null ? undefined : opts.concurrencyWeight;
+    }
+    if (opts.max5hUtilizationPct !== undefined) {
+      acct.token.max5hUtilizationPct =
+        opts.max5hUtilizationPct === null ? undefined : opts.max5hUtilizationPct;
+    }
+    if (opts.max7dUtilizationPct !== undefined) {
+      acct.token.max7dUtilizationPct =
+        opts.max7dUtilizationPct === null ? undefined : opts.max7dUtilizationPct;
     }
     saveToken(this.authDir, acct.token);
     return true;
@@ -1122,7 +1187,7 @@ export class AccountManager {
       }
       snapshots.push({
         email: acct.token.email,
-        available: acct.cooldownUntil <= now,
+        available: acct.cooldownUntil <= now && this.windowCapUntil(acct, now) === null,
         cooldownUntil: acct.cooldownUntil,
         failureCount: acct.failureCount,
         lastError: acct.lastError,
@@ -1148,6 +1213,9 @@ export class AccountManager {
         monthlyBudgetUsd: acct.token.monthlyBudgetUsd ?? null,
         tierLabel: acct.token.tierLabel ?? null,
         concurrencyWeight: this.weightOf(acct),
+        max5hUtilizationPct: acct.token.max5hUtilizationPct ?? null,
+        max7dUtilizationPct: acct.token.max7dUtilizationPct ?? null,
+        windowCapUntil: this.windowCapUntil(acct, now),
         inFlight: acct.inFlight,
         peakInFlight: acct.peakInFlight,
       });

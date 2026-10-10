@@ -54,6 +54,8 @@ export function tokenToStorage(data: TokenData): TokenStorage {
     monthly_budget_usd: data.monthlyBudgetUsd,
     tier_label: data.tierLabel,
     concurrency_weight: data.concurrencyWeight,
+    max_5h_utilization_pct: data.max5hUtilizationPct,
+    max_7d_utilization_pct: data.max7dUtilizationPct,
   };
 }
 
@@ -78,6 +80,8 @@ export function storageToToken(storage: TokenStorage): TokenData {
     monthlyBudgetUsd: storage.monthly_budget_usd,
     tierLabel: storage.tier_label,
     concurrencyWeight: storage.concurrency_weight,
+    max5hUtilizationPct: storage.max_5h_utilization_pct,
+    max7dUtilizationPct: storage.max_7d_utilization_pct,
   };
 }
 
